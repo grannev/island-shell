@@ -7,7 +7,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Toggle,
     Show,
@@ -16,26 +16,30 @@ pub enum Command {
     Undodge,
     DodgeToggle,
     Status,
+    /// `set <key> <value>`: change a tunable live (see island::Config)
+    Set(String, String),
     Quit,
 }
 
 impl Command {
     pub fn parse(s: &str) -> Option<Command> {
-        Some(match s.trim() {
-            "toggle" => Command::Toggle,
-            "show" => Command::Show,
-            "hide" => Command::Hide,
-            "dodge" => Command::Dodge,
-            "undodge" => Command::Undodge,
-            "dodge-toggle" => Command::DodgeToggle,
-            "status" => Command::Status,
-            "quit" => Command::Quit,
+        let words: Vec<&str> = s.split_whitespace().collect();
+        Some(match words.as_slice() {
+            ["toggle"] => Command::Toggle,
+            ["show"] => Command::Show,
+            ["hide"] => Command::Hide,
+            ["dodge"] => Command::Dodge,
+            ["undodge"] => Command::Undodge,
+            ["dodge-toggle"] => Command::DodgeToggle,
+            ["status"] => Command::Status,
+            ["set", key, value] => Command::Set(key.to_string(), value.to_string()),
+            ["quit"] => Command::Quit,
             _ => return None,
         })
     }
 }
 
-pub const USAGE: &str = "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|status|quit]";
+pub const USAGE: &str = "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|status|set <key> <value>|quit]";
 
 pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));

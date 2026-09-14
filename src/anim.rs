@@ -1,10 +1,11 @@
-//! Time-based interpolation: every visible motion of the island is a `Tween`
-//! sampled at the compositor's frame rate, not a fixed table of frames.
+//! Time-based interpolation: every visible motion of the island is sampled
+//! at the moment the frame will actually be on screen (see `FrameClock` in
+//! app.rs), not at a fixed table of frames. Times are seconds on the
+//! compositor's presentation clock.
 
-use std::time::{Duration, Instant};
+pub type Time = f64;
 
-/// Minimum-jerk profile 10t³ − 15t⁴ + 6t⁵: starts from rest, accelerates,
-/// decelerates and stops dead — no overshoot (the reference island's curve).
+/// Minimum-jerk profile 10t³ − 15t⁴ + 6t⁵ from rest to rest.
 pub fn min_jerk(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     t * t * t * (10.0 + t * (-15.0 + 6.0 * t))
@@ -25,98 +26,156 @@ pub fn inv_min_jerk(y: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Ease {
-    MinJerk,
-    /// CSS `cubic-bezier(x1, y1, x2, y2)`; y outside 0..1 overshoots.
-    Bezier(f64, f64, f64, f64),
+/// Position, velocity and acceleration of a mover at one instant.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct State {
+    pub x: f64,
+    pub v: f64,
+    pub a: f64,
 }
 
-impl Ease {
-    /// CSS `ease`.
-    pub const EASE: Ease = Ease::Bezier(0.25, 0.1, 0.25, 1.0);
-
-    pub fn apply(self, t: f64) -> f64 {
-        match self {
-            Ease::MinJerk => min_jerk(t),
-            Ease::Bezier(x1, y1, x2, y2) => cubic_bezier(x1, y1, x2, y2, t.clamp(0.0, 1.0)),
-        }
-    }
-}
-
-fn bezier_axis(p1: f64, p2: f64, s: f64) -> f64 {
-    // cubic with P0 = 0, P3 = 1
-    let u = 1.0 - s;
-    3.0 * u * u * s * p1 + 3.0 * u * s * s * p2 + s * s * s
-}
-
-/// y(x) of a CSS cubic-bezier timing function: solve x(s) = x for the
-/// parameter s by bisection, then evaluate y(s).
-fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    if x >= 1.0 {
-        return 1.0;
-    }
-    let (mut lo, mut hi) = (0.0, 1.0);
-    for _ in 0..24 {
-        let mid = 0.5 * (lo + hi);
-        if bezier_axis(x1, x2, mid) < x {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    bezier_axis(y1, y2, 0.5 * (lo + hi))
-}
-
-/// A scalar moving from `from` to `to` over `dur` with an easing curve.
-/// Retargeting mid-flight restarts from the current value, so a toggle
-/// pressed during a move turns the island around where it is.
+/// A minimum-jerk move that may start in motion: the quintic through the
+/// current position, velocity and acceleration that arrives at the target
+/// at rest. From rest it is exactly 10t³ − 15t⁴ + 6t⁵ (the reference
+/// island's profile); a toggle pressed mid-flight turns the island around
+/// without any jolt (position, speed and acceleration all stay continuous).
 #[derive(Clone, Debug)]
-pub struct Tween {
-    from: f64,
-    to: f64,
-    start: Instant,
-    dur: Duration,
-    ease: Ease,
+pub struct Quintic {
+    x0: f64,
+    v0: f64, // per unit of τ = t / dur
+    a0: f64, // per unit of τ²
+    c3: f64,
+    c4: f64,
+    c5: f64,
+    target: f64,
+    start: Time,
+    dur: f64,
 }
 
-impl Tween {
-    pub fn fixed(value: f64, dur: Duration, ease: Ease) -> Self {
-        Tween { from: value, to: value, start: Instant::now() - dur, dur, ease }
+impl Quintic {
+    pub fn at_rest(value: f64, dur: f64) -> Self {
+        let mut q = Quintic { x0: value, v0: 0.0, a0: 0.0, c3: 0.0, c4: 0.0, c5: 0.0, target: value, start: 0.0, dur };
+        q.retarget(State { x: value, v: 0.0, a: 0.0 }, value, 0.0);
+        q
     }
 
-    /// Progress of the current move, 0..1 in time (before easing).
-    pub fn progress(&self, now: Instant) -> f64 {
-        if self.dur.is_zero() {
-            return 1.0;
-        }
-        let t = now.saturating_duration_since(self.start).as_secs_f64() / self.dur.as_secs_f64();
-        t.clamp(0.0, 1.0)
-    }
-
-    pub fn value(&self, now: Instant) -> f64 {
-        let k = self.ease.apply(self.progress(now));
-        self.from + (self.to - self.from) * k
-    }
-
-    pub fn is_moving(&self, now: Instant) -> bool {
-        self.from != self.to && self.progress(now) < 1.0
-    }
-
-    /// Start moving towards `to` from wherever the value is now; a no-op if
-    /// that is already the target.
-    pub fn set(&mut self, to: f64, now: Instant) {
-        if self.to == to {
-            return;
-        }
-        self.from = self.value(now);
-        self.to = to;
+    fn retarget(&mut self, from: State, target: f64, now: Time) {
+        let t = self.dur;
+        let d = target - from.x;
+        let v = from.v * t;
+        let a = from.a * t * t;
+        self.x0 = from.x;
+        self.v0 = v;
+        self.a0 = a;
+        self.c3 = 10.0 * d - 6.0 * v - 1.5 * a;
+        self.c4 = -15.0 * d + 8.0 * v + 1.5 * a;
+        self.c5 = 6.0 * d - 3.0 * v - 0.5 * a;
+        self.target = target;
         self.start = now;
     }
 
+    /// Progress in time, 0..1.
+    pub fn progress(&self, now: Time) -> f64 {
+        if self.dur <= 0.0 {
+            return 1.0;
+        }
+        ((now - self.start) / self.dur).clamp(0.0, 1.0)
+    }
+
+    pub fn state(&self, now: Time) -> State {
+        let s = self.progress(now);
+        if s >= 1.0 {
+            return State { x: self.target, v: 0.0, a: 0.0 };
+        }
+        let (c3, c4, c5) = (self.c3, self.c4, self.c5);
+        let x = self.x0 + s * (self.v0 + s * (0.5 * self.a0 + s * (c3 + s * (c4 + s * c5))));
+        let dv = self.v0 + s * (self.a0 + s * (3.0 * c3 + s * (4.0 * c4 + s * 5.0 * c5)));
+        let da = self.a0 + s * (6.0 * c3 + s * (12.0 * c4 + s * 20.0 * c5));
+        State { x, v: dv / self.dur, a: da / (self.dur * self.dur) }
+    }
+
+    pub fn value(&self, now: Time) -> f64 {
+        self.state(now).x
+    }
+
+    pub fn is_moving(&self, now: Time) -> bool {
+        self.progress(now) < 1.0
+    }
+
+    /// Start moving towards `to` from the current state of motion; a no-op
+    /// if that is already the target.
+    pub fn set(&mut self, to: f64, now: Time) {
+        if self.target == to {
+            return;
+        }
+        let from = self.state(now);
+        self.retarget(from, to, now);
+    }
+}
+
+/// A damped spring (SwiftUI's `response` / `dampingFraction`): the natural
+/// motion for anything that follows input — a pointer entering and leaving
+/// the box at its edge retargets the spring, never restarts it.
+#[derive(Clone, Debug)]
+pub struct Spring {
+    omega: f64, // undamped angular frequency
+    zeta: f64,  // damping ratio, < 1 (underdamped) overshoots a little
+    x0: f64,
+    v0: f64,
+    target: f64,
+    start: Time,
+}
+
+impl Spring {
+    pub fn new(value: f64, response: f64, damping: f64) -> Self {
+        Spring { omega: 2.0 * std::f64::consts::PI / response, zeta: damping, x0: value, v0: 0.0, target: value, start: 0.0 }
+    }
+
+    pub fn state(&self, now: Time) -> State {
+        let t = (now - self.start).max(0.0);
+        let (w, z) = (self.omega, self.zeta);
+        let dx = self.x0 - self.target;
+        let decay = (-z * w * t).exp();
+        if z < 1.0 {
+            let wd = w * (1.0 - z * z).sqrt();
+            let a = dx;
+            let b = (self.v0 + z * w * dx) / wd;
+            let (s, c) = (wd * t).sin_cos();
+            let x = decay * (a * c + b * s);
+            let v = decay * ((b * wd - z * w * a) * c - (a * wd + z * w * b) * s);
+            let acc = -2.0 * z * w * v - w * w * x;
+            State { x: self.target + x, v, a: acc }
+        } else {
+            // critically damped
+            let a = dx;
+            let b = self.v0 + w * dx;
+            let x = decay * (a + b * t);
+            let v = decay * (b - w * (a + b * t));
+            let acc = -2.0 * w * v - w * w * x;
+            State { x: self.target + x, v, a: acc }
+        }
+    }
+
+    pub fn value(&self, now: Time) -> f64 {
+        self.state(now).x
+    }
+
+    /// Settled within a thousandth of the unit range.
+    pub fn is_moving(&self, now: Time) -> bool {
+        let s = self.state(now);
+        (s.x - self.target).abs() > 1e-3 || s.v.abs() > 1e-2
+    }
+
+    pub fn set(&mut self, to: f64, now: Time) {
+        if self.target == to {
+            return;
+        }
+        let s = self.state(now);
+        self.x0 = s.x;
+        self.v0 = s.v;
+        self.target = to;
+        self.start = now;
+    }
 }
 
 #[cfg(test)]
@@ -128,20 +187,41 @@ mod tests {
         assert_eq!(min_jerk(0.0), 0.0);
         assert_eq!(min_jerk(1.0), 1.0);
         assert!((min_jerk(0.5) - 0.5).abs() < 1e-9);
+        assert!((inv_min_jerk(min_jerk(0.3)) - 0.3).abs() < 1e-6);
     }
 
     #[test]
-    fn bezier_is_identity_for_linear() {
+    fn quintic_from_rest_is_min_jerk() {
+        let mut q = Quintic::at_rest(0.0, 0.25);
+        q.set(1.0, 10.0);
         for i in 0..=10 {
-            let x = i as f64 / 10.0;
-            assert!((cubic_bezier(0.0, 0.0, 1.0, 1.0, x) - x).abs() < 1e-6);
+            let s = i as f64 / 10.0;
+            assert!((q.value(10.0 + s * 0.25) - min_jerk(s)).abs() < 1e-9);
         }
+        assert!(!q.is_moving(10.3));
     }
 
     #[test]
-    fn hover_curve_overshoots() {
-        let e = Ease::Bezier(0.2, 0.9, 0.3, 1.25);
-        let peak = (0..100).map(|i| e.apply(i as f64 / 100.0)).fold(0.0, f64::max);
-        assert!(peak > 1.0 && peak < 1.2);
+    fn quintic_reversal_is_continuous() {
+        let mut q = Quintic::at_rest(0.0, 0.25);
+        q.set(1.0, 0.0);
+        let before = q.state(0.1);
+        q.set(0.0, 0.1);
+        let after = q.state(0.1);
+        assert!((before.x - after.x).abs() < 1e-9);
+        assert!((before.v - after.v).abs() < 1e-9);
+        assert!((before.a - after.a).abs() < 1e-6);
+        let end = q.state(0.35);
+        assert!((end.x - 0.0).abs() < 1e-9 && end.v.abs() < 1e-9);
+    }
+
+    #[test]
+    fn spring_settles_with_small_overshoot() {
+        let mut s = Spring::new(0.0, 0.4, 0.6);
+        s.set(1.0, 0.0);
+        let peak = (0..200).map(|i| s.value(i as f64 * 0.005)).fold(0.0, f64::max);
+        assert!(peak > 1.02 && peak < 1.15, "peak {peak}");
+        assert!(!s.is_moving(3.0));
+        assert!((s.value(3.0) - 1.0).abs() < 1e-3);
     }
 }

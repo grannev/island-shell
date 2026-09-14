@@ -1,14 +1,17 @@
 //! The Wayland side: one layer-shell surface on the overlay layer, wl_shm
 //! buffers drawn with cairo at the output's fractional scale, frame
-//! callbacks driving the animations, pointer hover, and the event loop
-//! sources (control socket, sway IPC, the clock timer).
+//! callbacks driving the animations at the predicted presentation time,
+//! pointer hover, and the event loop sources (control socket, sway IPC, the
+//! clock timer).
 
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::time::Duration;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_registry,
     output::{OutputHandler, OutputState},
+    presentation_time::{PresentTime, PresentationTimeHandler, PresentationTimeState},
     reexports::{
         calloop::{
             EventLoop,
@@ -18,7 +21,8 @@ use smithay_client_toolkit::{
         },
         calloop_wayland_source::WaylandSource,
         client::{
-            Connection, Dispatch, QueueHandle,
+            Connection, Dispatch, Proxy, QueueHandle, WEnum,
+            backend::ObjectId,
             globals::{GlobalList, registry_queue_init},
             protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
         },
@@ -27,6 +31,7 @@ use smithay_client_toolkit::{
                 wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
                 wp_fractional_scale_v1::{self, WpFractionalScaleV1},
             },
+            presentation_time::client::wp_presentation_feedback::{self, WpPresentationFeedback},
             viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         },
     },
@@ -46,14 +51,114 @@ use smithay_client_toolkit::{
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 
+use crate::anim::Time;
 use crate::ctl::{Command, Server};
-use crate::island::{BOX_H, BoxRect, FILLET, Island, Renderer};
+use crate::island::{BOX_H, Config, FILLET, Frame, Island, Rect, Renderer};
 use crate::sway;
 
 /// Logical size of the (mostly transparent) surface: wide enough for the
-/// dodge and the spread, tall enough for the box and its fillets.
+/// dodge and the spread, tall enough for the box, its fillets and the
+/// liquid stretch.
 const SURFACE_W: u32 = 980;
-const SURFACE_H: u32 = (BOX_H + FILLET) as u32 + 2;
+const SURFACE_H: u32 = (BOX_H + FILLET) as u32 + 10;
+
+/// Animation time base: the compositor's presentation clock and, from its
+/// feedback, a prediction of when the frame being drawn will be shown.
+struct FrameClock {
+    clk_id: u32,
+    /// display refresh period, s
+    refresh: f64,
+    last_present: Option<Time>,
+    /// how many periods after the next vblank our commits actually land
+    /// (learned: the compositor renders one frame ahead)
+    pipeline: i32,
+    errors: VecDeque<i32>,
+    /// predicted presentation time of every commit awaiting feedback
+    pending: VecDeque<(ObjectId, Time)>,
+    /// ISLAND_DEBUG=1: report the prediction error of every frame
+    debug: bool,
+}
+
+impl FrameClock {
+    const MARGIN: f64 = 0.002;
+
+    fn new() -> Self {
+        FrameClock {
+            clk_id: 1,
+            refresh: 1.0 / 60.0,
+            last_present: None,
+            pipeline: 1, // sway renders one frame ahead; corrected if not
+            errors: VecDeque::new(),
+            pending: VecDeque::new(),
+            debug: std::env::var_os("ISLAND_DEBUG").is_some(),
+        }
+    }
+
+    fn now(&self) -> Time {
+        unsafe extern "C" {
+            fn clock_gettime(clk: i32, ts: *mut [i64; 2]) -> i32;
+        }
+        let mut ts = [0i64; 2];
+        unsafe {
+            clock_gettime(self.clk_id as i32, &mut ts);
+        }
+        ts[0] as f64 + ts[1] as f64 * 1e-9
+    }
+
+    /// When will a frame committed right now be on screen? `steady`: we are
+    /// inside the frame-callback cadence, where the compositor is one frame
+    /// ahead (`pipeline`); a frame that wakes it from idle is shown sooner.
+    fn predict(&self, steady: bool) -> Time {
+        let now = self.now();
+        match self.last_present {
+            Some(lp) => {
+                let n = ((now + Self::MARGIN - lp) / self.refresh).ceil().max(1.0);
+                let pipeline = if steady { self.pipeline } else { 0 };
+                lp + (n + pipeline as f64) * self.refresh
+            }
+            None => now + self.refresh,
+        }
+    }
+
+    fn committed(&mut self, feedback: &WpPresentationFeedback, predicted: Time, steady: bool) {
+        // only steady frames teach the pipeline depth
+        self.pending.push_back((feedback.id(), if steady { predicted } else { f64::NAN }));
+        while self.pending.len() > 8 {
+            self.pending.pop_front();
+        }
+    }
+
+    fn presented(&mut self, feedback: &WpPresentationFeedback, actual: Time, refresh_ns: u32) {
+        if refresh_ns > 0 {
+            self.refresh = refresh_ns as f64 * 1e-9;
+        }
+        self.last_present = Some(actual);
+        if let Some(i) = self.pending.iter().position(|(id, _)| *id == feedback.id()) {
+            let (_, predicted) = self.pending.remove(i).unwrap();
+            if predicted.is_nan() {
+                return;
+            }
+            let err = ((actual - predicted) / self.refresh).round() as i32;
+            if self.debug {
+                eprintln!("frame: predicted {:+.2} ms off (pipeline {})", (actual - predicted) * 1e3, self.pipeline);
+            }
+            self.errors.push_back(err);
+            if self.errors.len() > 3 {
+                self.errors.pop_front();
+            }
+            // a consistent miss means the pipeline is deeper (or shallower)
+            // than assumed: adjust once, then watch again
+            if self.errors.len() == 3 && err != 0 && self.errors.iter().all(|e| *e == err) {
+                self.pipeline = (self.pipeline + err).clamp(0, 3);
+                self.errors.clear();
+            }
+        }
+    }
+
+    fn discarded(&mut self, feedback: &WpPresentationFeedback) {
+        self.pending.retain(|(id, _)| *id != feedback.id());
+    }
+}
 
 pub struct App {
     registry_state: RegistryState,
@@ -61,6 +166,7 @@ pub struct App {
     output_state: OutputState,
     compositor: CompositorState,
     shm: Shm,
+    presentation: PresentationTimeState,
     pool: SlotPool,
     layer: LayerSurface,
     viewport: WpViewport,
@@ -74,8 +180,9 @@ pub struct App {
     configured: bool,
     frame_pending: bool,
     pointer: Option<wl_pointer::WlPointer>,
-    input_rect: Option<BoxRect>,
+    last_frame: Option<Frame>,
     canvas: Option<cairo::ImageSurface>,
+    clock: FrameClock,
 
     pub island: Island,
     renderer: Renderer,
@@ -91,6 +198,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let compositor = CompositorState::bind(&globals, &qh)?;
     let layer_shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
+    let presentation = PresentationTimeState::bind(&globals, &qh);
     let viewporter: WpViewporter = bind_global(&globals, &qh, 1)?;
     let fractional_mgr: Option<WpFractionalScaleManagerV1> = bind_global(&globals, &qh, 1).ok();
     if fractional_mgr.is_none() {
@@ -116,7 +224,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn.clone(), event_queue).insert(loop_handle.clone())?;
 
-    let mut island = Island::new();
+    let mut island = Island::new(load_config());
     island.update_clock();
 
     let sway_query = match sway::Query::connect() {
@@ -133,6 +241,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         output_state: OutputState::new(&globals, &qh),
         compositor,
         shm,
+        presentation,
         pool,
         layer,
         viewport,
@@ -144,8 +253,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         configured: false,
         frame_pending: false,
         pointer: None,
-        input_rect: None,
+        last_frame: None,
         canvas: None,
+        clock: FrameClock::new(),
         island,
         renderer: Renderer::new(1.0),
         sway_query,
@@ -213,9 +323,36 @@ fn until_next_minute() -> Duration {
     Duration::from_secs(60 - t.sec as u64) + Duration::from_millis(20)
 }
 
+fn config_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
+    base.join("island-shell").join("config")
+}
+
+/// `key = value` lines, `#` comments (see island::Config).
+fn load_config() -> Config {
+    let mut config = Config::default();
+    let Ok(text) = std::fs::read_to_string(config_path()) else { return config };
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            eprintln!("island-shell: config: cannot parse {line:?}");
+            continue;
+        };
+        if let Err(e) = config.set(key.trim(), value.trim()) {
+            eprintln!("island-shell: config: {e}");
+        }
+    }
+    config
+}
+
 fn bind_global<I>(globals: &GlobalList, qh: &QueueHandle<App>, version: u32) -> Result<I, Box<dyn std::error::Error>>
 where
-    I: smithay_client_toolkit::reexports::client::Proxy + 'static,
+    I: Proxy + 'static,
     App: Dispatch<I, ()>,
 {
     Ok(globals.bind::<I, App, ()>(qh, version..=version, ())?)
@@ -223,7 +360,7 @@ where
 
 impl App {
     fn handle_command(&mut self, cmd: Command) -> String {
-        let now = Instant::now();
+        let now = self.frame_time();
         match cmd {
             Command::Toggle => self.island.hidden.user = !self.island.hidden.user,
             Command::Show => self.island.hidden.user = false,
@@ -233,13 +370,21 @@ impl App {
             Command::DodgeToggle => self.island.dodged = !self.island.dodged,
             Command::Status => {
                 return format!(
-                    "{} {} scale={} {}x{}",
+                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} {}",
                     if self.island.is_hidden() { "hidden" } else { "shown" },
                     if self.island.dodged { "dodged" } else { "centred" },
                     self.scale,
                     self.width,
-                    self.height
+                    self.height,
+                    self.clock.refresh * 1e3,
+                    self.clock.pipeline,
+                    self.island.config.describe()
                 );
+            }
+            Command::Set(key, value) => {
+                if let Err(e) = self.island.config.set(&key, &value) {
+                    return format!("error: {e}");
+                }
             }
             Command::Quit => {
                 self.exit = true;
@@ -257,7 +402,8 @@ impl App {
             Ok(fs) => {
                 if fs != self.island.hidden.fullscreen {
                     self.island.hidden.fullscreen = fs;
-                    self.island.sync(Instant::now());
+                    let now = self.frame_time();
+                    self.island.sync(now);
                     self.redraw();
                 }
             }
@@ -268,15 +414,21 @@ impl App {
         }
     }
 
+    /// Presentation time of the next frame we will draw.
+    fn frame_time(&self) -> Time {
+        self.clock.predict(self.frame_pending)
+    }
+
     /// Present a new frame now unless one is already on its way.
     pub fn redraw(&mut self) {
         if self.configured && !self.frame_pending {
-            self.draw();
+            self.draw(false);
         }
     }
 
-    fn draw(&mut self) {
-        let now = Instant::now();
+    /// Draw and commit a frame; `steady` when called from the frame callback.
+    fn draw(&mut self, steady: bool) {
+        let t = self.clock.predict(steady);
         let bw = (self.width as f64 * self.scale).round() as i32;
         let bh = (self.height as f64 * self.scale).round() as i32;
         let stride = bw * 4;
@@ -288,14 +440,14 @@ impl App {
                 self.canvas.as_ref().unwrap()
             }
         };
-        let rect = {
+        let frame = {
             let cr = cairo::Context::new(canvas).expect("cairo context");
             cr.set_operator(cairo::Operator::Source);
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
             cr.scale(self.scale, self.scale);
-            self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, now)
+            self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t)
         };
         canvas.flush();
 
@@ -313,23 +465,51 @@ impl App {
             })
             .expect("cairo surface data");
 
-        // input only over the box (the rest of the surface is empty air)
-        if rect != self.input_rect {
+        let surface = self.layer.wl_surface();
+        // input only over the box (the rest of the surface is empty air),
+        // opaque where the box is solid, damage where anything changed
+        if self.last_frame.map(|f| f.bounds) != Some(frame.bounds) {
             let region = Region::new(&self.compositor).expect("wl_region");
-            if let Some(r) = rect {
+            if let Some(r) = frame.bounds {
                 region.add(r.x.floor() as i32, r.y.floor() as i32, r.w.ceil() as i32 + 1, r.h.ceil() as i32 + 1);
             }
             self.layer.set_input_region(Some(region.wl_region()));
-            self.input_rect = rect;
         }
+        if self.last_frame.map(|f| f.opaque) != Some(frame.opaque) {
+            let region = Region::new(&self.compositor).expect("wl_region");
+            for r in frame.opaque.iter().flatten() {
+                // inward rounding: only whole covered pixels are opaque
+                let (x0, y0) = (r.x.ceil() as i32, r.y.ceil() as i32);
+                let (x1, y1) = ((r.x + r.w).floor() as i32, (r.y + r.h).floor() as i32);
+                if x1 > x0 && y1 > y0 {
+                    region.add(x0, y0, x1 - x0, y1 - y0);
+                }
+            }
+            self.layer.set_opaque_region(Some(region.wl_region()));
+        }
+        let damage = match self.last_frame {
+            None => Some(Rect { x: 0.0, y: 0.0, w: self.width as f64, h: self.height as f64 }),
+            Some(prev) => match (prev.bounds, frame.bounds) {
+                (Some(a), Some(b)) => Some(a.union(b)),
+                (a, b) => a.or(b),
+            },
+        };
+        if let Some(d) = damage {
+            let s = self.scale;
+            let (x0, y0) = (((d.x - 1.0) * s).floor().max(0.0) as i32, ((d.y - 1.0) * s).floor().max(0.0) as i32);
+            let (x1, y1) = (((d.x + d.w + 1.0) * s).ceil().min(bw as f64) as i32, ((d.y + d.h + 1.0) * s).ceil().min(bh as f64) as i32);
+            surface.damage_buffer(x0, y0, x1 - x0, y1 - y0);
+        }
+        self.last_frame = Some(frame);
 
-        let surface = self.layer.wl_surface();
-        surface.damage_buffer(0, 0, bw, bh);
         self.viewport.set_source(0.0, 0.0, bw as f64, bh as f64);
         self.viewport.set_destination(self.width as i32, self.height as i32);
-        if self.island.is_animating(now) {
+        if self.island.is_animating(t) {
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             self.frame_pending = true;
+        }
+        if let Ok(feedback) = self.presentation.feedback(surface, &self.qh) {
+            self.clock.committed(&feedback, t, steady);
         }
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
@@ -341,6 +521,7 @@ impl App {
         }
         self.scale = scale;
         self.renderer = Renderer::new(scale);
+        self.last_frame = None;
         self.redraw();
     }
 }
@@ -352,10 +533,38 @@ impl CompositorHandler for App {
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _time: u32) {
         self.frame_pending = false;
-        self.draw();
+        self.draw(true);
     }
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+}
+
+impl PresentationTimeHandler for App {
+    fn presentation_time_state(&mut self) -> &mut PresentationTimeState {
+        &mut self.presentation
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn presented(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        feedback: &WpPresentationFeedback,
+        _: &wl_surface::WlSurface,
+        _: Vec<wl_output::WlOutput>,
+        time: PresentTime,
+        refresh: u32,
+        _seq: u64,
+        _flags: WEnum<wp_presentation_feedback::Kind>,
+    ) {
+        self.clock.clk_id = time.clk_id;
+        let actual = time.tv_sec as f64 + time.tv_nsec as f64 * 1e-9;
+        self.clock.presented(feedback, actual, refresh);
+    }
+
+    fn discarded(&mut self, _: &Connection, _: &QueueHandle<Self>, feedback: &WpPresentationFeedback, _: &wl_surface::WlSurface) {
+        self.clock.discarded(feedback);
+    }
 }
 
 impl OutputHandler for App {
@@ -381,9 +590,10 @@ impl LayerShellHandler for App {
             self.height = h;
         }
         self.configured = true;
+        self.last_frame = None;
         // draw straight away (the first frame, or a new size); a pending
         // frame callback will draw again, which is harmless
-        self.draw();
+        self.draw(false);
     }
 }
 
@@ -427,7 +637,8 @@ impl PointerHandler for App {
             }
         }
         if changed {
-            self.island.sync(Instant::now());
+            let now = self.frame_time();
+            self.island.sync(now);
             self.redraw();
         }
     }
@@ -440,15 +651,15 @@ impl ShmHandler for App {
 }
 
 impl Dispatch<WpViewporter, ()> for App {
-    fn event(_: &mut Self, _: &WpViewporter, _: <WpViewporter as smithay_client_toolkit::reexports::client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(_: &mut Self, _: &WpViewporter, _: <WpViewporter as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<WpViewport, ()> for App {
-    fn event(_: &mut Self, _: &WpViewport, _: <WpViewport as smithay_client_toolkit::reexports::client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(_: &mut Self, _: &WpViewport, _: <WpViewport as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<WpFractionalScaleManagerV1, ()> for App {
-    fn event(_: &mut Self, _: &WpFractionalScaleManagerV1, _: <WpFractionalScaleManagerV1 as smithay_client_toolkit::reexports::client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(_: &mut Self, _: &WpFractionalScaleManagerV1, _: <WpFractionalScaleManagerV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<WpFractionalScaleV1, ()> for App {

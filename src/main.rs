@@ -17,7 +17,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        [cmd] if ctl::Command::parse(cmd).is_some() => match ctl::send(cmd) {
+        words if !words.is_empty() && ctl::Command::parse(&words.join(" ")).is_some() => match ctl::send(&words.join(" ")) {
             Ok(reply) => {
                 if reply != "ok" {
                     println!("{reply}");

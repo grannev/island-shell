@@ -17,6 +17,21 @@ hover, fullscreen auto-hide and the ⋯ drawer dodge over sway IPC. Idle
 CPU is zero: frames are only drawn while something moves, the clock wakes
 once a minute.
 
+Motion quality:
+- every frame is sampled at the instant it will be on screen: the
+  presentation clock (`wp_presentation`) gives the vblank cadence and the
+  feedback teaches how many frames ahead the compositor runs
+  (`ISLAND_DEBUG=1` prints the residual error per frame — ±0.01 ms);
+- moves are minimum-jerk quintics through the current position, velocity
+  and acceleration, so a toggle mid-flight turns the island around without
+  a jolt; hover is a damped spring (response 0.4 s, damping 0.6);
+- glyphs keep fractional positions while anything moves and snap to whole
+  output pixels at rest (and so do the box edges);
+- corners with continuous curvature (`smoothing`, Figma-style; limited by
+  the room on the shorter edge, so subtle on the 32 px box, full on the
+  pill and the panel) and a velocity-dependent stretch (`liquid`);
+- damage and opaque regions are reported per frame.
+
 ## Build and install
 
     scripts/install.sh        # cargo build --release → ~/.local/bin/island-shell
@@ -31,7 +46,16 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
 
     island-shell toggle | show | hide          # mod+i
     island-shell dodge | undodge | dodge-toggle # the ⋯ drawer
+    island-shell set <key> <value>              # tune live (see below)
     island-shell status | quit
+
+### Configuration
+
+`~/.config/island-shell/config`, `key = value` lines (`#` comments), read at
+start; `island-shell set key value` changes a value in the running island:
+
+    smoothing = 0.6   # corner smoothing 0..1 (0 = circular arcs)
+    liquid = 1        # velocity stretch, 0 = rigid
 
 ### Switching between the old and the new island
 
