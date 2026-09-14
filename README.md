@@ -16,8 +16,12 @@ changes as out-then-in, a four-band equaliser fed by cava (30 fps, eased
 per frame, sinking flat on pause), silent playback (paused / muted) folding
 away after 15 s, click / right / middle / scroll = play-pause / next /
 previous; Touch ID (fprintd on the system bus) — the box morphs into the
-92 px pill with the breathing fingerprint, green tick / red cross, and
-back; the song folds away for the drawer and the pill.
+92 px pill with a vector fingerprint whose ridges breathe in a ripple; on
+a result the ridges converge into a ring that fills green or red and the
+checkmark / cross draws itself on it (checkmark.circle.fill /
+xmark.circle.fill), with a bounce on success and a head-shake on a miss;
+a new attempt undraws the mark and splits the ring back into the
+fingerprint; the song folds away for the drawer and the pill.
 
 Step 1 of the plan: layer-shell window on the overlay layer, cairo/pango
 rendering through `wp_fractional_scale` + `wp_viewporter` (crisp at 1.5),
@@ -91,5 +95,6 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/ctl.rs      control socket
     src/sway.rs     sway IPC (fullscreen watch)
     src/dbus.rs     MPRIS players and fprintd (zbus, threads)
+    src/touchid.rs  the vector Touch ID icon and its transformations
     src/eq.rs       cava feed
     scripts/        install, switch, routing

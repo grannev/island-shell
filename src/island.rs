@@ -9,6 +9,7 @@ use std::f64::consts::FRAC_PI_2;
 use cairo::Context;
 
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
+use crate::touchid;
 
 /// Height of the black box, logical px.
 pub const BOX_H: f64 = 32.0;
@@ -27,8 +28,6 @@ pub const DODGE: f64 = 240.0;
 
 pub const FONT: &str = "SF Pro Text Semi-Bold";
 pub const FONT_PX: f64 = 16.0;
-const SYMBOL_FONT: &str = "JetBrainsMono Nerd Font";
-const SYMBOL_PX: f64 = 48.0;
 const CAPTION_PX: f64 = 15.33;
 
 const SONG_MAX_CHARS: usize = 42;
@@ -58,11 +57,13 @@ const PILL_SWAP: f64 = 0.37;
 const PILL_CLIMB: f64 = 30.0;
 const PILL_GAP: f64 = 2.0;
 const PULSE_PERIOD: f64 = 0.96;
-const AUTH_OK_HOLD: f64 = 1.0;
-const AUTH_FAIL_HOLD: f64 = 1.4;
-const GLYPH_FINGERPRINT: &str = "\u{F0237}";
-const GLYPH_CHECK: &str = "\u{F05E0}";
-const GLYPH_CROSS: &str = "\u{F0159}";
+/// the result: ridges → ring (0.45 s), then the mark draws on (0.3 s)
+const RING_DUR: f64 = 0.45;
+const MARK_DUR: f64 = 0.3;
+const MARK_DELAY: f64 = 0.32;
+const AUTH_OK_HOLD: f64 = 1.5;
+const AUTH_FAIL_HOLD: f64 = 1.9;
+const ICON_SIZE: f64 = 48.0;
 
 const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
@@ -183,6 +184,13 @@ pub struct Island {
     /// Touch ID: 0 = the line, 1 = the 92 px pill.
     pill: Quintic,
     auth: Option<Auth>,
+    /// when the current verification began (the pulse's time base)
+    auth_start: Time,
+    /// the last result shown, for undrawing it on a new attempt
+    last_mark: Option<(touchid::Mark, (f64, f64, f64))>,
+    /// the icon: fingerprint → ring, and the mark drawing itself on it
+    ring: Quintic,
+    mark: Quintic,
     pub hidden: HideReasons,
     pub dodged: bool,
     pub hovered: bool,
@@ -245,6 +253,10 @@ impl Island {
             muted: false,
             pill: Quintic::at_rest(0.0, PILL_DUR),
             auth: None,
+            auth_start: 0.0,
+            last_mark: None,
+            ring: Quintic::at_rest(0.0, RING_DUR),
+            mark: Quintic::at_rest(0.0, MARK_DUR),
             hidden: HideReasons::default(),
             dodged: false,
             hovered: false,
@@ -260,7 +272,8 @@ impl Island {
             || self.reveal.is_moving(now)
             || self.pill.is_moving(now)
             || self.eq_moving()
-            || matches!(self.auth, Some(Auth::Waiting(_))) && self.pill.state(now).x > 0.0
+            // the pill's content animates the whole time it is up
+            || self.auth.is_some() && self.pill.state(now).x > 0.0
     }
 
     fn eq_moving(&self) -> bool {
@@ -289,6 +302,11 @@ impl Island {
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
         self.reveal.set(if self.want_reveal(now) { 1.0 } else { 0.0 }, now);
         self.pill.set(if self.auth.is_some() { 1.0 } else { 0.0 }, now);
+        let result = matches!(self.auth, Some(Auth::Ok(_) | Auth::Fail(_)));
+        self.ring.set(if result { 1.0 } else { 0.0 }, now);
+        if !result {
+            self.mark.set(0.0, now);
+        }
         if !self.song.as_ref().is_some_and(|s| s.playing) {
             self.eq_target = [0.0; EQ_BANDS];
         }
@@ -312,6 +330,8 @@ impl Island {
                 self.auth = None;
                 changed = true;
             }
+            // the mark starts drawing once the ring has (nearly) formed
+            Some(Auth::Ok(since) | Auth::Fail(since)) if now - since >= MARK_DELAY => self.mark.set(1.0, now),
             _ => {}
         }
         if self.silent_expired(now) && self.reveal.state(now).x > 0.0 && self.song_pending.is_none() {
@@ -415,6 +435,9 @@ impl Island {
         }
         // a new attempt while the pill is still up (after a miss): back to
         // waiting, no close / reopen
+        if self.auth.is_none() {
+            self.auth_start = now;
+        }
         self.auth = Some(Auth::Waiting(now));
         self.sync(now);
     }
@@ -578,31 +601,68 @@ impl Island {
         }
         if pill_alpha > 0.0 {
             if let Some(auth) = self.auth {
-                let (glyph, colour, caption) = match auth {
-                    Auth::Waiting(since) => (GLYPH_FINGERPRINT, pulse_colour(now - since), "Touch ID"),
-                    Auth::Ok(_) => (GLYPH_CHECK, rgb(0x34C759), "Touch ID"),
-                    Auth::Fail(_) => (GLYPH_CROSS, rgb(0xFF3B30), "Try again"),
+                let (result, caption, since) = match auth {
+                    Auth::Waiting(since) => (None, "Touch ID", since),
+                    Auth::Ok(since) => (Some((touchid::Mark::Check, rgb(0x34C759))), "Touch ID", since),
+                    Auth::Fail(since) => (Some((touchid::Mark::Cross, rgb(0xFF3B30))), "Try again", since),
                 };
-                let glyph_l = renderer.layout(cr, glyph, Font::Symbol);
+                if result.is_some() {
+                    self.last_mark = result;
+                }
+                // the breathing runs from the start of the verification; the
+                // result colour takes over as the ring forms (and lets go
+                // again as it splits back into the fingerprint)
+                let pulse_t = now - self.auth_start;
+                let morph = self.ring.state(now).x;
+                let ripple = |i: usize| pulse_colour(pulse_t - 0.07 * i as f64);
+                let shown = result.or(self.last_mark);
+                let kind = shown.map(|(k, _)| k);
+                let colour = match shown {
+                    Some((_, c)) => mix(pulse_colour(pulse_t), c, smoothstep(morph / 0.6)),
+                    None => pulse_colour(pulse_t),
+                };
+                let t = now - since;
+                // success: a little bounce as the ring fills; a miss: the
+                // icon shakes its head
+                let scale = match auth {
+                    Auth::Ok(_) if t > 0.25 => 1.0 + 0.14 * (-(t - 0.25) / 0.12).exp() * (2.0 * std::f64::consts::PI * (t - 0.25) / 0.35).sin(),
+                    _ => 1.0,
+                };
+                let shake = match auth {
+                    Auth::Fail(_) => 7.0 * (-t / 0.18).exp() * (2.0 * std::f64::consts::PI * t / 0.13).sin(),
+                    _ => 0.0,
+                };
+                // the fill comes up under the last stretch of the morph; on
+                // the way back (a new attempt) it leaves with the mark
+                let mark = self.mark.state(now).x;
+                let mut fill = ((morph - 0.6) / 0.4).clamp(0.0, 1.0);
+                if result.is_none() {
+                    fill *= mark;
+                }
+                let icon = touchid::IconState {
+                    morph,
+                    fill,
+                    mark,
+                    kind,
+                    colour,
+                    ridge_colour: Some(&ripple),
+                    alpha: pill_alpha,
+                    scale,
+                    shake,
+                };
                 let cap_l = renderer.layout(cr, caption, Font::Caption);
-                let (_, g_ext) = glyph_l.pixel_extents();
                 let (_, c_ext) = cap_l.pixel_extents();
-                let total = g_ext.height() as f64 + PILL_GAP + c_ext.height() as f64;
+                let total = ICON_SIZE + PILL_GAP + c_ext.height() as f64;
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 let top = dy + (bh - total) / 2.0 + climb;
-                let gx = renderer.snap(cx - g_ext.width() as f64 / 2.0 - g_ext.x() as f64);
-                let gy = renderer.snap(top - g_ext.y() as f64);
-                cr.set_source_rgba(colour.0, colour.1, colour.2, pill_alpha);
-                cr.move_to(gx, gy);
-                pangocairo::functions::show_layout(cr, &glyph_l);
+                touchid::draw(cr, cx, top + ICON_SIZE / 2.0, ICON_SIZE, &icon);
                 let cxp = renderer.snap(cx - c_ext.width() as f64 / 2.0 - c_ext.x() as f64);
-                let cy = renderer.snap(top + g_ext.height() as f64 + PILL_GAP - c_ext.y() as f64);
+                let cy = renderer.snap(top + ICON_SIZE + PILL_GAP - c_ext.y() as f64);
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.8 * pill_alpha);
                 cr.move_to(cxp, cy);
                 pangocairo::functions::show_layout(cr, &cap_l);
             }
         }
-
         cr.restore().unwrap();
 
         let top = dy.max(0.0);
@@ -780,8 +840,6 @@ pub enum Font {
     Text,
     /// the pill's caption, same face, 15.33 px
     Caption,
-    /// Nerd-font symbols, 48 px
-    Symbol,
 }
 
 /// Pango setup shared by all drawing: fonts, hinting for the fractional
@@ -791,7 +849,6 @@ pub struct Renderer {
     scale: f64,
     text: pango::FontDescription,
     caption: pango::FontDescription,
-    symbol: pango::FontDescription,
     ctx: pango::Context,
     cache: RefCell<HashMap<(Font, String), pango::Layout>>,
 }
@@ -802,8 +859,6 @@ impl Renderer {
         text.set_absolute_size(FONT_PX * pango::SCALE as f64);
         let mut caption = pango::FontDescription::from_string(FONT);
         caption.set_absolute_size(CAPTION_PX * pango::SCALE as f64);
-        let mut symbol = pango::FontDescription::from_string(SYMBOL_FONT);
-        symbol.set_absolute_size(SYMBOL_PX * pango::SCALE as f64);
         // the context takes the scale from a scratch surface; frames keep
         // the same transform, so it stays valid
         let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).expect("scratch surface");
@@ -816,7 +871,7 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        Renderer { scale, text, caption, symbol, ctx, cache: RefCell::new(HashMap::new()) }
+        Renderer { scale, text, caption, ctx, cache: RefCell::new(HashMap::new()) }
     }
 
     /// Round a logical coordinate to a whole output pixel.
@@ -849,7 +904,6 @@ impl Renderer {
         layout.set_font_description(Some(match font {
             Font::Text => &self.text,
             Font::Caption => &self.caption,
-            Font::Symbol => &self.symbol,
         }));
         layout.set_text(text);
         cache.insert(key, layout.clone());
