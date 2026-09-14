@@ -44,13 +44,13 @@ pub struct Config {
     /// "liquid" amount.
     pub liquid: f64,
     /// React to the pointer over the box (padding 16 → 34 on a spring, a
-    /// touch of grey); off by default — the island is not a button.
+    /// touch of grey).
     pub hover: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { smoothing: 0.6, liquid: 1.0, hover: false }
+        Config { smoothing: 0.6, liquid: 1.0, hover: true }
     }
 }
 
