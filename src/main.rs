@@ -1,0 +1,39 @@
+//! island-shell: a Dynamic-Island-style notch for SwayFX, drawn by one
+//! Wayland layer-shell client. Without arguments it runs the island; with a
+//! command it talks to the running one (see `ctl`).
+
+mod anim;
+mod app;
+mod ctl;
+mod island;
+mod sway;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => {
+            if let Err(e) = app::run() {
+                eprintln!("island-shell: {e}");
+                std::process::exit(1);
+            }
+        }
+        [cmd] if ctl::Command::parse(cmd).is_some() => match ctl::send(cmd) {
+            Ok(reply) => {
+                if reply != "ok" {
+                    println!("{reply}");
+                }
+                if reply.starts_with("error") {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("island-shell: {e}");
+                std::process::exit(1);
+            }
+        },
+        _ => {
+            eprintln!("{}", ctl::USAGE);
+            std::process::exit(2);
+        }
+    }
+}

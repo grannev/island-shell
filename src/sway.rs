@@ -1,0 +1,154 @@
+//! sway IPC: a subscription to window / workspace events (non-blocking, fed
+//! into the event loop) plus a second, blocking connection for queries — the
+//! island hides while a fullscreen window has the focus.
+
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
+use std::process::Command;
+
+use serde_json::Value;
+
+const MAGIC: &[u8; 6] = b"i3-ipc";
+const GET_WORKSPACES: u32 = 1;
+const SUBSCRIBE: u32 = 2;
+const GET_TREE: u32 = 4;
+const EVENT_FLAG: u32 = 0x8000_0000;
+
+fn socket_path() -> io::Result<String> {
+    if let Ok(p) = std::env::var("SWAYSOCK") {
+        return Ok(p);
+    }
+    let out = Command::new("sway").arg("--get-socketpath").output()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "no sway socket"));
+    }
+    Ok(p)
+}
+
+fn write_msg(stream: &mut UnixStream, kind: u32, payload: &[u8]) -> io::Result<()> {
+    let mut msg = Vec::with_capacity(14 + payload.len());
+    msg.extend_from_slice(MAGIC);
+    msg.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+    msg.extend_from_slice(&kind.to_ne_bytes());
+    msg.extend_from_slice(payload);
+    stream.write_all(&msg)
+}
+
+fn read_msg(stream: &mut UnixStream) -> io::Result<(u32, Vec<u8>)> {
+    let mut header = [0u8; 14];
+    stream.read_exact(&mut header)?;
+    if &header[..6] != MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad ipc magic"));
+    }
+    let len = u32::from_ne_bytes(header[6..10].try_into().unwrap()) as usize;
+    let kind = u32::from_ne_bytes(header[10..14].try_into().unwrap());
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload)?;
+    Ok((kind, payload))
+}
+
+/// Blocking request / reply connection.
+pub struct Query {
+    stream: UnixStream,
+}
+
+impl Query {
+    pub fn connect() -> io::Result<Query> {
+        Ok(Query { stream: UnixStream::connect(socket_path()?)? })
+    }
+
+    fn request(&mut self, kind: u32, payload: &str) -> io::Result<Value> {
+        write_msg(&mut self.stream, kind, payload.as_bytes())?;
+        let (_, body) = read_msg(&mut self.stream)?;
+        serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Is there a fullscreen window on the focused workspace?
+    pub fn fullscreen_focused(&mut self) -> io::Result<bool> {
+        let workspaces = self.request(GET_WORKSPACES, "")?;
+        let focused_ws = workspaces
+            .as_array()
+            .and_then(|ws| ws.iter().find(|w| w["focused"] == Value::Bool(true)))
+            .and_then(|w| w["name"].as_str().map(str::to_string));
+        let Some(focused_ws) = focused_ws else { return Ok(false) };
+        let tree = self.request(GET_TREE, "")?;
+        // the workspace node itself reports fullscreen_mode 1: only its
+        // descendants count
+        Ok(find_workspace(&tree, &focused_ws).is_some_and(|ws| children(ws).any(has_fullscreen)))
+    }
+}
+
+fn find_workspace<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+    if node["type"] == "workspace" && node["name"] == name {
+        return Some(node);
+    }
+    node["nodes"].as_array()?.iter().find_map(|n| find_workspace(n, name))
+}
+
+fn children(node: &Value) -> impl Iterator<Item = &Value> {
+    ["nodes", "floating_nodes"].into_iter().filter_map(move |k| node[k].as_array()).flatten()
+}
+
+fn has_fullscreen(node: &Value) -> bool {
+    matches!(node["fullscreen_mode"].as_u64(), Some(1 | 2)) || children(node).any(has_fullscreen)
+}
+
+/// Event subscription: a non-blocking stream to poll in the event loop.
+pub struct Events {
+    stream: UnixStream,
+    buf: Vec<u8>,
+}
+
+impl AsFd for Events {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
+}
+
+impl Events {
+    pub fn subscribe(events: &[&str]) -> io::Result<Events> {
+        let mut stream = UnixStream::connect(socket_path()?)?;
+        let payload = serde_json::to_string(events).unwrap();
+        write_msg(&mut stream, SUBSCRIBE, payload.as_bytes())?;
+        let (_, reply) = read_msg(&mut stream)?;
+        if !reply.starts_with(b"{\"success\": true") && !reply.starts_with(b"{\"success\":true") {
+            return Err(io::Error::other(format!("subscribe failed: {}", String::from_utf8_lossy(&reply))));
+        }
+        stream.set_nonblocking(true)?;
+        Ok(Events { stream, buf: Vec::new() })
+    }
+
+    /// Read what is available; returns the "change" field of every complete
+    /// event (the event type is in the high bits, `kind & 0x7f`).
+    pub fn drain(&mut self) -> io::Result<Vec<(u32, String)>> {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "sway ipc closed")),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        let mut out = Vec::new();
+        while self.buf.len() >= 14 {
+            let len = u32::from_ne_bytes(self.buf[6..10].try_into().unwrap()) as usize;
+            let kind = u32::from_ne_bytes(self.buf[10..14].try_into().unwrap());
+            if self.buf.len() < 14 + len {
+                break;
+            }
+            let body: Vec<u8> = self.buf.drain(..14 + len).skip(14).collect();
+            if kind & EVENT_FLAG != 0 {
+                let change = serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v["change"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                out.push((kind & 0x7f, change));
+            }
+        }
+        Ok(out)
+    }
+}
