@@ -94,10 +94,6 @@ impl Quintic {
         State { x, v: dv / self.dur, a: da / (self.dur * self.dur) }
     }
 
-    pub fn value(&self, now: Time) -> f64 {
-        self.state(now).x
-    }
-
     pub fn is_moving(&self, now: Time) -> bool {
         self.progress(now) < 1.0
     }
@@ -196,7 +192,7 @@ mod tests {
         q.set(1.0, 10.0);
         for i in 0..=10 {
             let s = i as f64 / 10.0;
-            assert!((q.value(10.0 + s * 0.25) - min_jerk(s)).abs() < 1e-9);
+            assert!((q.state(10.0 + s * 0.25).x - min_jerk(s)).abs() < 1e-9);
         }
         assert!(!q.is_moving(10.3));
     }
