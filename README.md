@@ -25,8 +25,9 @@ Motion quality:
 - moves are minimum-jerk quintics through the current position, velocity
   and acceleration, so a toggle mid-flight turns the island around without
   a jolt; hover is a damped spring (response 0.4 s, damping 0.6);
-- glyphs keep fractional positions while anything moves and snap to whole
-  output pixels at rest (and so do the box edges);
+- glyph rendering is identical in motion and at rest (hinted metrics,
+  origin on whole output pixels); the box edges snap to output pixels at
+  rest and glide sub-pixel while moving;
 - corners with continuous curvature (`smoothing`, Figma-style; limited by
   the room on the shorter edge, so subtle on the 32 px box, full on the
   pill and the panel) and a velocity-dependent stretch (`liquid`);
@@ -56,6 +57,7 @@ start; `island-shell set key value` changes a value in the running island:
 
     smoothing = 0.6   # corner smoothing 0..1 (0 = circular arcs)
     liquid = 1        # velocity stretch, 0 = rigid
+    hover = 0         # 1: widen and tint the box under the pointer
 
 ### Switching between the old and the new island
 

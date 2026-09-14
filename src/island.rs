@@ -43,11 +43,14 @@ pub struct Config {
     /// Velocity-dependent stretch of the box, 0 = rigid, 1 = the default
     /// "liquid" amount.
     pub liquid: f64,
+    /// React to the pointer over the box (padding 16 → 34 on a spring, a
+    /// touch of grey); off by default — the island is not a button.
+    pub hover: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { smoothing: 0.6, liquid: 1.0 }
+        Config { smoothing: 0.6, liquid: 1.0, hover: false }
     }
 }
 
@@ -61,13 +64,14 @@ impl Config {
         match key {
             "smoothing" => self.smoothing = v.clamp(0.0, 1.0),
             "liquid" => self.liquid = v.clamp(0.0, 4.0),
+            "hover" => self.hover = v != 0.0,
             _ => return Err(format!("unknown setting {key:?}")),
         }
         Ok(())
     }
 
     pub fn describe(&self) -> String {
-        format!("smoothing={} liquid={}", self.smoothing, self.liquid)
+        format!("smoothing={} liquid={} hover={}", self.smoothing, self.liquid, self.hover as u8)
     }
 }
 
@@ -154,7 +158,7 @@ impl Island {
         self.hide.set(if self.hidden.any() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
         // no hover feedback while hidden: the box is not there to point at
-        let hover = self.hovered && !self.hidden.any();
+        let hover = self.config.hover && self.hovered && !self.hidden.any();
         let h = if hover { 1.0 } else { 0.0 };
         self.hover_pad.set(h, now);
         self.hover_bg.set(h, now);
@@ -201,7 +205,7 @@ impl Island {
         let stretch_y = liquid * 0.02 * (hide.v * BOX_H).abs();
         let stretch_x = liquid * 0.01 * (dodge.v * DODGE).abs();
 
-        let layout = renderer.layout(cr, &self.clock, moving);
+        let layout = renderer.layout(cr, &self.clock);
         let (_, logical) = layout.pixel_extents();
         let tw = logical.width() as f64;
         let th = logical.height() as f64;
@@ -222,14 +226,11 @@ impl Island {
         cr.set_source_rgb(tint, tint, tint);
         let _ = cr.fill();
 
-        // the clock, centred; at rest its origin sits on whole output pixels,
-        // in motion the glyphs keep their fractional positions and glide
-        let mut tx = cx - tw / 2.0 - logical.x() as f64;
-        let mut ty = dy + (y1 - dy - th) / 2.0 - logical.y() as f64;
-        if !moving {
-            tx = renderer.snap(tx);
-            ty = renderer.snap(ty);
-        }
+        // the clock, centred, its origin on whole output pixels: the glyphs
+        // are always rendered the same way (hinted metrics), so the text
+        // never changes shape between motion and rest
+        let tx = renderer.snap(cx - tw / 2.0 - logical.x() as f64);
+        let ty = renderer.snap(dy + (y1 - dy - th) / 2.0 - logical.y() as f64);
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.move_to(tx, ty);
         pangocairo::functions::show_layout(cr, &layout);
@@ -408,18 +409,19 @@ impl Renderer {
         (v * self.scale).round() / self.scale
     }
 
-    /// A layout for `text`. At rest glyph positions are rounded to output
-    /// pixels for crispness; `moving` keeps them fractional so the text
-    /// glides with the box instead of ticking pixel by pixel.
-    pub fn layout(&self, cr: &Context, text: &str, moving: bool) -> pango::Layout {
+    /// A layout for `text`, glyph positions rounded to output pixels. (Not
+    /// switched to fractional positions while moving: unhinted metrics give
+    /// a text about 1 px narrower and shorter, and the swap at the end of a
+    /// move read as the text changing size.)
+    pub fn layout(&self, cr: &Context, text: &str) -> pango::Layout {
         let layout = pangocairo::functions::create_layout(cr);
         let ctx = layout.context();
         let mut opts = cairo::FontOptions::new().expect("font options");
-        opts.set_hint_metrics(if moving { cairo::HintMetrics::Off } else { cairo::HintMetrics::On });
+        opts.set_hint_metrics(cairo::HintMetrics::On);
         opts.set_hint_style(cairo::HintStyle::Slight);
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
-        ctx.set_round_glyph_positions(!moving);
+        ctx.set_round_glyph_positions(true);
         layout.set_font_description(Some(&self.font));
         layout.set_text(text);
         layout
