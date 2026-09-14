@@ -57,7 +57,7 @@ start; `island-shell set key value` changes a value in the running island:
 
     smoothing = 0.6   # corner smoothing 0..1 (0 = circular arcs)
     liquid = 1        # velocity stretch, 0 = rigid
-    hover = 1         # widen and tint the box under the pointer
+    hover = 1         # widen the box under the pointer
 
 ### Switching between the old and the new island
 

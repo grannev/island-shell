@@ -32,7 +32,6 @@ const DODGE_DUR: f64 = 0.25;
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
 const HOVER_RESPONSE: f64 = 0.4;
 const HOVER_DAMPING: f64 = 0.6;
-const HOVER_BG_DUR: f64 = 0.25;
 
 /// Tunables (config file / `island-shell set`).
 #[derive(Clone, Debug)]
@@ -43,8 +42,7 @@ pub struct Config {
     /// Velocity-dependent stretch of the box, 0 = rigid, 1 = the default
     /// "liquid" amount.
     pub liquid: f64,
-    /// React to the pointer over the box (padding 16 → 34 on a spring, a
-    /// touch of grey).
+    /// React to the pointer over the box (padding 16 → 34 on a spring).
     pub hover: bool,
 }
 
@@ -96,9 +94,9 @@ pub struct Island {
     hide: Quintic,
     /// 0 = centred, 1 = dodged 240 px left.
     dodge: Quintic,
-    /// Pointer over the box: the padding springs, the background tint eases.
+    /// Pointer over the box: the padding springs (no tint — the box stays
+    /// pure black).
     hover_pad: Spring,
-    hover_bg: Quintic,
     pub hidden: HideReasons,
     pub dodged: bool,
     pub hovered: bool,
@@ -137,7 +135,6 @@ impl Island {
             hide: Quintic::at_rest(0.0, HIDE_DUR),
             dodge: Quintic::at_rest(0.0, DODGE_DUR),
             hover_pad: Spring::new(0.0, HOVER_RESPONSE, HOVER_DAMPING),
-            hover_bg: Quintic::at_rest(0.0, HOVER_BG_DUR),
             hidden: HideReasons::default(),
             dodged: false,
             hovered: false,
@@ -150,7 +147,6 @@ impl Island {
         self.hide.is_moving(now)
             || self.dodge.is_moving(now)
             || self.hover_pad.is_moving(now)
-            || self.hover_bg.is_moving(now)
     }
 
     /// Re-aim the movers after a state change.
@@ -159,9 +155,7 @@ impl Island {
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
         // no hover feedback while hidden: the box is not there to point at
         let hover = self.config.hover && self.hovered && !self.hidden.any();
-        let h = if hover { 1.0 } else { 0.0 };
-        self.hover_pad.set(h, now);
-        self.hover_bg.set(h, now);
+        self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
     }
 
     pub fn is_hidden(&self) -> bool {
@@ -185,7 +179,6 @@ impl Island {
         let hide = self.hide.state(now);
         let dodge = self.dodge.state(now);
         let hover_pad = self.hover_pad.value(now);
-        let hover_bg = self.hover_bg.value(now);
         // the spread lags behind the slide — most of it happens while the box
         // is already mostly gone, like a drop flattening on water; it is a
         // function of the position so that show and hide trace the same path
@@ -222,8 +215,7 @@ impl Island {
         let r = radius.min((x1 - x0) / 2.0).min((y1 - dy) / 2.0);
 
         self.trace_notch(cr, x0, x1, dy, y1, r);
-        let tint = 10.0 / 255.0 * hover_bg; // #000 -> #0A0A0A
-        cr.set_source_rgb(tint, tint, tint);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.fill();
 
         // the clock, centred, its origin on whole output pixels: the glyphs
