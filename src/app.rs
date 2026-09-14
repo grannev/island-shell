@@ -14,7 +14,8 @@ use smithay_client_toolkit::{
     presentation_time::{PresentTime, PresentationTimeHandler, PresentationTimeState},
     reexports::{
         calloop::{
-            EventLoop,
+            EventLoop, LoopHandle, RegistrationToken,
+            channel,
             generic::Generic,
             timer::{TimeoutAction, Timer},
             Interest, Mode, PostAction,
@@ -48,19 +49,30 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{
+        Shm, ShmHandler,
+        slot::{Buffer, SlotPool},
+    },
 };
 
 use crate::anim::Time;
 use crate::ctl::{Command, Server};
-use crate::island::{BOX_H, Config, FILLET, Frame, Island, Rect, Renderer};
+use crate::dbus::{self, PlayerCommand};
+use crate::eq::{self, Cava};
+use crate::island::{Config, Frame, Island, Rect, Renderer};
 use crate::sway;
 
 /// Logical size of the (mostly transparent) surface: wide enough for the
-/// dodge and the spread, tall enough for the box, its fillets and the
-/// liquid stretch.
+/// dodge and the spread, tall enough for the Touch ID pill and the liquid
+/// stretch.
 const SURFACE_W: u32 = 980;
-const SURFACE_H: u32 = (BOX_H + FILLET) as u32 + 10;
+const SURFACE_H: u32 = 120;
+
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
+/// How often the sink's mute state is checked while something plays.
+const VOLUME_POLL: Duration = Duration::from_secs(2);
 
 /// Animation time base: the compositor's presentation clock and, from its
 /// feedback, a prediction of when the frame being drawn will be shown.
@@ -172,6 +184,7 @@ pub struct App {
     viewport: WpViewport,
     _fractional: Option<WpFractionalScaleV1>,
     qh: QueueHandle<App>,
+    loop_handle: LoopHandle<'static, App>,
 
     /// output pixels per logical pixel (wp_fractional_scale)
     scale: f64,
@@ -181,12 +194,22 @@ pub struct App {
     frame_pending: bool,
     pointer: Option<wl_pointer::WlPointer>,
     last_frame: Option<Frame>,
+    /// the whole picture, always up to date
     canvas: Option<cairo::ImageSurface>,
+    /// shm buffers, reused once the compositor releases them; each remembers
+    /// where its content lags behind the canvas
+    buffers: Vec<(Buffer, Option<Rect>)>,
     clock: FrameClock,
 
     pub island: Island,
     renderer: Renderer,
     sway_query: Option<sway::Query>,
+    /// the equaliser feed, alive only while a player is playing
+    cava: Option<Cava>,
+    eq_tx: channel::Sender<[f32; eq::BANDS]>,
+    /// the timer for the island's next time-driven change
+    deadline: Option<(Time, RegistrationToken)>,
+    volume_poll: Option<RegistrationToken>,
     pub exit: bool,
 }
 
@@ -224,6 +247,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn.clone(), event_queue).insert(loop_handle.clone())?;
 
+    // D-Bus watchers (MPRIS players, fprintd) and the equaliser feed
+    let (dbus_tx, dbus_rx) = channel::channel::<dbus::Event>();
+    dbus::spawn_player_watch(dbus_tx.clone());
+    dbus::spawn_auth_watch(dbus_tx);
+    let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
+
     let mut island = Island::new(load_config());
     island.update_clock();
 
@@ -247,6 +276,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         viewport,
         _fractional: fractional,
         qh: qh.clone(),
+        loop_handle: loop_handle.clone(),
         scale: 1.0,
         width: SURFACE_W,
         height: SURFACE_H,
@@ -255,12 +285,34 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         pointer: None,
         last_frame: None,
         canvas: None,
+        buffers: Vec::new(),
         clock: FrameClock::new(),
         island,
         renderer: Renderer::new(1.0),
         sway_query,
+        cava: None,
+        eq_tx,
+        deadline: None,
+        volume_poll: None,
         exit: false,
     };
+
+    loop_handle.insert_source(dbus_rx, |event, _, app: &mut App| {
+        let channel::Event::Msg(event) = event else { return };
+        let now = app.frame_time();
+        match event {
+            dbus::Event::Player(np) => app.island.set_player(np.as_ref(), now),
+            dbus::Event::AuthStarted => app.island.auth_started(now),
+            dbus::Event::AuthStatus(status, done) => app.island.auth_status(&status, done, now),
+        }
+        app.after_change();
+    })?;
+    loop_handle.insert_source(eq_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(levels) = event {
+            app.island.set_eq(levels);
+            app.redraw();
+        }
+    })?;
 
     // control socket
     let server = Server::bind()?;
@@ -318,6 +370,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn read_muted() -> bool {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    if let Ok(v) = std::fs::read_to_string(dir.join("waybar-volume")) {
+        let v = v.trim();
+        return v == "muted" || v == "0";
+    }
+    let out = |args: &[&str]| {
+        std::process::Command::new("pactl").args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let muted = out(&["get-sink-mute", "@DEFAULT_SINK@"]).is_some_and(|s| s.contains("yes"));
+    let zero = out(&["get-sink-volume", "@DEFAULT_SINK@"]).is_some_and(|s| s.split_whitespace().any(|w| w == "0%"));
+    muted || zero
+}
+
 fn until_next_minute() -> Duration {
     let t = crate::island::libc_localtime();
     Duration::from_secs(60 - t.sec as u64) + Duration::from_millis(20)
@@ -370,7 +436,7 @@ impl App {
             Command::DodgeToggle => self.island.dodged = !self.island.dodged,
             Command::Status => {
                 return format!(
-                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} {}",
+                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} {} {}",
                     if self.island.is_hidden() { "hidden" } else { "shown" },
                     if self.island.dodged { "dodged" } else { "centred" },
                     self.scale,
@@ -378,7 +444,8 @@ impl App {
                     self.height,
                     self.clock.refresh * 1e3,
                     self.clock.pipeline,
-                    self.island.config.describe()
+                    self.island.config.describe(),
+                    self.island.describe(now)
                 );
             }
             Command::Set(key, value) => {
@@ -386,13 +453,19 @@ impl App {
                     return format!("error: {e}");
                 }
             }
+            Command::Dump(path) => {
+                return match self.dump(&path) {
+                    Ok(()) => "ok".into(),
+                    Err(e) => format!("error: {e}"),
+                };
+            }
             Command::Quit => {
                 self.exit = true;
                 return "bye".into();
             }
         }
         self.island.sync(now);
-        self.redraw();
+        self.after_change();
         "ok".into()
     }
 
@@ -414,9 +487,97 @@ impl App {
         }
     }
 
+    /// Render the island as it is right now into a PNG, off screen.
+    fn dump(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let t = self.clock.now();
+        self.island.advance(t);
+        let bw = (self.width as f64 * self.scale).round() as i32;
+        let bh = (self.height as f64 * self.scale).round() as i32;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, bw, bh)?;
+        {
+            let cr = cairo::Context::new(&surface)?;
+            cr.scale(self.scale, self.scale);
+            self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t);
+        }
+        let mut file = std::fs::File::create(path)?;
+        surface.write_to_png(&mut file)?;
+        Ok(())
+    }
+
     /// Presentation time of the next frame we will draw.
     fn frame_time(&self) -> Time {
         self.clock.predict(self.frame_pending)
+    }
+
+    /// After the island's state changed: keep the helpers in step (cava
+    /// and the mute poll while a song is shown), arm the timer for the
+    /// next time-driven change, and draw.
+    fn after_change(&mut self) {
+        let has_song = self.island.song().is_some();
+        if has_song && self.cava.is_none() {
+            match Cava::start(self.eq_tx.clone()) {
+                Ok(c) => self.cava = Some(c),
+                Err(e) => eprintln!("island-shell: cava: {e}"),
+            }
+        } else if !has_song && self.cava.is_some() {
+            self.cava = None;
+        }
+        let want_poll = has_song;
+        if want_poll && self.volume_poll.is_none() {
+            self.poll_volume();
+            let token = self
+                .loop_handle
+                .insert_source(Timer::from_duration(VOLUME_POLL), |_, _, app: &mut App| {
+                    app.poll_volume();
+                    TimeoutAction::ToDuration(VOLUME_POLL)
+                })
+                .expect("volume timer");
+            self.volume_poll = Some(token);
+        } else if !want_poll {
+            if let Some(token) = self.volume_poll.take() {
+                self.loop_handle.remove(token);
+            }
+        }
+        self.arm_deadline();
+        self.redraw();
+    }
+
+    /// Schedule `advance` for the island's next deadline.
+    fn arm_deadline(&mut self) {
+        let now = self.clock.now();
+        let next = self.island.deadline(now);
+        if self.deadline.as_ref().map(|(t, _)| *t) == next {
+            return;
+        }
+        if let Some((_, token)) = self.deadline.take() {
+            self.loop_handle.remove(token);
+        }
+        if let Some(t) = next {
+            let delay = Duration::from_secs_f64((t - now).max(0.0)) + Duration::from_millis(5);
+            let token = self
+                .loop_handle
+                .insert_source(Timer::from_duration(delay), |_, _, app: &mut App| {
+                    app.deadline = None;
+                    let now = app.frame_time();
+                    app.island.advance(now);
+                    app.after_change();
+                    TimeoutAction::Drop
+                })
+                .expect("deadline timer");
+            self.deadline = Some((t, token));
+        }
+    }
+
+    /// Is the sink muted or at 0 %? The bar's volume script keeps a state
+    /// file; pactl is the fallback.
+    fn poll_volume(&mut self) {
+        let muted = read_muted();
+        if muted != self.island.muted {
+            let now = self.frame_time();
+            self.island.set_muted(muted, now);
+            self.arm_deadline();
+            self.redraw();
+        }
     }
 
     /// Present a new frame now unless one is already on its way.
@@ -428,42 +589,86 @@ impl App {
 
     /// Draw and commit a frame; `steady` when called from the frame callback.
     fn draw(&mut self, steady: bool) {
+        let started = std::time::Instant::now();
         let t = self.clock.predict(steady);
+        if self.island.advance(t) {
+            self.arm_deadline();
+        }
         let bw = (self.width as f64 * self.scale).round() as i32;
         let bh = (self.height as f64 * self.scale).round() as i32;
         let stride = bw * 4;
+        let whole = Rect { x: 0.0, y: 0.0, w: self.width as f64, h: self.height as f64 };
 
-        let canvas = match &self.canvas {
-            Some(c) if c.width() == bw && c.height() == bh => self.canvas.as_ref().unwrap(),
-            _ => {
-                self.canvas = Some(cairo::ImageSurface::create(cairo::Format::ARgb32, bw, bh).expect("cairo surface"));
-                self.canvas.as_ref().unwrap()
-            }
-        };
-        let frame = {
-            let cr = cairo::Context::new(canvas).expect("cairo context");
-            cr.set_operator(cairo::Operator::Source);
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-            let _ = cr.paint();
-            cr.set_operator(cairo::Operator::Over);
+        if !self.canvas.as_ref().is_some_and(|c| c.width() == bw && c.height() == bh) {
+            self.canvas = Some(cairo::ImageSurface::create(cairo::Format::ARgb32, bw, bh).expect("cairo surface"));
+            self.buffers.clear();
+            self.last_frame = None;
+        }
+        let canvas = self.canvas.clone().unwrap();
+        let (frame, changed) = {
+            let cr = cairo::Context::new(&canvas).expect("cairo context");
             cr.scale(self.scale, self.scale);
-            self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t)
+            // wipe where the previous frame painted (the rest is still clear)
+            let stale = match self.last_frame {
+                None => Some(whole),
+                Some(prev) => prev.bounds,
+            };
+            if let Some(r) = stale {
+                cr.set_operator(cairo::Operator::Clear);
+                cr.rectangle(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0);
+                let _ = cr.fill();
+                cr.set_operator(cairo::Operator::Over);
+            }
+            let frame = self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t);
+            let changed = match (stale, frame.bounds) {
+                (Some(a), Some(b)) => Some(a.union(b)),
+                (a, b) => a.or(b),
+            };
+            (frame, changed)
         };
         canvas.flush();
 
-        let (buffer, shm_canvas) = self
-            .pool
-            .create_buffer(bw, bh, stride, wl_shm::Format::Argb8888)
-            .expect("shm buffer");
-        let cairo_stride = canvas.stride() as usize;
-        canvas
-            .with_data(|src| {
-                for y in 0..bh as usize {
-                    let row = &src[y * cairo_stride..y * cairo_stride + stride as usize];
-                    shm_canvas[y * stride as usize..(y + 1) * stride as usize].copy_from_slice(row);
-                }
-            })
-            .expect("cairo surface data");
+        // every buffer now lags behind the canvas in `changed` too
+        for (_, lag) in &mut self.buffers {
+            *lag = match (*lag, changed) {
+                (Some(a), Some(b)) => Some(a.union(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        // a free buffer (released by the compositor), or a new one
+        let idx = match self.buffers.iter().position(|(b, _)| self.pool.canvas(b).is_some()) {
+            Some(i) => i,
+            None => {
+                let (buffer, _) = self.pool.create_buffer(bw, bh, stride, wl_shm::Format::Argb8888).expect("shm buffer");
+                self.buffers.push((buffer, Some(whole)));
+                self.buffers.len() - 1
+            }
+        };
+        let lag = self.buffers[idx].1.take();
+        let damage = lag.map(|d| {
+            let s = self.scale;
+            let x0 = ((d.x - 1.0) * s).floor().max(0.0) as usize;
+            let y0 = ((d.y - 1.0) * s).floor().max(0.0) as usize;
+            let x1 = (((d.x + d.w + 1.0) * s).ceil() as usize).min(bw as usize);
+            let y1 = (((d.y + d.h + 1.0) * s).ceil() as usize).min(bh as usize);
+            (x0, y0, x1, y1)
+        });
+        if let Some((x0, y0, x1, y1)) = damage {
+            if x1 > x0 && y1 > y0 {
+                let shm_canvas = self.pool.canvas(&self.buffers[idx].0).expect("free buffer");
+                let cairo_stride = canvas.stride() as usize;
+                canvas
+                    .with_data(|src| {
+                        for y in y0..y1 {
+                            let (a, b) = (y * cairo_stride + x0 * 4, y * cairo_stride + x1 * 4);
+                            let (c, d) = (y * stride as usize + x0 * 4, y * stride as usize + x1 * 4);
+                            shm_canvas[c..d].copy_from_slice(&src[a..b]);
+                        }
+                    })
+                    .expect("cairo surface data");
+            }
+        }
+        let buffer = &self.buffers[idx].0;
 
         let surface = self.layer.wl_surface();
         // input only over the box (the rest of the surface is empty air),
@@ -487,18 +692,8 @@ impl App {
             }
             self.layer.set_opaque_region(Some(region.wl_region()));
         }
-        let damage = match self.last_frame {
-            None => Some(Rect { x: 0.0, y: 0.0, w: self.width as f64, h: self.height as f64 }),
-            Some(prev) => match (prev.bounds, frame.bounds) {
-                (Some(a), Some(b)) => Some(a.union(b)),
-                (a, b) => a.or(b),
-            },
-        };
-        if let Some(d) = damage {
-            let s = self.scale;
-            let (x0, y0) = (((d.x - 1.0) * s).floor().max(0.0) as i32, ((d.y - 1.0) * s).floor().max(0.0) as i32);
-            let (x1, y1) = (((d.x + d.w + 1.0) * s).ceil().min(bw as f64) as i32, ((d.y + d.h + 1.0) * s).ceil().min(bh as f64) as i32);
-            surface.damage_buffer(x0, y0, x1 - x0, y1 - y0);
+        if let Some((x0, y0, x1, y1)) = damage {
+            surface.damage_buffer(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32);
         }
         self.last_frame = Some(frame);
 
@@ -513,6 +708,9 @@ impl App {
         }
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
+        if self.clock.debug {
+            eprintln!("draw: {:.0} us", started.elapsed().as_secs_f64() * 1e6);
+        }
     }
 
     fn set_scale(&mut self, scale: f64) {
@@ -633,6 +831,26 @@ impl PointerHandler for App {
                     self.island.hovered = false;
                     changed = true;
                 }
+                PointerEventKind::Press { button, .. } => {
+                    let cmd = match button {
+                        BTN_LEFT => Some(PlayerCommand::PlayPause),
+                        BTN_RIGHT => Some(PlayerCommand::Next),
+                        BTN_MIDDLE => Some(PlayerCommand::Previous),
+                        _ => None,
+                    };
+                    if let Some(cmd) = cmd {
+                        self.player_control(cmd);
+                    }
+                }
+                PointerEventKind::Axis { vertical, .. } => {
+                    // scroll up = next, down = previous (as on the old touch target)
+                    let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
+                    if v < 0.0 {
+                        self.player_control(PlayerCommand::Next);
+                    } else if v > 0.0 {
+                        self.player_control(PlayerCommand::Previous);
+                    }
+                }
                 _ => {}
             }
         }
@@ -640,6 +858,16 @@ impl PointerHandler for App {
             let now = self.frame_time();
             self.island.sync(now);
             self.redraw();
+        }
+    }
+}
+
+impl App {
+    fn player_control(&self, cmd: PlayerCommand) {
+        if self.island.accepts_player_clicks() {
+            if let Some(song) = self.island.song() {
+                dbus::control(&song.bus_name, cmd);
+            }
         }
     }
 }

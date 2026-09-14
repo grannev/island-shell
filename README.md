@@ -10,6 +10,15 @@ brief, the current island's behaviour to match, and the plan.
 
 ## Status
 
+Step 2: now playing (MPRIS over D-Bus, zbus) — "eq  Artist — Title  |
+clock", the title sliding out from behind the divider and back, track
+changes as out-then-in, a four-band equaliser fed by cava (30 fps, eased
+per frame, sinking flat on pause), silent playback (paused / muted) folding
+away after 15 s, click / right / middle / scroll = play-pause / next /
+previous; Touch ID (fprintd on the system bus) — the box morphs into the
+92 px pill with the breathing fingerprint, green tick / red cross, and
+back; the song folds away for the drawer and the pill.
+
 Step 1 of the plan: layer-shell window on the overlay layer, cairo/pango
 rendering through `wp_fractional_scale` + `wp_viewporter` (crisp at 1.5),
 clock, concave fillets, show/hide (minimum-jerk slide with the spread),
@@ -48,6 +57,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell toggle | show | hide          # mod+i
     island-shell dodge | undodge | dodge-toggle # the ⋯ drawer
     island-shell set <key> <value>              # tune live (see below)
+    island-shell dump <file.png>                # render the current frame off screen
     island-shell status | quit
 
 ### Configuration
@@ -80,4 +90,6 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/anim.rs     min-jerk / cubic-bezier tweens
     src/ctl.rs      control socket
     src/sway.rs     sway IPC (fullscreen watch)
+    src/dbus.rs     MPRIS players and fprintd (zbus, threads)
+    src/eq.rs       cava feed
     scripts/        install, switch, routing

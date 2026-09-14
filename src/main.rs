@@ -5,6 +5,8 @@
 mod anim;
 mod app;
 mod ctl;
+mod dbus;
+mod eq;
 mod island;
 mod sway;
 

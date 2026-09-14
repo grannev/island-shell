@@ -18,6 +18,8 @@ pub enum Command {
     Status,
     /// `set <key> <value>`: change a tunable live (see island::Config)
     Set(String, String),
+    /// `dump <file.png>`: render the current frame to a PNG (debugging)
+    Dump(String),
     Quit,
 }
 
@@ -33,6 +35,7 @@ impl Command {
             ["dodge-toggle"] => Command::DodgeToggle,
             ["status"] => Command::Status,
             ["set", key, value] => Command::Set(key.to_string(), value.to_string()),
+            ["dump", path] => Command::Dump(path.to_string()),
             ["quit"] => Command::Quit,
             _ => return None,
         })
