@@ -531,6 +531,28 @@ impl App {
                 self.launcher_key(&KeyEvent { time: 0, raw_code: 0, keysym, utf8: None });
                 return "ok".into();
             }
+            Command::Scrub(value) => {
+                let sent = if value == "end" {
+                    self.island.end_scrub(now)
+                } else {
+                    match value.parse::<f64>() {
+                        Ok(fraction) => {
+                            let fraction = fraction.clamp(0.0, 1.0);
+                            if self.island.is_scrubbing() {
+                                self.island.scrub_to(fraction, now)
+                            } else {
+                                self.island.press_control(crate::player::Control::Seek(fraction), now)
+                            }
+                        }
+                        Err(_) => return format!("error: bad fraction {value:?}"),
+                    }
+                };
+                if let Some((bus, track, command)) = sent {
+                    dbus::control(&bus, &track, command);
+                }
+                self.after_change();
+                return "ok".into();
+            }
             Command::Demo(app, summary, body) => {
                 let note = notify::fabricate(&app, &summary, &body);
                 self.island.notify(note, now);
@@ -1040,7 +1062,9 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Leave { .. } => {
                     self.island.hovered = false;
-                    self.island.set_hovered_control(None);
+                    if !self.island.is_scrubbing() {
+                        self.island.set_hovered_control(None);
+                    }
                     changed = true;
                 }
                 PointerEventKind::Motion { .. } => {
@@ -1049,8 +1073,27 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     let now = self.clock.predict(false);
+                    // dragging the playhead: the pointer keeps its grab
+                    // even when it wanders off the island
+                    if self.island.is_scrubbing() {
+                        let fraction = self.island.scrub_fraction(self.width as f64 / 2.0, event.position.0, now);
+                        if let Some((bus, track, command)) = self.island.scrub_to(fraction, now) {
+                            dbus::control(&bus, &track, command);
+                        }
+                        changed = true;
+                        continue;
+                    }
                     let control = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now);
                     if self.island.set_hovered_control(control) {
+                        changed = true;
+                    }
+                }
+                PointerEventKind::Release { button, .. } => {
+                    if button == BTN_LEFT && self.island.is_scrubbing() {
+                        let now = self.clock.predict(false);
+                        if let Some((bus, track, command)) = self.island.end_scrub(now) {
+                            dbus::control(&bus, &track, command);
+                        }
                         changed = true;
                     }
                 }
@@ -1114,7 +1157,6 @@ impl PointerHandler for App {
                         None => {}
                     }
                 }
-                _ => {}
             }
         }
         if changed {

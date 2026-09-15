@@ -31,6 +31,9 @@ pub enum Command {
     /// `key <escape|return|up|down|backspace>`: a key for the launcher
     /// (debugging, and handy from a script)
     Key(String),
+    /// `scrub <0..1|end>`: drag the playhead from a script, exactly as the
+    /// pointer does — repeated calls move it, "end" lands it
+    Scrub(String),
     Quit,
 }
 
@@ -56,6 +59,7 @@ impl Command {
             ["launcher-close"] => Command::LauncherClose,
             ["type", rest @ ..] => Command::Type(rest.join(" ")),
             ["key", name] => Command::Key(name.to_string()),
+            ["scrub", value] => Command::Scrub(value.to_string()),
             ["quit"] => Command::Quit,
             _ => return None,
         })

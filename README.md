@@ -51,7 +51,7 @@ announces itself with a "now playing" toast — album art, the app, the
 title, the bars — which then collapses to four cava-fed equaliser bars
 beating beside the clock; resting the pointer on the island opens it into
 a player with the art, the title and artist, a live equaliser, a progress
-line you can click to seek and vector transport controls. Silent playback
+line you can click or drag to scrub and vector transport controls. Silent playback
 (paused / muted) folds the bars away after 15 s; click / right / middle /
 scroll on the collapsed island still are play-pause / next / previous; Touch ID (fprintd on the system bus) — the box morphs into the
 92 px pill with a vector fingerprint whose ridges breathe in a ripple; on
@@ -103,6 +103,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell demo <app> <summary>|<body>    # fabricate a notification
     island-shell launcher                       # mod+d: unfold / fold the panel
     island-shell type <text> | key <name>       # drive the launcher from a script
+    island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell status | quit
 
 ### Configuration

@@ -90,6 +90,8 @@ const REVEAL_DUR: f64 = 0.3;
 /// the island opening into the player, and the toast's life
 const PLAYER_DUR: f64 = 0.34;
 const PLAYER_R: f64 = 28.0;
+/// how often a drag tells the player where it has got to
+const SCRUB_INTERVAL: f64 = 0.25;
 const TOAST_HOLD: f64 = 4.0;
 /// the gap between the clock and the compact bars
 const BARS_GAP: f64 = 12.0;
@@ -191,7 +193,15 @@ impl Song {
         self.position_at = now;
     }
 
-    fn view<'a>(&'a self, eq: &'a [f64], pressed: Option<(player::Control, Time)>, hovered: Option<player::Control>, now: Time) -> player::View<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn view<'a>(
+        &'a self,
+        eq: &'a [f64],
+        pressed: Option<(player::Control, Time)>,
+        hovered: Option<player::Control>,
+        scrub: Option<f64>,
+        now: Time,
+    ) -> player::View<'a> {
         player::View {
             title: &self.now.title,
             artist: &self.now.artist,
@@ -199,10 +209,16 @@ impl Song {
             art_url: &self.now.art_url,
             playing: self.now.playing,
             eq,
-            position: self.position(now),
+            // while the playhead is being dragged the line shows where the
+            // pointer is, not where the player still is
+            position: match scrub {
+                Some(fraction) => fraction * self.now.length,
+                None => self.position(now),
+            },
             length: self.now.length,
             pressed,
             hovered,
+            scrubbing: scrub.is_some(),
         }
     }
 }
@@ -245,6 +261,9 @@ pub struct Island {
     player_opened: Time,
     pressed: Option<(player::Control, Time)>,
     hovered_control: Option<player::Control>,
+    /// the playhead is being dragged: where it is, and when the player was
+    /// last told about it (the drag is not worth a D-Bus call per frame)
+    scrub: Option<(f64, Time)>,
     art: Art,
     /// equaliser bands: the latest levels from cava and the eased heights
     eq_target: [f64; EQ_BANDS],
@@ -340,6 +359,7 @@ impl Island {
             player_opened: 0.0,
             pressed: None,
             hovered_control: None,
+            scrub: None,
             art: Art::new(),
             eq_target: [0.0; EQ_BANDS],
             eq: [0.0; EQ_BANDS],
@@ -378,6 +398,7 @@ impl Island {
             // the player's own content keeps moving while it is open
             || self.player.state(now).x > 0.0 && self.song.as_ref().is_some_and(|s| s.playing())
             || self.pressed.is_some_and(|(_, t)| now - t < 0.3)
+            || self.scrub.is_some()
             // the small bars beside the clock are redrawn as cava feeds
             // them (~20 fps); the big ones glide with the display
             || self.eq_moving() && (self.pill.state(now).x > 0.0 || self.player.state(now).x > 0.0)
@@ -403,7 +424,7 @@ impl Island {
     /// way to the pointer (you reached for it, after all); Touch ID and a
     /// notification do not.
     fn want_player(&self) -> bool {
-        self.hovered
+        (self.hovered || self.scrub.is_some())
             && self.song.is_some()
             && self.auth.is_none()
             && self.notice.is_none()
@@ -543,13 +564,14 @@ impl Island {
     /// One line for `island-shell status`.
     pub fn describe(&self, now: Time) -> String {
         format!(
-            "song={:?} player={:.2} bars={:.2} pill={:.2} auth={:?} silent={}",
+            "song={:?} player={:.2} bars={:.2} pill={:.2} auth={:?} silent={} scrub={:?}",
             self.song.as_ref().map(|s| format!("{}{} — {}", if s.playing() { "" } else { "(paused) " }, s.now.artist, s.now.title)),
             self.player.state(now).x,
             self.reveal.state(now).x,
             self.pill.state(now).x,
             self.auth.map(|a| format!("{a:?}")).or_else(|| self.notice.as_ref().map(|n| format!("notice {:?}", n.note.app))),
-            self.silent_since.map_or(0.0, |s| now - s)
+            self.silent_since.map_or(0.0, |s| now - s),
+            self.scrub.map(|(f, _)| (f * 100.0).round())
         )
     }
 
@@ -807,7 +829,7 @@ impl Island {
         // --- the pill: Touch ID, or a notification ---
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
         let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
-            let view = song.view(&self.eq, None, None, now);
+            let view = song.view(&self.eq, None, None, None, now);
             (player::toast_width(cr, renderer, &view), player::TOAST_H)
         });
         let (w_target, h_target) = match (self.auth.is_some(), notice_size.or(toast_size)) {
@@ -952,7 +974,7 @@ impl Island {
                 pangocairo::functions::show_layout(cr, &cap_l);
             } else if let Some(since) = self.toast {
                 if let Some(song) = &self.song {
-                    let view = song.view(&self.eq, None, None, now);
+                    let view = song.view(&self.eq, None, None, None, now);
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                     player::draw_toast(cr, renderer, &self.art, &view, x0, dy + climb, x1 - x0, bh, pill_alpha, since, now);
                 }
@@ -973,7 +995,7 @@ impl Island {
         }
         if pl > 0.0 {
             if let Some(song) = &self.song {
-                let view = song.view(&self.eq, self.pressed, self.hovered_control, now);
+                let view = song.view(&self.eq, self.pressed, self.hovered_control, self.scrub.map(|(f, _)| f), now);
                 let alpha = smoothstep((pl - 0.3) / 0.6);
                 player::draw(cr, renderer, &self.art, &view, x0, dy, x1 - x0, alpha, now, self.player_opened);
             }
@@ -1047,14 +1069,57 @@ impl Island {
     }
 
     /// Remember the pointer's position over the player for the hover and
-    /// the press feedback.
+    /// the press feedback. A `Seek` hover is kept as a marker that the
+    /// pointer is over the progress line (the line swells for it).
     pub fn set_hovered_control(&mut self, control: Option<player::Control>) -> bool {
-        let control = control.filter(|c| !matches!(c, player::Control::Seek(_)));
-        if control != self.hovered_control {
+        let same = match (self.hovered_control, control) {
+            (Some(player::Control::Seek(_)), Some(player::Control::Seek(_))) => true,
+            (a, b) => a == b,
+        };
+        if !same {
             self.hovered_control = control;
             return true;
         }
         false
+    }
+
+    pub fn is_scrubbing(&self) -> bool {
+        self.scrub.is_some()
+    }
+
+    /// The pointer moved while dragging the playhead: follow it, and tell
+    /// the player now and then so the sound follows too.
+    pub fn scrub_to(&mut self, fraction: f64, now: Time) -> Option<(String, String, crate::dbus::PlayerCommand)> {
+        let (_, last_sent) = self.scrub?;
+        self.scrub = Some((fraction, last_sent));
+        let song = self.song.as_ref()?;
+        if song.now.length <= 0.0 || song.now.track_id.is_empty() || now - last_sent < SCRUB_INTERVAL {
+            return None;
+        }
+        self.scrub = Some((fraction, now));
+        let command = crate::dbus::PlayerCommand::Seek(fraction * song.now.length);
+        Some((song.now.bus_name.clone(), song.now.track_id.clone(), command))
+    }
+
+    /// The button came up: land the playhead where it was left.
+    pub fn end_scrub(&mut self, now: Time) -> Option<(String, String, crate::dbus::PlayerCommand)> {
+        let (fraction, _) = self.scrub.take()?;
+        let song = self.song.as_mut()?;
+        let length = song.now.length;
+        if length <= 0.0 || song.now.track_id.is_empty() {
+            self.sync(now);
+            return None;
+        }
+        song.set_position(fraction * length, now);
+        let out = Some((song.now.bus_name.clone(), song.now.track_id.clone(), crate::dbus::PlayerCommand::Seek(fraction * length)));
+        self.sync(now);
+        out
+    }
+
+    /// Where a point in surface coordinates falls on the progress line.
+    pub fn scrub_fraction(&self, cx: f64, px: f64, now: Time) -> f64 {
+        let (x0, _) = self.box_origin(cx, now);
+        player::track_fraction(player::PLAYER_W, px - x0)
     }
 
     pub fn press_control(&mut self, control: player::Control, now: Time) -> Option<(String, String, crate::dbus::PlayerCommand)> {
@@ -1068,15 +1133,12 @@ impl Island {
                 if song.now.length <= 0.0 || song.now.track_id.is_empty() {
                     return None;
                 }
+                // a press on the line starts a drag: the playhead follows
+                // the pointer until the button comes up
+                self.scrub = Some((fraction, now));
                 crate::dbus::PlayerCommand::Seek(fraction * song.now.length)
             }
         };
-        // the progress line follows the click at once, the player will
-        // confirm it on the next poll
-        if let (player::Control::Seek(fraction), Some(song)) = (control, self.song.as_mut()) {
-            let length = song.now.length;
-            song.set_position(fraction * length, now);
-        }
         let song = self.song.as_ref()?;
         Some((song.now.bus_name.clone(), song.now.track_id.clone(), command))
     }

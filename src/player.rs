@@ -59,11 +59,22 @@ pub fn hit(w: f64, x: f64, y: f64) -> Option<Control> {
             return Some(control);
         }
     }
-    let track_w = w - TEXT_X - PAD;
-    if x >= TEXT_X - 6.0 && x <= TEXT_X + track_w + 6.0 && (y - PROGRESS_Y).abs() <= 12.0 {
-        return Some(Control::Seek(((x - TEXT_X) / track_w).clamp(0.0, 1.0)));
+    let (start, end) = track_range(w);
+    if x >= start - 8.0 && x <= end + 8.0 && (y - PROGRESS_Y).abs() <= 13.0 {
+        return Some(Control::Seek(track_fraction(w, x)));
     }
     None
+}
+
+/// Where the progress line runs inside a player of width `w`.
+pub fn track_range(w: f64) -> (f64, f64) {
+    (TEXT_X, w - PAD)
+}
+
+/// The fraction of the track at `x` (player coordinates), clamped.
+pub fn track_fraction(w: f64, x: f64) -> f64 {
+    let (start, end) = track_range(w);
+    ((x - start) / (end - start)).clamp(0.0, 1.0)
 }
 
 /// Everything the drawing needs about the track.
@@ -80,6 +91,8 @@ pub struct View<'a> {
     /// a control the pointer is holding down, for the little squish
     pub pressed: Option<(Control, Time)>,
     pub hovered: Option<Control>,
+    /// the pointer is dragging the playhead: the bar swells and follows
+    pub scrubbing: bool,
 }
 
 /// Draw the open player inside the box at (`x`, `y`, `w`, `h`).
@@ -117,17 +130,35 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
     let (ba, _) = stage(0.1);
     bars(cr, renderer, view.eq, x + w - PAD - bars_w, y + 30.0, bars_w, 22.0, ba);
 
-    // the progress line
+    // the progress line: it swells under the pointer and swells further
+    // while the playhead is being dragged, with a knob to hold on to
     let (pa, po) = stage(0.12);
     let track_x = x + TEXT_X;
     let track_w = w - TEXT_X - PAD;
+    let over_track = matches!(view.hovered, Some(Control::Seek(_)));
+    let grow = if view.scrubbing {
+        1.0
+    } else if over_track {
+        0.45
+    } else {
+        0.0
+    };
+    let bar_h = PROGRESS_H + 3.0 * grow;
+    let bar_y = y + PROGRESS_Y + po - (bar_h - PROGRESS_H) / 2.0;
     let done = if view.length > 0.0 { (view.position / view.length).clamp(0.0, 1.0) } else { 0.0 };
-    rounded(cr, track_x, y + PROGRESS_Y + po, track_w, PROGRESS_H, PROGRESS_H / 2.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.18 * pa);
+    rounded(cr, track_x, bar_y, track_w, bar_h, bar_h / 2.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, (0.18 + 0.07 * grow) * pa);
     let _ = cr.fill();
     if done > 0.0 {
-        rounded(cr, track_x, y + PROGRESS_Y + po, track_w * done, PROGRESS_H, PROGRESS_H / 2.0);
+        rounded(cr, track_x, bar_y, track_w * done, bar_h, bar_h / 2.0);
         cr.set_source_rgba(EQ_COLOR.0, EQ_COLOR.1, EQ_COLOR.2, 0.95 * pa);
+        let _ = cr.fill();
+    }
+    if grow > 0.0 && view.length > 0.0 {
+        let knob = 3.5 + 3.5 * grow;
+        cr.new_path();
+        cr.arc(track_x + track_w * done, bar_y + bar_h / 2.0, knob, 0.0, 2.0 * PI);
+        cr.set_source_rgba(1.0, 1.0, 1.0, pa);
         let _ = cr.fill();
     }
     if view.length > 0.0 {
