@@ -11,7 +11,9 @@ use cairo::Context;
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
 use crate::icons;
 use crate::art::Art;
+use crate::editor;
 use crate::launcher::{self, Launcher};
+use crate::nvim::{self, Editor};
 use crate::player;
 use crate::touchid;
 
@@ -84,6 +86,8 @@ const PILL_H_DUR: f64 = 0.35;
 const ROLL_TRAVEL: f64 = 46.0;
 /// the launcher panel unfolding out of the island
 const PANEL_DUR: f64 = 0.32;
+/// the editor's chip sliding out beside the clock
+const CHIP_DUR: f64 = 0.3;
 
 const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
@@ -294,6 +298,16 @@ pub struct Island {
     /// the launcher: the panel's growth and its content
     panel: Quintic,
     pub launcher: Option<Launcher>,
+    /// Neovim (the companion plugin): the editor's state, the chip that
+    /// shows it beside the clock, and the panel it opens into
+    nvim: Option<Editor>,
+    nvim_seen: Time,
+    chip: Quintic,
+    chip_w: f64,
+    editor_panel: Quintic,
+    editor_opened: Time,
+    editor_hover: Option<editor::Action>,
+    editor_pressed: Option<(editor::Action, Time)>,
     /// the icon: fingerprint → ring, and the mark drawing itself on it
     ring: Quintic,
     mark: Quintic,
@@ -325,6 +339,12 @@ impl Rect {
 pub struct Frame {
     /// The whole painted area (box + fillets), `None` when above the edge.
     pub bounds: Option<Rect>,
+    /// What takes the pointer: the box as it will be once it has finished
+    /// opening, not as it is this frame. Changing the input region under a
+    /// resting pointer makes the compositor drop it (an enter followed at
+    /// once by a leave), and an island that grows for a third of a second
+    /// would do that thirty times on the way.
+    pub input: Option<Rect>,
     /// Fully opaque parts of the box.
     pub opaque: [Option<Rect>; 2],
 }
@@ -382,6 +402,14 @@ impl Island {
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
             panel: Quintic::at_rest(0.0, PANEL_DUR),
             launcher: None,
+            nvim: None,
+            nvim_seen: 0.0,
+            chip: Quintic::at_rest(0.0, CHIP_DUR),
+            chip_w: 0.0,
+            editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
+            editor_opened: 0.0,
+            editor_hover: None,
+            editor_pressed: None,
             ring: Quintic::at_rest(0.0, RING_DUR),
             mark: Quintic::at_rest(0.0, MARK_DUR),
             hidden: HideReasons::default(),
@@ -402,6 +430,7 @@ impl Island {
             // the player's own content keeps moving while it is open
             || self.player.state(now).x > 0.0 && self.song.as_ref().is_some_and(|s| s.playing())
             || self.pressed.is_some_and(|(_, t)| now - t < 0.3)
+            || self.editor_pressed.is_some_and(|(_, t)| now - t < 0.3)
             || self.scrub.is_some()
             || self.track_grow.is_moving(now)
             || self.control_hover.iter().any(|s| s.is_moving(now))
@@ -412,7 +441,11 @@ impl Island {
             || self.pill_w.is_moving(now)
             || self.pill_h.is_moving(now)
             || self.panel.is_moving(now)
+            || self.chip.is_moving(now)
+            || self.editor_panel.is_moving(now)
             || self.launcher.as_ref().is_some_and(|l| l.is_animating(now))
+            // a macro being recorded keeps its dot breathing
+            || self.nvim.as_ref().is_some_and(|e| !e.recording.is_empty()) && self.chip.state(now).x > 0.0
             // the pill's content animates the whole time it is up
             || self.pill_open() && self.pill.state(now).x > 0.0
     }
@@ -429,9 +462,22 @@ impl Island {
     /// Should the island be open as the player right now? A toast gives
     /// way to the pointer (you reached for it, after all); Touch ID and a
     /// notification do not.
+    /// The pointer on the island opens the editor's panel when Neovim is
+    /// the window in front; music keeps the pointer otherwise.
+    fn want_editor_panel(&self, now: Time) -> bool {
+        self.hovered
+            && self.editor_live(now)
+            && self.auth.is_none()
+            && self.notice.is_none()
+            && self.launcher.is_none()
+            && !self.hidden.any()
+            && !self.dodged
+    }
+
     fn want_player(&self) -> bool {
         (self.hovered || self.scrub.is_some())
             && self.song.is_some()
+            && self.nvim.as_ref().is_none_or(|e| !e.focused)
             && self.auth.is_none()
             && self.notice.is_none()
             && self.launcher.is_none()
@@ -483,6 +529,14 @@ impl Island {
             let lit = self.hovered_control == Some(control) && self.scrub.is_none();
             spring.set(if lit { 1.0 } else { 0.0 }, now);
         }
+        // the editor's chip rides beside the clock while Neovim is in front
+        let chip = self.editor_live(now) && !self.dodged && !self.pill_open() && self.launcher.is_none();
+        self.chip.set(if chip { 1.0 } else { 0.0 }, now);
+        let editor_panel = self.want_editor_panel(now);
+        if editor_panel && self.editor_panel.target() < 0.5 {
+            self.editor_opened = now;
+        }
+        self.editor_panel.set(if editor_panel { 1.0 } else { 0.0 }, now);
         let player = self.want_player();
         if player {
             // reaching for the island answers the toast
@@ -597,7 +651,18 @@ impl Island {
             self.auth.map(|a| format!("{a:?}")).or_else(|| self.notice.as_ref().map(|n| format!("notice {:?}", n.note.app))),
             self.silent_since.map_or(0.0, |s| now - s),
             self.scrub.map(|(f, _)| (f * 100.0).round())
-        )
+        ) + &match &self.nvim {
+            Some(e) => format!(
+                " nvim={{{} {} {}:{} chip={:.2} panel={:.2}}}",
+                e.mode().label(),
+                if e.file.is_empty() { "[No Name]" } else { &e.file },
+                e.line,
+                e.col,
+                self.chip.state(now).x,
+                self.editor_panel.state(now).x
+            ),
+            None => String::new(),
+        }
     }
 
     /// The active player changed (or went away). A track that starts
@@ -715,6 +780,38 @@ impl Island {
         }
     }
 
+    /// The companion Neovim plugin sent its state.
+    pub fn set_editor(&mut self, editor: Editor, now: Time) -> bool {
+        let before = self.nvim.as_ref().map(|e| e.chip_state());
+        let visible_before = self.chip.target() > 0.5;
+        self.nvim_seen = now;
+        let focused = editor.focused;
+        let after = editor.chip_state();
+        self.nvim = Some(editor);
+        self.sync(now);
+        // a frame is only worth it when what the island shows changed: the
+        // plugin also reports cursor moves nobody can see from here
+        let _ = focused;
+        before.as_ref() != Some(&after) || visible_before != (self.chip.target() > 0.5) || self.editor_panel.state(now).x > 0.0
+    }
+
+    /// An editor went away. Only the instance that left is forgotten: two
+    /// Neovims may be up, and the one quitting is rarely the one in front.
+    pub fn editor_gone(&mut self, server: &str, now: Time) {
+        if !server.is_empty() && self.nvim.as_ref().is_some_and(|e| e.server != server) {
+            return;
+        }
+        self.nvim = None;
+        self.editor_hover = None;
+        self.editor_pressed = None;
+        self.sync(now);
+    }
+
+    /// Is an editor connected, awake and in front?
+    fn editor_live(&self, now: Time) -> bool {
+        self.nvim.as_ref().is_some_and(|e| e.focused) && !nvim::stale(self.nvim_seen, now)
+    }
+
     /// A notification arrived. It is skipped while the island is hidden
     /// and waits behind an active Touch ID.
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
@@ -731,6 +828,17 @@ impl Island {
     }
 
     fn show_notice(&mut self, note: crate::notify::Notification, now: Time) {
+        // an update of the same job (LSP progress, say) takes the pill over
+        // in place: no roll, the timer simply starts again
+        if let Some(current) = self.notice.as_mut() {
+            if note.tag.is_some() && current.note.tag == note.tag {
+                current.note = note;
+                current.since = now;
+                self.notice_prev = None;
+                self.sync(now);
+                return;
+            }
+        }
         if self.notice.is_some() {
             // a newer one while the pill is up: the old rolls out through
             // the top, the new one in from below
@@ -821,10 +929,11 @@ impl Island {
         let hover_pad = self.hover_pad.value(now);
         let reveal = self.reveal.state(now).x;
         let q = self.pill.state(now).x;
-        // the pill, the player and the launcher panel are the shapes the
-        // box can take besides the plain line; they never overlap
+        // the pill, the player, the editor's panel and the launcher are the
+        // shapes the box can take besides the plain line; they never overlap
         let p = self.panel.state(now).x;
         let pl = self.player.state(now).x;
+        let ed = self.editor_panel.state(now).x;
         // the spread lags behind the slide — most of it happens while the box
         // is already mostly gone, like a drop flattening on water; it is a
         // function of the position so that show and hide trace the same path
@@ -840,7 +949,11 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q + (PLAYER_R - radius) * pl + (launcher::PANEL_R - radius) * p;
+        let radius = radius
+            + (self.pill_h.state(now).x / 2.0 - radius) * q
+            + (PLAYER_R - radius) * pl
+            + (editor::PANEL_R - radius) * ed
+            + (launcher::PANEL_R - radius) * p;
 
         // "liquid": the box stretches along its direction of travel in
         // proportion to its speed (px/s) and relaxes as it stops
@@ -856,7 +969,13 @@ impl Island {
         let clock_w = clock_ext.width() as f64;
         let clock_h = clock_ext.height() as f64;
         let bars_len = reveal * (BARS_GAP + BARS_W);
-        let line_w = clock_w + bars_len + 2.0 * pad;
+        // Neovim's mode chip grows out on the other side of the clock
+        let chip_k = self.chip.state(now).x;
+        if let Some(e) = &self.nvim {
+            self.chip_w = editor::chip_width(cr, renderer, e);
+        }
+        let chip_len = chip_k * (self.chip_w + editor::GAP);
+        let line_w = chip_len + clock_w + bars_len + 2.0 * pad;
 
         // --- the pill: Touch ID, or a notification ---
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
@@ -886,8 +1005,18 @@ impl Island {
         let pill_w = self.pill_w.state(now).x;
         let pill_h = self.pill_h.state(now).x;
         let line_h = BOX_H;
-        let bw = line_w + (pill_w - line_w) * q + (player::PLAYER_W - line_w) * pl + (launcher::PANEL_W - line_w) * p + stretch_x;
-        let bh = line_h + (pill_h - line_h) * q + (player::PLAYER_H - line_h) * pl + (launcher::PANEL_H - line_h) * p + stretch_y
+        let bw = line_w
+            + (pill_w - line_w) * q
+            + (player::PLAYER_W - line_w) * pl
+            + (editor::PANEL_W - line_w) * ed
+            + (launcher::PANEL_W - line_w) * p
+            + stretch_x;
+        let bh = line_h
+            + (pill_h - line_h) * q
+            + (player::PLAYER_H - line_h) * pl
+            + (editor::PANEL_H - line_h) * ed
+            + (launcher::PANEL_H - line_h) * p
+            + stretch_y
             - stretch_x * 0.15;
         let (mut x0, mut x1, mut y1) = (cx - bw / 2.0, cx + bw / 2.0, dy + bh);
         if !moving {
@@ -921,18 +1050,28 @@ impl Island {
         // the line's content rides at the top of the box and dissolves
         // while the pill opens (first third), the pill's content climbs in
         // from below and fades in over the rest
-        let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45));
+        let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45)) * (1.0 - smoothstep(ed / 0.45));
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
-            let content_w = clock_w + bars_len;
-            let clock_x = renderer.snap(cx - content_w / 2.0 - clock_ext.x() as f64);
+            let content_w = chip_len + clock_w + bars_len;
+            let content_x = cx - content_w / 2.0;
+            if chip_len > 1.0 {
+                if let Some(e) = &self.nvim {
+                    cr.save().unwrap();
+                    cr.rectangle(content_x, dy, chip_len, line_h);
+                    cr.clip();
+                    editor::draw_chip(cr, renderer, e, content_x, dy + line_h / 2.0, self.chip_w, line_alpha * chip_k, now);
+                    cr.restore().unwrap();
+                }
+            }
+            let clock_x = renderer.snap(content_x + chip_len - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
             cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
             cr.move_to(clock_x, ty);
             pangocairo::functions::show_layout(cr, &clock);
             if reveal > 0.0 {
                 // the bars grow out of the clock's right edge
-                let bx = clock_x + clock_w + BARS_GAP * reveal;
+                let bx = clock_x + clock_ext.x() as f64 + clock_w + BARS_GAP * reveal;
                 cr.save().unwrap();
                 cr.rectangle(bx, dy, BARS_W * reveal, line_h);
                 cr.clip();
@@ -1034,6 +1173,23 @@ impl Island {
                 player::draw(cr, renderer, &self.art, &view, x0, dy, x1 - x0, alpha, now, self.player_opened);
             }
         }
+        if ed > 0.0 {
+            if let Some(e) = &self.nvim {
+                editor::draw(
+                    cr,
+                    renderer,
+                    e,
+                    x0,
+                    dy,
+                    x1 - x0,
+                    smoothstep((ed - 0.3) / 0.6),
+                    self.editor_hover,
+                    self.editor_pressed,
+                    now,
+                    self.editor_opened,
+                );
+            }
+        }
         if let Some(l) = &self.launcher {
             // the sheet's content comes up once the box has most of its size
             l.draw(cr, renderer, x0, dy, x1 - x0, smoothstep((p - 0.35) / 0.5), now);
@@ -1042,12 +1198,23 @@ impl Island {
 
         let top = dy.max(0.0);
         let bounds = Rect { x: x0 - FILLET, y: top, w: x1 - x0 + 2.0 * FILLET, h: y1 - top };
+        // the input region covers whichever is larger, the box now or the
+        // box it is growing into
+        let (target_w, target_h) = self.target_size(line_w, line_h, now);
+        let input_w = (x1 - x0).max(target_w);
+        let input_h = (y1 - dy).max(target_h);
+        let input = Rect {
+            x: cx - input_w / 2.0 - FILLET,
+            y: top,
+            w: input_w + 2.0 * FILLET,
+            h: (dy + input_h - top).max(0.0),
+        };
         // opaque: the box minus its curved corners (a T shape)
         let opaque = [
             (y1 - r > top).then(|| Rect { x: x0, y: top, w: x1 - x0, h: y1 - r - top }),
             (x1 - x0 > 2.0 * r).then(|| Rect { x: x0 + r, y: (y1 - r).max(top), w: x1 - x0 - 2.0 * r, h: r.min(y1 - top) }),
         ];
-        Frame { bounds: Some(bounds), opaque }
+        Frame { bounds: Some(bounds), input: Some(input), opaque }
     }
 
     /// One notification's content inside the pill: the app's icon with the
@@ -1064,7 +1231,12 @@ impl Island {
         let icon_cx = x0 + NOTICE_PAD_L + NOTICE_ICON / 2.0;
         let mid = dy + bh / 2.0 + offset;
         icons::draw(cr, note.kind, icon_cx, mid, NOTICE_ICON, t, alpha);
-        icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / NOTICE_HOLD).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3));
+        match note.progress {
+            // a job reports how far it has got instead of how long the pill
+            // still has to live
+            Some(done) => icons::progress_ring(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, done, alpha * smoothstep(t / 0.3)),
+            None => icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / NOTICE_HOLD).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
+        }
 
         let (_, app_ext) = app.pixel_extents();
         let (_, msg_ext) = msg.pixel_extents();
@@ -1093,7 +1265,42 @@ impl Island {
         self.song.is_some() && !self.pill_open() && self.launcher.is_none()
     }
 
-    /// Which control is under a point given in surface coordinates.
+    /// Is the editor's panel open (so clicks go to it)?
+    pub fn editor_panel_open(&self, now: Time) -> bool {
+        self.editor_panel.state(now).x > 0.5 && self.nvim.is_some()
+    }
+
+    /// What the pointer is over in the editor's panel.
+    pub fn editor_action_at(&self, cx: f64, px: f64, py: f64, now: Time) -> Option<editor::Action> {
+        if !self.editor_panel_open(now) {
+            return None;
+        }
+        let e = self.nvim.as_ref()?;
+        let (x0, y0) = self.box_origin(cx, now);
+        editor::hit(e, editor::PANEL_W, px - x0, py - y0)
+    }
+
+    pub fn set_editor_hover(&mut self, action: Option<editor::Action>) -> bool {
+        if action != self.editor_hover {
+            self.editor_hover = action;
+            return true;
+        }
+        false
+    }
+
+    /// A click in the editor's panel: what to ask Neovim to do.
+    pub fn press_editor(&mut self, action: editor::Action, now: Time) -> Option<(String, String)> {
+        let e = self.nvim.as_ref()?;
+        self.editor_pressed = Some((action, now));
+        let expr = match action {
+            editor::Action::Buffer(id) => format!("execute('buffer {id}')"),
+            editor::Action::Diagnostics => "luaeval('vim.diagnostic.goto_next({severity = vim.diagnostic.severity.ERROR, wrap = true}) or 1')".to_string(),
+            editor::Action::Save => "execute('silent! write')".to_string(),
+            editor::Action::Format => "luaeval('(pcall(vim.lsp.buf.format) or true) and 1')".to_string(),
+            editor::Action::CloseBuffer => "execute('silent! bdelete')".to_string(),
+        };
+        Some((e.server.clone(), expr))
+    }
     pub fn control_at(&self, cx: f64, px: f64, py: f64, now: Time) -> Option<player::Control> {
         if !self.player_open(now) {
             return None;
@@ -1181,9 +1388,26 @@ impl Island {
     pub fn box_origin(&self, cx: f64, now: Time) -> (f64, f64) {
         let p = self.panel.state(now).x;
         let pl = self.player.state(now).x;
+        let ed = self.editor_panel.state(now).x;
         let cx = cx - DODGE * self.dodge.state(now).x * (1.0 - p);
-        let w = launcher::PANEL_W * p + player::PLAYER_W * pl;
+        let w = launcher::PANEL_W * p + player::PLAYER_W * pl + editor::PANEL_W * ed;
         (cx - w / 2.0, -BOX_H * self.hide.state(now).x * (1.0 - p))
+    }
+
+    /// The size the box is heading for: whichever shape is being opened,
+    /// or the plain line when none is.
+    fn target_size(&self, line_w: f64, line_h: f64, now: Time) -> (f64, f64) {
+        let mut size = (line_w, line_h);
+        let mut take = |k: f64, w: f64, h: f64| {
+            if k > 0.5 {
+                size = (size.0.max(w), size.1.max(h));
+            }
+        };
+        take(self.pill.target(), self.pill_w.state(now).x, self.pill_h.state(now).x);
+        take(self.player.target(), player::PLAYER_W, player::PLAYER_H);
+        take(self.editor_panel.target(), editor::PANEL_W, editor::PANEL_H);
+        take(self.panel.target(), launcher::PANEL_W, launcher::PANEL_H);
+        size
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at

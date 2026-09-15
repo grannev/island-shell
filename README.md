@@ -10,6 +10,17 @@ brief, the current island's behaviour to match, and the plan.
 
 ## Status
 
+Neovim: with the companion plugin (`nvim/island.lua`) the island is the
+editor's status line. The mode rides beside the clock as a coloured chip
+with the unsaved dot, the diagnostics counts, the search count and a
+breathing red dot while a macro records; saving, LSP errors, LSP progress
+and `:IslandTask` arrive as pills; and the pointer opens a panel with the
+file, the position, git, the diagnostics and the buffer list — click a
+buffer to switch to it, or Save / Format / Close. The island writes
+`~/.config/island-shell/nvim-token` (0600) on first run and ignores any
+message that does not quote it, so only an editor running the plugin ever
+appears. See `nvim/README.md`.
+
 Step 4: the launcher (mod+d). The panel stands on its own: it opens even
 with the island parked above the edge (mod+i) and folds back out of sight,
 and the ⋯ drawer (mod+o) folds it away before the island dodges. The island unfolds into a 660×512 sheet —
@@ -146,6 +157,9 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/launcher.rs the launcher panel (search field, list, re-ranking)
     src/apps.rs     desktop entries: scanning, matching, launching
     src/iconload.rs icon-theme lookup and loading
+    src/nvim.rs     the Neovim protocol, its state and the calls back into it
+    src/editor.rs   the mode chip and the editor panel
+    nvim/island.lua the companion plugin (installed onto nvim's runtime path)
     scripts/        install, switch, routing
     examples/icons.rs  renders the icon set to a PNG for eyeballing
     examples/apps.rs   lists what the launcher would show, with icon sizes

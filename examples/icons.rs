@@ -13,7 +13,7 @@ use notify::AppKind;
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/icons.png".into());
     let t: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let kinds = [AppKind::Telegram, AppKind::System, AppKind::Firefox, AppKind::Discord, AppKind::Mail, AppKind::Bell, AppKind::Critical];
+    let kinds = [AppKind::Telegram, AppKind::System, AppKind::Firefox, AppKind::Discord, AppKind::Mail, AppKind::Bell, AppKind::Critical, AppKind::Editor];
     let (cell, size) = (160.0, 120.0);
     let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, (cell * kinds.len() as f64) as i32, cell as i32).unwrap();
     let cr = cairo::Context::new(&surface).unwrap();

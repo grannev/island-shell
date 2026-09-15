@@ -31,6 +31,7 @@ pub fn accent(kind: AppKind) -> (f64, f64, f64) {
         AppKind::Mail => rgb(0x3B82F6),
         AppKind::Bell => rgb(0x66D9FF),
         AppKind::Critical => rgb(0xFF3B30),
+        AppKind::Editor => rgb(0x57A143),
     }
 }
 
@@ -44,6 +45,7 @@ fn tile_gradient(kind: AppKind) -> ((f64, f64, f64), (f64, f64, f64)) {
         AppKind::Mail => rgb(0x1D5FD8),
         AppKind::Bell => rgb(0x3FA9D6),
         AppKind::Critical => rgb(0xD92B20),
+        AppKind::Editor => rgb(0x3E7A2E),
     };
     (top, bottom)
 }
@@ -99,6 +101,7 @@ pub fn draw(cr: &Context, kind: AppKind, cx: f64, cy: f64, size: f64, t: f64, al
         AppKind::Mail => envelope(cr, t, bottom, alpha),
         AppKind::Bell => bell(cr, t),
         AppKind::Critical => alert(cr, t),
+        AppKind::Editor => neovim(cr, t),
     }
     cr.restore().unwrap();
 }
@@ -280,6 +283,41 @@ fn alert(cr: &Context, t: f64) {
     cr.restore().unwrap();
 }
 
+/// Neovim: the two strokes of its mark, drawn in as they arrive.
+fn neovim(cr: &Context, t: f64) {
+    let k = min_jerk((t / 0.5).clamp(0.0, 1.0));
+    cr.save().unwrap();
+    // the left bar and the diagonal, as in the Neovim mark
+    cr.new_path();
+    cr.move_to(-11.0, -11.0);
+    cr.line_to(-4.6, -11.0);
+    cr.line_to(-4.6, 11.0 * (2.0 * k - 1.0).clamp(-1.0, 1.0).max(-1.0));
+    cr.line_to(-11.0, 11.0);
+    cr.close_path();
+    let _ = cr.fill();
+    if k > 0.35 {
+        let g = ((k - 0.35) / 0.65).clamp(0.0, 1.0);
+        cr.new_path();
+        cr.move_to(-4.6, -11.0);
+        cr.line_to(-4.6 + 15.6 * g, -11.0 + 22.0 * g);
+        cr.line_to(11.0 * g.max(0.35), 11.0);
+        cr.line_to(11.0 * g.max(0.35), -11.0 + 4.0);
+        cr.close_path();
+        let _ = cr.fill();
+    }
+    // the right bar
+    if k > 0.6 {
+        cr.new_path();
+        cr.move_to(4.6, -11.0 + 6.0);
+        cr.line_to(11.0, -11.0);
+        cr.line_to(11.0, 11.0);
+        cr.line_to(4.6, 11.0);
+        cr.close_path();
+        let _ = cr.fill();
+    }
+    cr.restore().unwrap();
+}
+
 /// The countdown ring around the icon: it empties clockwise from the top
 /// over the notification's life.
 pub fn countdown(cr: &Context, kind: AppKind, cx: f64, cy: f64, radius: f64, left: f64, alpha: f64) {
@@ -297,4 +335,23 @@ pub fn countdown(cr: &Context, kind: AppKind, cx: f64, cy: f64, radius: f64, lef
     cr.arc(cx, cy, radius, -PI / 2.0, -PI / 2.0 + 2.0 * PI * left.clamp(0.0, 1.0));
     cr.set_source_rgba(c.0, c.1, c.2, 0.9 * alpha);
     let _ = cr.stroke();
+}
+
+/// A ring that fills as a job gets on with it (LSP indexing, a build), the
+/// same size as the countdown so one can take over from the other.
+pub fn progress_ring(cr: &Context, kind: AppKind, cx: f64, cy: f64, radius: f64, done: f64, alpha: f64) {
+    let c = accent(kind);
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_line_width(2.0);
+    cr.new_path();
+    cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
+    cr.set_source_rgba(c.0, c.1, c.2, 0.18 * alpha);
+    let _ = cr.stroke();
+    let done = done.clamp(0.0, 1.0);
+    if done > 0.0 {
+        cr.new_path();
+        cr.arc(cx, cy, radius, -PI / 2.0, -PI / 2.0 + 2.0 * PI * done);
+        cr.set_source_rgba(c.0, c.1, c.2, 0.95 * alpha);
+        let _ = cr.stroke();
+    }
 }

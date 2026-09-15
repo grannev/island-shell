@@ -34,11 +34,18 @@ pub enum Command {
     /// `scrub <0..1|end>`: drag the playhead from a script, exactly as the
     /// pointer does — repeated calls move it, "end" lands it
     Scrub(String),
+    /// `nvim <json>`: a message from the companion Neovim plugin
+    Nvim(String),
     Quit,
 }
 
 impl Command {
     pub fn parse(s: &str) -> Option<Command> {
+        // the editor's messages carry JSON, which does not survive being
+        // cut into words
+        if let Some(json) = s.trim().strip_prefix("nvim ") {
+            return Some(Command::Nvim(json.to_string()));
+        }
         let words: Vec<&str> = s.split_whitespace().collect();
         Some(match words.as_slice() {
             ["toggle"] => Command::Toggle,

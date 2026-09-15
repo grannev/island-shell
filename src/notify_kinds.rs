@@ -10,4 +10,6 @@ pub enum AppKind {
     Mail,
     Bell,
     Critical,
+    /// Neovim, through the companion plugin
+    Editor,
 }

@@ -21,6 +21,11 @@ pub struct Notification {
     pub body: String,
     pub kind: AppKind,
     pub critical: bool,
+    /// notifications sharing a tag replace each other in place instead of
+    /// rolling (LSP progress updating itself, say)
+    pub tag: Option<String>,
+    /// a ring that fills instead of the countdown that empties
+    pub progress: Option<f64>,
 }
 
 impl Notification {
@@ -42,7 +47,7 @@ pub fn fabricate(app: &str, summary: &str, body: &str) -> Notification {
     let critical = app.eq_ignore_ascii_case("critical");
     let app_kind = classify(app, "", false);
     let kind = if critical { AppKind::Critical } else { app_kind };
-    Notification { app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical }
+    Notification { app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None }
 }
 
 pub fn spawn_watch(tx: Sender<Notification>) {
@@ -92,6 +97,8 @@ fn watch(tx: &Sender<Notification>) -> zbus::Result<()> {
             body: plain(&body),
             kind,
             critical,
+            tag: None,
+            progress: None,
         });
     }
     Ok(())

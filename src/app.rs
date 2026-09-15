@@ -215,6 +215,8 @@ pub struct App {
     clock: FrameClock,
     /// the presentation time of the last frame we drew
     drawn_for: Option<Time>,
+    /// the token the Neovim plugin has to quote
+    nvim_token: String,
 
     pub island: Island,
     renderer: Renderer,
@@ -312,6 +314,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         buffers: Vec::new(),
         clock: FrameClock::new(),
         drawn_for: None,
+        nvim_token: crate::nvim::token(),
         island,
         renderer: Renderer::new(1.0),
         sway_query,
@@ -412,6 +415,36 @@ fn surface_frame(layer: &LayerSurface, qh: &QueueHandle<App>) {
     let surface = layer.wl_surface();
     surface.frame(qh, FrameCallbackData(surface.clone()));
     layer.commit();
+}
+
+/// Turn an editor toast into the notification the pill already knows how
+/// to show.
+fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progress: Option<f64>) -> notify::Notification {
+    use crate::nvim::ToastKind;
+    let critical = kind == ToastKind::Error;
+    let app = match kind {
+        ToastKind::Saved => "Saved",
+        ToastKind::Done => "Done",
+        ToastKind::Error => "Error",
+        ToastKind::Warning => "Warning",
+        ToastKind::Git => "Git",
+        _ => "Neovim",
+    };
+    // `vim.notify` hands us its own title, which is often just the editor's
+    // name: no point saying it twice
+    let (summary, body) = if title == app || title.is_empty() { (body, String::new()) } else { (title, body) };
+    notify::Notification {
+        app: app.to_string(),
+        summary,
+        body,
+        kind: if critical { crate::notify::AppKind::Critical } else { crate::notify::AppKind::Editor },
+        critical,
+        tag: Some(match kind {
+            ToastKind::Progress => "nvim.progress".into(),
+            _ => "nvim".into(),
+        }),
+        progress,
+    }
 }
 
 fn read_muted() -> bool {
@@ -531,6 +564,27 @@ impl App {
                     _ => return format!("error: unknown key {name:?}"),
                 };
                 self.launcher_key(&KeyEvent { time: 0, raw_code: 0, keysym, utf8: None });
+                return "ok".into();
+            }
+            Command::Nvim(json) => {
+                match crate::nvim::parse(&json, &self.nvim_token) {
+                    Some(crate::nvim::Message::State(editor)) => {
+                        if self.island.set_editor(*editor, now) {
+                            self.after_change();
+                        }
+                    }
+                    Some(crate::nvim::Message::Gone(server)) => {
+                        self.island.editor_gone(&server, now);
+                        self.after_change();
+                    }
+                    Some(crate::nvim::Message::Toast { kind, title, body, progress }) => {
+                        self.island.notify(editor_toast(kind, title, body, progress), now);
+                        self.after_change();
+                    }
+                    // not ours: a Neovim without the companion plugin, or
+                    // one quoting the wrong token
+                    None => return "error: not an island.nvim message".into(),
+                }
                 return "ok".into();
             }
             Command::Scrub(value) => {
@@ -894,9 +948,9 @@ impl App {
         let surface = self.layer.wl_surface();
         // input only over the box (the rest of the surface is empty air),
         // opaque where the box is solid, damage where anything changed
-        if self.last_frame.map(|f| f.bounds) != Some(frame.bounds) {
+        if self.last_frame.map(|f| f.input) != Some(frame.input) {
             let region = Region::new(&self.compositor).expect("wl_region");
-            if let Some(r) = frame.bounds {
+            if let Some(r) = frame.input {
                 region.add(r.x.floor() as i32, r.y.floor() as i32, r.w.ceil() as i32 + 1, r.h.ceil() as i32 + 1);
             }
             self.layer.set_input_region(Some(region.wl_region()));
@@ -1064,6 +1118,7 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Leave { .. } => {
                     self.island.hovered = false;
+                    self.island.set_editor_hover(None);
                     if !self.island.is_scrubbing() {
                         self.island.set_hovered_control(None);
                     }
@@ -1084,6 +1139,10 @@ impl PointerHandler for App {
                         }
                         changed = true;
                         continue;
+                    }
+                    let action = self.island.editor_action_at(self.width as f64 / 2.0, event.position.0, event.position.1, now);
+                    if self.island.set_editor_hover(action) {
+                        changed = true;
                     }
                     let control = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now);
                     if self.island.set_hovered_control(control) {
@@ -1115,6 +1174,16 @@ impl PointerHandler for App {
                         }
                         changed = true;
                         continue;
+                    }
+                    // inside the editor's panel the rows and buttons act
+                    if let Some(action) = self.island.editor_action_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
+                        if button == BTN_LEFT {
+                            if let Some((server, expr)) = self.island.press_editor(action, now) {
+                                crate::nvim::call(&server, &expr);
+                            }
+                            changed = true;
+                            continue;
+                        }
                     }
                     // inside the open player the buttons and the progress
                     // line take the click
