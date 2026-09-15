@@ -22,8 +22,11 @@ literal-first with acronyms ("vsc" finds Visual Studio Code) and nothing
 looser, ranked by how often each entry has been launched from here.
 Typing re-ranks the list and the rows *glide* to their new places on
 springs while the selection follows; rows entering and leaving fade.
-Keyboard: text, Backspace, Ctrl+U, Up/Down/Tab, Enter to launch, Escape
-to fold; the pointer picks rows too. The launcher takes the keyboard
+The list holds every match and scrolls — the wheel, or the selection
+walking past the edge — with no scrollbar: the rows simply fade into the
+top and bottom of the viewport. Keyboard: text, Backspace, Ctrl+U,
+Up/Down/Tab, Enter to launch, Escape to fold; the pointer picks rows and
+the wheel scrolls. The launcher takes the keyboard
 (layer-shell exclusive) only while it is open, gives way to Touch ID, and
 notifications wait behind it.
 

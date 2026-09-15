@@ -1026,12 +1026,20 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Axis { vertical, .. } => {
-                    // scroll up = next, down = previous (as on the old touch target)
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
-                    if v < 0.0 {
-                        self.player_control(PlayerCommand::Next);
-                    } else if v > 0.0 {
-                        self.player_control(PlayerCommand::Previous);
+                    let now = self.clock.predict(false);
+                    match self.island.launcher.as_mut() {
+                        // inside the launcher the wheel scrolls the list
+                        Some(l) => {
+                            let rows = if vertical.discrete != 0 { v } else { v / 40.0 };
+                            if l.scroll_by(rows, now) {
+                                changed = true;
+                            }
+                        }
+                        // on the line it skips tracks (as on the old touch target)
+                        None if v < 0.0 => self.player_control(PlayerCommand::Next),
+                        None if v > 0.0 => self.player_control(PlayerCommand::Previous),
+                        None => {}
                     }
                 }
                 _ => {}
@@ -1055,7 +1063,7 @@ impl App {
         if px < bx || px > bx + crate::launcher::PANEL_W {
             return false;
         }
-        match l.row_at(by, py) {
+        match l.row_at(by, py, now) {
             Some(index) => {
                 l.select_index(index, now);
                 true

@@ -24,10 +24,18 @@ const ROW_H: f64 = 56.0;
 const ROW_PAD: f64 = 14.0;
 const ICON: f64 = 38.0;
 const ICON_GAP: f64 = 16.0;
-pub const MAX_ROWS: usize = 7;
+/// rows that fit in the list's viewport
+pub const VISIBLE_ROWS: usize = 7;
+/// how many matches are kept at all (far more than anyone scrolls through)
+const MAX_MATCHES: usize = 200;
+/// the list fades out at its edges instead of showing a scrollbar
+const EDGE_FADE: f64 = 22.0;
+/// keep this many rows visible past the selection when scrolling to it
+const SCROLL_MARGIN: f64 = 1.0;
 
 const ROW_SPRING: (f64, f64) = (0.34, 0.82);
 const SEL_SPRING: (f64, f64) = (0.28, 0.78);
+const SCROLL_SPRING: (f64, f64) = (0.3, 0.95);
 const FADE: f64 = 0.22;
 /// the caret's blink (macOS runs at a bit under two a second)
 const CARET_HZ: f64 = 1.6;
@@ -55,6 +63,9 @@ pub struct Launcher {
     selected: String,
     sel_slot: Spring,
     sel_alpha: Quintic,
+    /// how far the list is scrolled, in rows
+    scroll: Spring,
+    matches: usize,
     opened: Time,
 }
 
@@ -68,6 +79,8 @@ impl Launcher {
             selected: String::new(),
             sel_slot: Spring::new(0.0, SEL_SPRING.0, SEL_SPRING.1),
             sel_alpha: Quintic::at_rest(0.0, FADE),
+            scroll: Spring::new(0.0, SCROLL_SPRING.0, SCROLL_SPRING.1),
+            matches: 0,
             opened: now,
         };
         l.refresh(now);
@@ -79,6 +92,7 @@ impl Launcher {
         self.rows.iter().any(|r| r.slot.is_moving(now) || r.alpha.is_moving(now))
             || self.sel_slot.is_moving(now)
             || self.sel_alpha.is_moving(now)
+            || self.scroll.is_moving(now)
             // the icons finish popping in
             || self.rows.iter().any(|r| now - r.born < 0.35)
             || now - self.opened < 0.8
@@ -99,7 +113,8 @@ impl Launcher {
     /// Re-rank for the current query: rows that stay glide to their new
     /// places, rows that go fade out where they are, new ones fade in.
     pub fn refresh(&mut self, now: Time) {
-        let hits: Vec<App> = apps::search(&self.all, &self.query, MAX_ROWS).into_iter().cloned().collect();
+        let hits: Vec<App> = apps::search(&self.all, &self.query, MAX_MATCHES).into_iter().cloned().collect();
+        self.matches = hits.len();
         for (i, app) in hits.iter().enumerate() {
             match self.rows.iter_mut().find(|r| r.id == app.id) {
                 Some(row) => {
@@ -127,14 +142,53 @@ impl Launcher {
         // keep the selection if it is still in the list, else take the top
         if !hits.iter().any(|a| a.id == self.selected) {
             self.selected = hits.first().map(|a| a.id.clone()).unwrap_or_default();
+            self.scroll.set(0.0, now);
         }
         self.sync_selection(now);
+        // a shorter list may leave the scroll past its end
+        let clamped = self.scroll.target().clamp(0.0, self.max_scroll());
+        if (clamped - self.scroll.target()).abs() > 1e-6 {
+            self.scroll.set(clamped, now);
+        }
+        self.scroll_to_selection(now);
     }
 
     fn results(&self) -> Vec<&Row> {
         let mut rows: Vec<&Row> = self.rows.iter().filter(|r| !r.leaving).collect();
         rows.sort_by(|a, b| a.slot.target().partial_cmp(&b.slot.target()).unwrap_or(std::cmp::Ordering::Equal));
         rows
+    }
+
+    /// The furthest the list can be scrolled, in rows.
+    fn max_scroll(&self) -> f64 {
+        (self.matches as f64 - VISIBLE_ROWS as f64).max(0.0)
+    }
+
+    /// Scroll by `rows` (the wheel).
+    pub fn scroll_by(&mut self, rows: f64, now: Time) -> bool {
+        let target = (self.scroll.target() + rows).clamp(0.0, self.max_scroll());
+        if (target - self.scroll.target()).abs() < 1e-6 {
+            return false;
+        }
+        self.scroll.set(target, now);
+        true
+    }
+
+    /// Bring the selection into view, keeping a row of context where there
+    /// is one.
+    fn scroll_to_selection(&mut self, now: Time) {
+        let Some(slot) = self.rows.iter().find(|r| r.id == self.selected).map(|r| r.slot.target()) else { return };
+        let first = self.scroll.target();
+        let last = first + VISIBLE_ROWS as f64 - 1.0;
+        let margin = if self.matches > VISIBLE_ROWS + 1 { SCROLL_MARGIN } else { 0.0 };
+        let target = if slot < first + margin {
+            slot - margin
+        } else if slot > last - margin {
+            slot - VISIBLE_ROWS as f64 + 1.0 + margin
+        } else {
+            return;
+        };
+        self.scroll.set(target.clamp(0.0, self.max_scroll()), now);
     }
 
     fn sync_selection(&mut self, now: Time) {
@@ -159,6 +213,12 @@ impl Launcher {
         let next = (current + delta).rem_euclid(n) as usize;
         self.selected = rows[next].id.clone();
         self.sync_selection(now);
+        // a shorter list may leave the scroll past its end
+        let clamped = self.scroll.target().clamp(0.0, self.max_scroll());
+        if (clamped - self.scroll.target()).abs() > 1e-6 {
+            self.scroll.set(clamped, now);
+        }
+        self.scroll_to_selection(now);
     }
 
     pub fn select_index(&mut self, index: usize, now: Time) {
@@ -199,13 +259,13 @@ impl Launcher {
     }
 
     /// Which row is at `y` inside the panel (for the pointer).
-    pub fn row_at(&self, panel_top: f64, y: f64) -> Option<usize> {
+    pub fn row_at(&self, panel_top: f64, y: f64, now: Time) -> Option<usize> {
         let rel = y - (panel_top + LIST_TOP);
-        if rel < 0.0 {
+        if rel < 0.0 || rel > VISIBLE_ROWS as f64 * ROW_H {
             return None;
         }
-        let index = (rel / ROW_H) as usize;
-        (index < self.results().len()).then_some(index)
+        let index = (rel / ROW_H + self.scroll.state(now).x).floor();
+        (index >= 0.0 && (index as usize) < self.results().len()).then_some(index as usize)
     }
 
     /// Draw the panel's content inside the box at (`x`, `y`, `w`), faded in
@@ -258,10 +318,19 @@ impl Launcher {
             let _ = cr.fill();
         }
 
+        // the list scrolls inside its own viewport; there is no scrollbar,
+        // the rows simply fade out at the top and bottom edges
+        let scroll = self.scroll.state(now).x;
+        let view_top = y + LIST_TOP;
+        let view_h = VISIBLE_ROWS as f64 * ROW_H;
+        cr.save().unwrap();
+        cr.rectangle(x, view_top, w, view_h);
+        cr.clip();
+
         // the selection, gliding between rows
         let sel_alpha = self.sel_alpha.state(now).x * alpha;
         if sel_alpha > 0.002 {
-            let sy = y + LIST_TOP + self.sel_slot.state(now).x * ROW_H;
+            let sy = view_top + (self.sel_slot.state(now).x - scroll) * ROW_H;
             rounded(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0, 13.0);
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * sel_alpha);
             let _ = cr.fill();
@@ -274,11 +343,37 @@ impl Launcher {
             if row_alpha <= 0.004 {
                 continue;
             }
+            let place = slot - scroll;
+            if place < -1.2 || place > VISIBLE_ROWS as f64 + 0.2 {
+                continue; // outside the viewport: nothing to draw
+            }
             // each row arrives a beat after the one above it
-            let (ra, ro) = intro(0.06 + 0.045 * slot.max(0.0));
-            let ry = y + LIST_TOP + slot * ROW_H + ro;
+            let (ra, ro) = intro(0.06 + 0.045 * place.max(0.0));
+            let ry = view_top + place * ROW_H + ro;
             self.draw_row(cr, renderer, row, x, ry, w, row_alpha * (ra / alpha).min(1.0), now);
         }
+
+        // the fades: black over the panel's own black, so rows dissolve
+        // into the edges of the viewport when there is more to scroll to
+        let fade_top = (scroll / 0.6).clamp(0.0, 1.0);
+        let fade_bottom = ((self.max_scroll() - scroll) / 0.6).clamp(0.0, 1.0);
+        if fade_top > 0.0 {
+            let g = cairo::LinearGradient::new(0.0, view_top, 0.0, view_top + EDGE_FADE);
+            g.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, fade_top);
+            g.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.0);
+            let _ = cr.set_source(&g);
+            cr.rectangle(x, view_top, w, EDGE_FADE);
+            let _ = cr.fill();
+        }
+        if fade_bottom > 0.0 {
+            let g = cairo::LinearGradient::new(0.0, view_top + view_h - EDGE_FADE, 0.0, view_top + view_h);
+            g.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+            g.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, fade_bottom);
+            let _ = cr.set_source(&g);
+            cr.rectangle(x, view_top + view_h - EDGE_FADE, w, EDGE_FADE);
+            let _ = cr.fill();
+        }
+        cr.restore().unwrap();
 
         if self.results().is_empty() {
             let text = renderer.layout(cr, "No results", Font::Text);
