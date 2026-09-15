@@ -60,6 +60,7 @@ use crate::ctl::{Command, Server};
 use crate::dbus::{self, PlayerCommand};
 use crate::eq::{self, Cava};
 use crate::island::{Config, Frame, Island, Rect, Renderer};
+use crate::notify;
 use crate::sway;
 
 /// Logical size of the (mostly transparent) surface: wide enough for the
@@ -252,6 +253,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     dbus::spawn_player_watch(dbus_tx.clone());
     dbus::spawn_auth_watch(dbus_tx);
     let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
+    let (note_tx, note_rx) = channel::channel::<notify::Notification>();
+    notify::spawn_watch(note_tx);
 
     let mut island = Island::new(load_config());
     island.update_clock();
@@ -311,6 +314,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let channel::Event::Msg(levels) = event {
             app.island.set_eq(levels);
             app.redraw();
+        }
+    })?;
+    loop_handle.insert_source(note_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(note) = event {
+            let now = app.frame_time();
+            app.island.notify(note, now);
+            app.after_change();
         }
     })?;
 
@@ -452,6 +462,12 @@ impl App {
                 if let Err(e) = self.island.config.set(&key, &value) {
                     return format!("error: {e}");
                 }
+            }
+            Command::Demo(app, summary, body) => {
+                let note = notify::fabricate(&app, &summary, &body);
+                self.island.notify(note, now);
+                self.after_change();
+                return "ok".into();
             }
             Command::Dump(path) => {
                 return match self.dump(&path) {
@@ -832,6 +848,12 @@ impl PointerHandler for App {
                     changed = true;
                 }
                 PointerEventKind::Press { button, .. } => {
+                    // a click on a notification dismisses it
+                    let now = self.clock.predict(false);
+                    if self.island.dismiss_notice(now) {
+                        changed = true;
+                        continue;
+                    }
                     let cmd = match button {
                         BTN_LEFT => Some(PlayerCommand::PlayPause),
                         BTN_RIGHT => Some(PlayerCommand::Next),

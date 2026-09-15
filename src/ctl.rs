@@ -20,6 +20,8 @@ pub enum Command {
     Set(String, String),
     /// `dump <file.png>`: render the current frame to a PNG (debugging)
     Dump(String),
+    /// `demo <app> <summary> <body>`: fabricate a notification (debugging)
+    Demo(String, String, String),
     Quit,
 }
 
@@ -36,6 +38,11 @@ impl Command {
             ["status"] => Command::Status,
             ["set", key, value] => Command::Set(key.to_string(), value.to_string()),
             ["dump", path] => Command::Dump(path.to_string()),
+            ["demo", app, rest @ ..] => {
+                let rest = rest.join(" ");
+                let (summary, body) = rest.split_once('|').unwrap_or((rest.as_str(), ""));
+                Command::Demo(app.to_string(), summary.trim().to_string(), body.trim().to_string())
+            }
             ["quit"] => Command::Quit,
             _ => return None,
         })

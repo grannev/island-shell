@@ -9,6 +9,7 @@ use std::f64::consts::FRAC_PI_2;
 use cairo::Context;
 
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
+use crate::icons;
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -64,6 +65,21 @@ const MARK_DELAY: f64 = 0.32;
 const AUTH_OK_HOLD: f64 = 1.5;
 const AUTH_FAIL_HOLD: f64 = 1.9;
 const ICON_SIZE: f64 = 48.0;
+/// Notifications: the pill is wider, the content sits on two lines beside
+/// the app's icon, and it holds for 3.5 s (restarted per notification).
+const NOTICE_HOLD: f64 = 3.5;
+const NOTICE_MIN_W: f64 = 420.0;
+const NOTICE_MAX_TEXT: f64 = 380.0;
+const NOTICE_PAD_L: f64 = 22.0;
+const NOTICE_PAD_R: f64 = 24.0;
+const NOTICE_ICON: f64 = 40.0;
+const NOTICE_GAP: f64 = 16.0;
+const NOTICE_LINE_GAP: f64 = 2.0;
+/// the roll when one notification replaces another
+const ROLL_DUR: f64 = 0.44;
+const PILL_W_DUR: f64 = 0.35;
+/// how far the content travels in the roll
+const ROLL_TRAVEL: f64 = 46.0;
 
 const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
@@ -148,6 +164,14 @@ impl Song {
     }
 }
 
+/// A notification on screen, with the instant it arrived (its icon's
+/// entrance and the countdown ring run from there).
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub note: crate::notify::Notification,
+    pub since: Time,
+}
+
 /// Touch ID: what the pill shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Auth {
@@ -188,6 +212,14 @@ pub struct Island {
     auth_start: Time,
     /// the last result shown, for undrawing it on a new attempt
     last_mark: Option<(touchid::Mark, (f64, f64, f64))>,
+    /// Notifications: the one on screen, the one it replaced (while the
+    /// roll runs) and one waiting for Touch ID to finish.
+    notice: Option<Notice>,
+    notice_prev: Option<Notice>,
+    notice_queued: Option<crate::notify::Notification>,
+    roll: Quintic,
+    /// the pill's width, eased when a new notification needs another
+    pill_w: Quintic,
     /// the icon: fingerprint → ring, and the mark drawing itself on it
     ring: Quintic,
     mark: Quintic,
@@ -232,6 +264,11 @@ fn mix(a: (f64, f64, f64), b: (f64, f64, f64), k: f64) -> (f64, f64, f64) {
     (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k)
 }
 
+/// How far the pill's content has faded in, from the morph's progress.
+fn pill_alpha_of(q: f64) -> f64 {
+    smoothstep((q - PILL_SWAP) / (1.0 - PILL_SWAP))
+}
+
 fn smoothstep(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
@@ -255,6 +292,11 @@ impl Island {
             auth: None,
             auth_start: 0.0,
             last_mark: None,
+            notice: None,
+            notice_prev: None,
+            notice_queued: None,
+            roll: Quintic::at_rest(1.0, ROLL_DUR),
+            pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             ring: Quintic::at_rest(0.0, RING_DUR),
             mark: Quintic::at_rest(0.0, MARK_DUR),
             hidden: HideReasons::default(),
@@ -272,8 +314,10 @@ impl Island {
             || self.reveal.is_moving(now)
             || self.pill.is_moving(now)
             || self.eq_moving()
+            || self.roll.is_moving(now)
+            || self.pill_w.is_moving(now)
             // the pill's content animates the whole time it is up
-            || self.auth.is_some() && self.pill.state(now).x > 0.0
+            || self.pill_open() && self.pill.state(now).x > 0.0
     }
 
     fn eq_moving(&self) -> bool {
@@ -285,8 +329,14 @@ impl Island {
         self.song.is_some()
             && self.song_pending.is_none()
             && !self.dodged
-            && self.auth.is_none()
+            && !self.pill_open()
             && !self.silent_expired(now)
+    }
+
+    /// Is anything using the pill (Touch ID owns it; a notification takes
+    /// it when Touch ID does not)?
+    fn pill_open(&self) -> bool {
+        self.auth.is_some() || self.notice.is_some()
     }
 
     fn silent_expired(&self, now: Time) -> bool {
@@ -295,13 +345,20 @@ impl Island {
 
     /// Re-aim the movers after a state change.
     pub fn sync(&mut self, now: Time) {
+        if self.hidden.any() {
+            // out of sight: a notification goes with it instead of waiting
+            // to reappear when the island comes back
+            self.notice = None;
+            self.notice_prev = None;
+            self.notice_queued = None;
+        }
         self.hide.set(if self.hidden.any() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
         // no hover feedback while hidden: the box is not there to point at
         let hover = self.config.hover && self.hovered && !self.hidden.any() && self.auth.is_none();
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
         self.reveal.set(if self.want_reveal(now) { 1.0 } else { 0.0 }, now);
-        self.pill.set(if self.auth.is_some() { 1.0 } else { 0.0 }, now);
+        self.pill.set(if self.pill_open() { 1.0 } else { 0.0 }, now);
         let result = matches!(self.auth, Some(Auth::Ok(_) | Auth::Fail(_)));
         self.ring.set(if result { 1.0 } else { 0.0 }, now);
         if !result {
@@ -334,6 +391,21 @@ impl Island {
             Some(Auth::Ok(since) | Auth::Fail(since)) if now - since >= MARK_DELAY => self.mark.set(1.0, now),
             _ => {}
         }
+        // a notification that waited for Touch ID takes the pill now
+        if self.auth.is_none() {
+            if let Some(note) = self.notice_queued.take() {
+                self.show_notice(note, now);
+                changed = true;
+            }
+        }
+        if self.notice.as_ref().is_some_and(|n| now - n.since >= NOTICE_HOLD) {
+            self.notice = None;
+            self.notice_prev = None;
+            changed = true;
+        }
+        if self.notice_prev.is_some() && !self.roll.is_moving(now) {
+            self.notice_prev = None;
+        }
         if self.silent_expired(now) && self.reveal.state(now).x > 0.0 && self.song_pending.is_none() {
             changed = true; // sync retracts it
         }
@@ -351,6 +423,9 @@ impl Island {
             Some(Auth::Ok(since)) => consider(since + AUTH_OK_HOLD),
             Some(Auth::Fail(since)) => consider(since + AUTH_FAIL_HOLD),
             _ => {}
+        }
+        if let Some(n) = &self.notice {
+            consider(n.since + NOTICE_HOLD);
         }
         if let Some(since) = self.silent_since {
             if now - since < SILENT_AFTER && self.song.is_some() {
@@ -376,7 +451,7 @@ impl Island {
             self.song_pending.is_some(),
             self.reveal.state(now).x,
             self.pill.state(now).x,
-            self.auth,
+            self.auth.map(|a| format!("{a:?}")).or_else(|| self.notice.as_ref().map(|n| format!("notice {:?}", n.note.app))),
             self.silent_since.map_or(0.0, |s| now - s)
         )
     }
@@ -426,6 +501,43 @@ impl Island {
         if self.song.as_ref().is_some_and(|s| s.playing) {
             self.eq_target = levels.map(|v| v as f64);
         }
+    }
+
+    /// A notification arrived. It is skipped while the island is hidden
+    /// and waits behind an active Touch ID.
+    pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
+        if self.hidden.any() {
+            return;
+        }
+        if self.auth.is_some() {
+            self.notice_queued = Some(note);
+            return;
+        }
+        self.show_notice(note, now);
+    }
+
+    fn show_notice(&mut self, note: crate::notify::Notification, now: Time) {
+        if self.notice.is_some() {
+            // a newer one while the pill is up: the old rolls out through
+            // the top, the new one in from below
+            self.notice_prev = self.notice.take();
+            self.roll.set_at(0.0, now);
+            self.roll.set(1.0, now);
+        }
+        self.notice = Some(Notice { note, since: now });
+        self.sync(now);
+    }
+
+    /// Dismiss what the pill shows (a click on it).
+    pub fn dismiss_notice(&mut self, now: Time) -> bool {
+        if self.notice.is_some() {
+            self.notice = None;
+            self.notice_prev = None;
+            self.notice_queued = None;
+            self.sync(now);
+            return true;
+        }
+        false
     }
 
     /// fprintd started a verification.
@@ -531,8 +643,15 @@ impl Island {
         let group_len = group.as_ref().map_or(0.0, |g| g.6);
         let line_w = clock_w + reveal * group_len + 2.0 * pad;
 
-        // --- the Touch ID pill ---
-        let pill_w = PILL_MIN_W;
+        // --- the pill: Touch ID, or a notification ---
+        let notice_w = self.notice.as_ref().map(|n| renderer.notice_width(cr, &n.note));
+        let pill_target = if self.auth.is_some() { PILL_MIN_W } else { notice_w.unwrap_or(self.pill_w.state(now).x) };
+        if q <= 0.0 {
+            self.pill_w.set_at(pill_target, now); // opening: start at the right width
+        } else {
+            self.pill_w.set(pill_target, now);
+        }
+        let pill_w = self.pill_w.state(now).x;
         let line_h = BOX_H;
         let bw = line_w + (pill_w - line_w) * q + stretch_x;
         let bh = line_h + (PILL_H - line_h) * q + stretch_y - stretch_x * 0.15;
@@ -548,6 +667,15 @@ impl Island {
         self.trace_notch(cr, x0, x1, dy, y1, r);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.fill();
+        // a critical notification puts a breathing rim around the pill
+        if let Some(n) = self.notice.as_ref().filter(|n| n.note.critical) {
+            let c = icons::accent(n.note.kind);
+            let breathe = 0.45 + 0.35 * (0.5 - 0.5 * (2.0 * std::f64::consts::PI * (now - n.since) / 1.1).cos());
+            self.trace_notch(cr, x0 + 0.75, x1 - 0.75, dy, y1 - 0.75, r);
+            cr.set_line_width(1.5);
+            cr.set_source_rgba(c.0, c.1, c.2, breathe * pill_alpha_of(q));
+            let _ = cr.stroke();
+        }
         // everything inside stays inside (the pill content climbs in from
         // below the box): a pixel-aligned rectangle, which cairo clips for
         // free, is enough — the content never reaches the corners
@@ -560,7 +688,7 @@ impl Island {
         // while the pill opens (first third), the pill's content climbs in
         // from below and fades in over the rest
         let line_alpha = 1.0 - smoothstep(q / PILL_SWAP);
-        let pill_alpha = smoothstep((q - PILL_SWAP) / (1.0 - PILL_SWAP));
+        let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
             let content_w = clock_w + reveal * group_len;
             let clock_x = renderer.snap(cx + content_w / 2.0 - clock_w - clock_ext.x() as f64);
@@ -661,6 +789,19 @@ impl Island {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.8 * pill_alpha);
                 cr.move_to(cxp, cy);
                 pangocairo::functions::show_layout(cr, &cap_l);
+            } else {
+                // a notification: the icon with its countdown on the left,
+                // the app's name and the message beside it. A newer one
+                // rolls the old content out through the top and itself in
+                // from below.
+                let roll = self.roll.state(now).x;
+                if let Some(prev) = &self.notice_prev {
+                    self.draw_notice(cr, renderer, prev, cx, dy, bh, pill_alpha * (1.0 - roll).powf(0.8), -ROLL_TRAVEL * roll, now);
+                }
+                if let Some(notice) = &self.notice {
+                    let climb = (1.0 - pill_alpha) * PILL_CLIMB + ROLL_TRAVEL * (1.0 - roll);
+                    self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7), climb, now);
+                }
             }
         }
         cr.restore().unwrap();
@@ -675,9 +816,41 @@ impl Island {
         Frame { bounds: Some(bounds), opaque }
     }
 
+    /// One notification's content inside the pill: the app's icon with the
+    /// countdown ring, its name and the message.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_notice(&self, cr: &Context, renderer: &Renderer, notice: &Notice, cx: f64, dy: f64, bh: f64, alpha: f64, offset: f64, now: Time) {
+        if alpha <= 0.001 {
+            return;
+        }
+        let note = &notice.note;
+        let t = now - notice.since;
+        let (app, msg, width) = renderer.notice_layouts(cr, note);
+        let x0 = cx - width / 2.0;
+        let icon_cx = x0 + NOTICE_PAD_L + NOTICE_ICON / 2.0;
+        let mid = dy + bh / 2.0 + offset;
+        icons::draw(cr, note.kind, icon_cx, mid, NOTICE_ICON, t, alpha);
+        icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / NOTICE_HOLD).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3));
+
+        let (_, app_ext) = app.pixel_extents();
+        let (_, msg_ext) = msg.pixel_extents();
+        let total = app_ext.height() as f64 + NOTICE_LINE_GAP + msg_ext.height() as f64;
+        let tx = renderer.snap(x0 + NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP);
+        let ty = mid - total / 2.0;
+        // the lines settle in a hair after the icon, each a touch later
+        let slide = |d: f64| 6.0 * (1.0 - smoothstep(((t - d) / 0.4).clamp(0.0, 1.0)));
+        let accent = icons::accent(note.kind);
+        cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
+        cr.move_to(tx + slide(0.06), renderer.snap(ty - app_ext.y() as f64));
+        pangocairo::functions::show_layout(cr, &app);
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.95);
+        cr.move_to(tx + slide(0.12), renderer.snap(ty + app_ext.height() as f64 + NOTICE_LINE_GAP - msg_ext.y() as f64));
+        pangocairo::functions::show_layout(cr, &msg);
+    }
+
     /// Hit test for clicks: the song controls only make sense on the line.
     pub fn accepts_player_clicks(&self) -> bool {
-        self.song.is_some() && self.auth.is_none()
+        self.song.is_some() && !self.pill_open()
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at
@@ -885,6 +1058,33 @@ impl Renderer {
 
     pub fn ceil(&self, v: f64) -> f64 {
         (v * self.scale).ceil() / self.scale
+    }
+
+    /// The two lines of a notification, each ellipsised to the pill's text
+    /// column, and the width the pill needs for them.
+    pub fn notice_layouts(&self, cr: &Context, note: &crate::notify::Notification) -> (pango::Layout, pango::Layout, f64) {
+        let app = self.layout_ellipsized(cr, &note.app, Font::Caption, NOTICE_MAX_TEXT);
+        let msg = self.layout_ellipsized(cr, &note.message(), Font::Text, NOTICE_MAX_TEXT);
+        let text_w = (app.pixel_extents().1.width() as f64).max(msg.pixel_extents().1.width() as f64);
+        let w = NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP + text_w + NOTICE_PAD_R;
+        (app, msg, w.max(NOTICE_MIN_W))
+    }
+
+    pub fn notice_width(&self, cr: &Context, note: &crate::notify::Notification) -> f64 {
+        self.notice_layouts(cr, note).2
+    }
+
+    /// A layout cut with "…" at `max` logical px.
+    pub fn layout_ellipsized(&self, cr: &Context, text: &str, font: Font, max: f64) -> pango::Layout {
+        let key = (font, format!("{max}\u{1}{text}"));
+        if let Some(l) = self.cache.borrow().get(&key) {
+            return l.clone();
+        }
+        let layout = self.layout(cr, text, font).copy();
+        layout.set_width((max * pango::SCALE as f64) as i32);
+        layout.set_ellipsize(pango::EllipsizeMode::End);
+        self.cache.borrow_mut().insert(key, layout.clone());
+        layout
     }
 
     /// A layout for `text`, glyph positions rounded to output pixels. (Not

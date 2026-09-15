@@ -10,6 +10,20 @@ brief, the current island's behaviour to match, and the plan.
 
 ## Status
 
+Step 3: notifications. The island watches the `Notify` calls going to
+`org.freedesktop.Notifications` as a D-Bus monitor — dunst keeps the
+history, the sounds and its own pop-ups, and the island needs no rule
+script or state file. The box morphs into a wide pill with the app's icon
+on the left, its name in the app's colour and the message beside it; the
+icon is a vector tile that pops in and plays its own entrance (the paper
+plane flies in, the gear turns into place, the bell rings, the envelope's
+flap falls shut, Clyde bounces, the alert shakes), and a countdown ring
+around it empties over the 3.5 s the notification is up. A newer one rolls
+the old content out through the top and itself in from below, and the pill
+widens to fit. Critical notifications get a breathing red rim. A click
+dismisses; notifications wait behind an active Touch ID and are skipped
+while the island is hidden.
+
 Step 2: now playing (MPRIS over D-Bus, zbus) — "eq  Artist — Title  |
 clock", the title sliding out from behind the divider and back, track
 changes as out-then-in, a four-band equaliser fed by cava (30 fps, eased
@@ -62,6 +76,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell dodge | undodge | dodge-toggle # the ⋯ drawer
     island-shell set <key> <value>              # tune live (see below)
     island-shell dump <file.png>                # render the current frame off screen
+    island-shell demo <app> <summary>|<body>    # fabricate a notification
     island-shell status | quit
 
 ### Configuration
@@ -97,4 +112,7 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/dbus.rs     MPRIS players and fprintd (zbus, threads)
     src/touchid.rs  the vector Touch ID icon and its transformations
     src/eq.rs       cava feed
+    src/notify.rs   notifications (a D-Bus monitor on Notify)
+    src/icons.rs    the vector app icons and the countdown ring
     scripts/        install, switch, routing
+    examples/icons.rs  renders the icon set to a PNG for eyeballing

@@ -98,6 +98,11 @@ impl Quintic {
         self.progress(now) < 1.0
     }
 
+    /// Jump to `value` without motion (the start of a fresh move).
+    pub fn set_at(&mut self, value: f64, now: Time) {
+        self.retarget(State { x: value, v: 0.0, a: 0.0 }, value, now);
+    }
+
     /// Start moving towards `to` from the current state of motion; a no-op
     /// if that is already the target.
     pub fn set(&mut self, to: f64, now: Time) {

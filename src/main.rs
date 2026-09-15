@@ -7,7 +7,10 @@ mod app;
 mod ctl;
 mod dbus;
 mod eq;
+mod icons;
 mod island;
+mod notify;
+mod notify_kinds;
 mod sway;
 mod touchid;
 
