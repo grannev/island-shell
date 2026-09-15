@@ -10,6 +10,7 @@ use cairo::Context;
 
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
 use crate::icons;
+use crate::launcher::{self, Launcher};
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -30,6 +31,9 @@ pub const DODGE: f64 = 240.0;
 pub const FONT: &str = "SF Pro Text Semi-Bold";
 pub const FONT_PX: f64 = 16.0;
 const CAPTION_PX: f64 = 15.33;
+const FONT_REGULAR: &str = "SF Pro Text";
+const SMALL_PX: f64 = 12.5;
+const QUERY_PX: f64 = 21.0;
 
 const SONG_MAX_CHARS: usize = 42;
 /// Silent playback (paused / muted) is shown this long before the title
@@ -84,6 +88,8 @@ const PILL_W_DUR: f64 = 0.35;
 const PILL_H_DUR: f64 = 0.35;
 /// how far the content travels in the roll
 const ROLL_TRAVEL: f64 = 46.0;
+/// the launcher panel unfolding out of the island
+const PANEL_DUR: f64 = 0.32;
 
 const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
@@ -226,6 +232,9 @@ pub struct Island {
     /// long message wraps to two lines and the pill grows to fit)
     pill_w: Quintic,
     pill_h: Quintic,
+    /// the launcher: the panel's growth and its content
+    panel: Quintic,
+    pub launcher: Option<Launcher>,
     /// the icon: fingerprint → ring, and the mark drawing itself on it
     ring: Quintic,
     mark: Quintic,
@@ -275,7 +284,7 @@ fn pill_alpha_of(q: f64) -> f64 {
     smoothstep((q - PILL_SWAP) / (1.0 - PILL_SWAP))
 }
 
-fn smoothstep(x: f64) -> f64 {
+pub fn smoothstep(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
 }
@@ -304,6 +313,8 @@ impl Island {
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
+            panel: Quintic::at_rest(0.0, PANEL_DUR),
+            launcher: None,
             ring: Quintic::at_rest(0.0, RING_DUR),
             mark: Quintic::at_rest(0.0, MARK_DUR),
             hidden: HideReasons::default(),
@@ -324,6 +335,8 @@ impl Island {
             || self.roll.is_moving(now)
             || self.pill_w.is_moving(now)
             || self.pill_h.is_moving(now)
+            || self.panel.is_moving(now)
+            || self.launcher.as_ref().is_some_and(|l| l.is_animating(now))
             // the pill's content animates the whole time it is up
             || self.pill_open() && self.pill.state(now).x > 0.0
     }
@@ -338,6 +351,7 @@ impl Island {
             && self.song_pending.is_none()
             && !self.dodged
             && !self.pill_open()
+            && self.launcher.is_none()
             && !self.silent_expired(now)
     }
 
@@ -367,6 +381,7 @@ impl Island {
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
         self.reveal.set(if self.want_reveal(now) { 1.0 } else { 0.0 }, now);
         self.pill.set(if self.pill_open() { 1.0 } else { 0.0 }, now);
+        self.panel.set(if self.launcher.is_some() { 1.0 } else { 0.0 }, now);
         let result = matches!(self.auth, Some(Auth::Ok(_) | Auth::Fail(_)));
         self.ring.set(if result { 1.0 } else { 0.0 }, now);
         if !result {
@@ -399,8 +414,9 @@ impl Island {
             Some(Auth::Ok(since) | Auth::Fail(since)) if now - since >= MARK_DELAY => self.mark.set(1.0, now),
             _ => {}
         }
-        // a notification that waited for Touch ID takes the pill now
-        if self.auth.is_none() {
+        // a notification that waited for Touch ID or the launcher takes
+        // the pill now
+        if self.auth.is_none() && self.launcher.is_none() {
             if let Some(note) = self.notice_queued.take() {
                 self.show_notice(note, now);
                 changed = true;
@@ -511,13 +527,37 @@ impl Island {
         }
     }
 
+    /// mod+d: the island unfolds into the launcher, or folds back. A
+    /// hidden island shows itself first and a notification gives way.
+    pub fn toggle_launcher(&mut self, now: Time) -> bool {
+        if self.launcher.is_some() {
+            self.launcher = None;
+        } else {
+            self.hidden.user = false;
+            self.notice = None;
+            self.notice_prev = None;
+            self.launcher = Some(Launcher::new(now));
+        }
+        self.sync(now);
+        self.launcher.is_some()
+    }
+
+    pub fn close_launcher(&mut self, now: Time) {
+        if self.launcher.is_some() {
+            self.launcher = None;
+            self.sync(now);
+        }
+    }
+
     /// A notification arrived. It is skipped while the island is hidden
     /// and waits behind an active Touch ID.
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
         if self.hidden.any() {
             return;
         }
-        if self.auth.is_some() {
+        // Touch ID owns the pill, and the launcher owns the whole island:
+        // the notification waits its turn
+        if self.auth.is_some() || self.launcher.is_some() {
             self.notice_queued = Some(note);
             return;
         }
@@ -553,6 +593,8 @@ impl Island {
         if self.hidden.any() {
             return; // never shows while hidden
         }
+        // a password prompt outranks the launcher
+        self.launcher = None;
         // a new attempt while the pill is still up (after a miss): back to
         // waiting, no close / reopen
         if self.auth.is_none() {
@@ -613,6 +655,9 @@ impl Island {
         let hover_pad = self.hover_pad.value(now);
         let reveal = self.reveal.state(now).x;
         let q = self.pill.state(now).x;
+        // the panel is the third shape the box can take (mutually exclusive
+        // with the pill)
+        let p = self.panel.state(now).x;
         // the spread lags behind the slide — most of it happens while the box
         // is already mostly gone, like a drop flattening on water; it is a
         // function of the position so that show and hide trace the same path
@@ -625,7 +670,7 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q;
+        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q + (launcher::PANEL_R - radius) * p;
 
         // "liquid": the box stretches along its direction of travel in
         // proportion to its speed (px/s) and relaxes as it stops
@@ -669,8 +714,8 @@ impl Island {
         let pill_w = self.pill_w.state(now).x;
         let pill_h = self.pill_h.state(now).x;
         let line_h = BOX_H;
-        let bw = line_w + (pill_w - line_w) * q + stretch_x;
-        let bh = line_h + (pill_h - line_h) * q + stretch_y - stretch_x * 0.15;
+        let bw = line_w + (pill_w - line_w) * q + (launcher::PANEL_W - line_w) * p + stretch_x;
+        let bh = line_h + (pill_h - line_h) * q + (launcher::PANEL_H - line_h) * p + stretch_y - stretch_x * 0.15;
         let (mut x0, mut x1, mut y1) = (cx - bw / 2.0, cx + bw / 2.0, dy + bh);
         if !moving {
             // crisp edges at rest; while moving they glide sub-pixel
@@ -709,6 +754,7 @@ impl Island {
             let content_w = clock_w + reveal * group_len;
             let clock_x = renderer.snap(cx + content_w / 2.0 - clock_w - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
+            let _ = ty;
             cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
             cr.move_to(clock_x, ty);
             pangocairo::functions::show_layout(cr, &clock);
@@ -820,6 +866,10 @@ impl Island {
                 }
             }
         }
+        if let Some(l) = &self.launcher {
+            // the sheet's content comes up once the box has most of its size
+            l.draw(cr, renderer, x0, dy, x1 - x0, smoothstep((p - 0.35) / 0.5), now);
+        }
         cr.restore().unwrap();
 
         let top = dy.max(0.0);
@@ -866,7 +916,15 @@ impl Island {
 
     /// Hit test for clicks: the song controls only make sense on the line.
     pub fn accepts_player_clicks(&self) -> bool {
-        self.song.is_some() && !self.pill_open()
+        self.song.is_some() && !self.pill_open() && self.launcher.is_none()
+    }
+
+    /// Where the box's top-left corner is right now, for hit testing.
+    pub fn box_origin(&self, cx: f64, now: Time) -> (f64, f64) {
+        let p = self.panel.state(now).x;
+        let cx = cx - DODGE * self.dodge.state(now).x;
+        let w = launcher::PANEL_W * p;
+        (cx - w / 2.0, -BOX_H * self.hide.state(now).x)
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at
@@ -1029,6 +1087,10 @@ pub enum Font {
     Text,
     /// the pill's caption, same face, 15.33 px
     Caption,
+    /// subtitles in the launcher's list, 12.5 px
+    Small,
+    /// the launcher's search field, 21 px
+    Query,
 }
 
 /// Pango setup shared by all drawing: fonts, hinting for the fractional
@@ -1038,6 +1100,8 @@ pub struct Renderer {
     scale: f64,
     text: pango::FontDescription,
     caption: pango::FontDescription,
+    small: pango::FontDescription,
+    query: pango::FontDescription,
     ctx: pango::Context,
     cache: RefCell<HashMap<(Font, String), pango::Layout>>,
 }
@@ -1048,6 +1112,10 @@ impl Renderer {
         text.set_absolute_size(FONT_PX * pango::SCALE as f64);
         let mut caption = pango::FontDescription::from_string(FONT);
         caption.set_absolute_size(CAPTION_PX * pango::SCALE as f64);
+        let mut small = pango::FontDescription::from_string(FONT_REGULAR);
+        small.set_absolute_size(SMALL_PX * pango::SCALE as f64);
+        let mut query = pango::FontDescription::from_string(FONT);
+        query.set_absolute_size(QUERY_PX * pango::SCALE as f64);
         // the context takes the scale from a scratch surface; frames keep
         // the same transform, so it stays valid
         let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).expect("scratch surface");
@@ -1060,7 +1128,7 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        Renderer { scale, text, caption, ctx, cache: RefCell::new(HashMap::new()) }
+        Renderer { scale, text, caption, small, query, ctx, cache: RefCell::new(HashMap::new()) }
     }
 
     /// Round a logical coordinate to a whole output pixel.
@@ -1141,6 +1209,8 @@ impl Renderer {
         layout.set_font_description(Some(match font {
             Font::Text => &self.text,
             Font::Caption => &self.caption,
+            Font::Small => &self.small,
+            Font::Query => &self.query,
         }));
         layout.set_text(text);
         cache.insert(key, layout.clone());

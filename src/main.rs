@@ -4,11 +4,14 @@
 
 mod anim;
 mod app;
+mod apps;
 mod ctl;
 mod dbus;
 mod eq;
 mod icons;
+mod iconload;
 mod island;
+mod launcher;
 mod notify;
 mod notify_kinds;
 mod sway;

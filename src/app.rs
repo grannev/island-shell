@@ -25,7 +25,7 @@ use smithay_client_toolkit::{
             Connection, Dispatch, Proxy, QueueHandle, WEnum,
             backend::ObjectId,
             globals::{GlobalList, registry_queue_init},
-            protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+            protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -40,6 +40,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
@@ -67,7 +68,9 @@ use crate::sway;
 /// dodge and the spread, tall enough for the Touch ID pill and the liquid
 /// stretch.
 const SURFACE_W: u32 = 980;
-const SURFACE_H: u32 = 120;
+/// tall enough for the launcher panel as well (the surface is transparent
+/// and its input region only ever covers the island itself)
+const SURFACE_H: u32 = 560;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -194,6 +197,11 @@ pub struct App {
     configured: bool,
     frame_pending: bool,
     pointer: Option<wl_pointer::WlPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    modifiers: Modifiers,
+    kbd_focus: bool,
+    /// where the pointer is, in logical px inside the surface
+    pointer_at: (f64, f64),
     last_frame: Option<Frame>,
     /// the whole picture, always up to date
     canvas: Option<cairo::ImageSurface>,
@@ -286,6 +294,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         configured: false,
         frame_pending: false,
         pointer: None,
+        keyboard: None,
+        modifiers: Modifiers::default(),
+        kbd_focus: false,
+        pointer_at: (0.0, 0.0),
         last_frame: None,
         canvas: None,
         buffers: Vec::new(),
@@ -463,6 +475,38 @@ impl App {
                     return format!("error: {e}");
                 }
             }
+            Command::Launcher => {
+                let open = self.island.toggle_launcher(now);
+                self.set_keyboard_focus(open);
+                self.after_change();
+                return if open { "open".into() } else { "closed".into() };
+            }
+            Command::LauncherClose => {
+                self.island.close_launcher(now);
+                self.set_keyboard_focus(false);
+                self.after_change();
+                return "ok".into();
+            }
+            Command::Type(text) => {
+                if let Some(l) = self.island.launcher.as_mut() {
+                    l.push(&text, now);
+                    self.after_change();
+                    return "ok".into();
+                }
+                return "error: the launcher is not open".into();
+            }
+            Command::Key(name) => {
+                let keysym = match name.as_str() {
+                    "escape" => Keysym::Escape,
+                    "return" | "enter" => Keysym::Return,
+                    "up" => Keysym::Up,
+                    "down" => Keysym::Down,
+                    "backspace" => Keysym::BackSpace,
+                    _ => return format!("error: unknown key {name:?}"),
+                };
+                self.launcher_key(&KeyEvent { time: 0, raw_code: 0, keysym, utf8: None });
+                return "ok".into();
+            }
             Command::Demo(app, summary, body) => {
                 let note = notify::fabricate(&app, &summary, &body);
                 self.island.notify(note, now);
@@ -520,6 +564,51 @@ impl App {
         Ok(())
     }
 
+    /// The launcher needs the keyboard; nothing else does.
+    fn set_keyboard_focus(&mut self, want: bool) {
+        if want == self.kbd_focus {
+            return;
+        }
+        self.kbd_focus = want;
+        self.layer.set_keyboard_interactivity(if want {
+            KeyboardInteractivity::Exclusive
+        } else {
+            KeyboardInteractivity::None
+        });
+        self.layer.commit();
+    }
+
+    /// One key press (or repeat) while the launcher is open.
+    fn launcher_key(&mut self, event: &KeyEvent) {
+        let now = self.frame_time();
+        let ctrl = self.modifiers.ctrl;
+        let Some(l) = self.island.launcher.as_mut() else { return };
+        match event.keysym {
+            Keysym::Escape => {
+                self.island.close_launcher(now);
+                self.set_keyboard_focus(false);
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                let launched = l.launch();
+                self.island.close_launcher(now);
+                self.set_keyboard_focus(false);
+                if !launched {
+                    eprintln!("island-shell: nothing to launch");
+                }
+            }
+            Keysym::Down | Keysym::Tab => l.move_selection(1, now),
+            Keysym::Up | Keysym::ISO_Left_Tab => l.move_selection(-1, now),
+            Keysym::BackSpace => l.backspace(now),
+            Keysym::u | Keysym::U if ctrl => l.clear(now),
+            _ => match event.utf8.as_deref() {
+                // printable text only (no control characters)
+                Some(text) if !text.is_empty() && !text.chars().any(|c| c.is_control()) => l.push(text, now),
+                _ => {}
+            },
+        }
+        self.after_change();
+    }
+
     /// Presentation time of the next frame we will draw.
     fn frame_time(&self) -> Time {
         self.clock.predict(self.frame_pending)
@@ -529,6 +618,10 @@ impl App {
     /// and the mute poll while a song is shown), arm the timer for the
     /// next time-driven change, and draw.
     fn after_change(&mut self) {
+        // whoever closed the launcher (a key, Touch ID, the compositor),
+        // the keyboard goes back when it is gone
+        let wants_keyboard = self.island.launcher.is_some();
+        self.set_keyboard_focus(wants_keyboard);
         let has_song = self.island.song().is_some();
         if has_song && self.cava.is_none() {
             match Cava::start(self.eq_tx.clone()) {
@@ -820,11 +913,24 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
         }
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            let handle = self.loop_handle.clone();
+            self.keyboard = self
+                .seat_state
+                .get_keyboard_with_repeat(qh, &seat, None, handle, Box::new(|app: &mut App, _kbd, event| app.launcher_key(&event)))
+                .map_err(|e| eprintln!("island-shell: keyboard: {e}"))
+                .ok();
+        }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer {
             if let Some(p) = self.pointer.take() {
                 p.release();
+            }
+        }
+        if capability == Capability::Keyboard {
+            if let Some(k) = self.keyboard.take() {
+                k.release();
             }
         }
     }
@@ -841,15 +947,37 @@ impl PointerHandler for App {
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     self.island.hovered = true;
+                    self.pointer_at = event.position;
                     changed = true;
                 }
                 PointerEventKind::Leave { .. } => {
                     self.island.hovered = false;
                     changed = true;
                 }
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_at = event.position;
+                    if self.hover_launcher_row() {
+                        changed = true;
+                    }
+                }
                 PointerEventKind::Press { button, .. } => {
-                    // a click on a notification dismisses it
                     let now = self.clock.predict(false);
+                    // inside the launcher a click launches the row under
+                    // the pointer
+                    if self.island.launcher.is_some() {
+                        self.pointer_at = event.position;
+                        self.hover_launcher_row();
+                        if button == BTN_LEFT {
+                            if let Some(l) = self.island.launcher.as_ref() {
+                                l.launch();
+                            }
+                            self.island.close_launcher(now);
+                            self.set_keyboard_focus(false);
+                        }
+                        changed = true;
+                        continue;
+                    }
+                    // a click on a notification dismisses it
                     if self.island.dismiss_notice(now) {
                         changed = true;
                         continue;
@@ -885,12 +1013,58 @@ impl PointerHandler for App {
 }
 
 impl App {
+    /// Point the launcher's selection at the row under the pointer.
+    fn hover_launcher_row(&mut self) -> bool {
+        let now = self.clock.predict(false);
+        let (bx, by) = self.island.box_origin(self.width as f64 / 2.0, now);
+        let (px, py) = self.pointer_at;
+        let Some(l) = self.island.launcher.as_mut() else { return false };
+        if px < bx || px > bx + crate::launcher::PANEL_W {
+            return false;
+        }
+        match l.row_at(by, py) {
+            Some(index) => {
+                l.select_index(index, now);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn player_control(&self, cmd: PlayerCommand) {
         if self.island.accepts_player_clicks() {
             if let Some(song) = self.island.song() {
                 dbus::control(&song.bus_name, cmd);
             }
         }
+    }
+}
+
+impl KeyboardHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
+        // the compositor took the keyboard away (another window, a lock):
+        // the launcher has no business staying open without it
+        let now = self.frame_time();
+        if self.island.launcher.is_some() {
+            self.island.close_launcher(now);
+            self.after_change();
+        }
+    }
+
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        self.launcher_key(&event);
+    }
+
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        self.launcher_key(&event);
+    }
+
+    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
+
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, modifiers: Modifiers, _: RawModifiers, _: u32) {
+        self.modifiers = modifiers;
     }
 }
 

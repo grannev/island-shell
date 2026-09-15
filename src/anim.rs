@@ -132,6 +132,10 @@ impl Spring {
         Spring { omega: 2.0 * std::f64::consts::PI / response, zeta: damping, x0: value, v0: 0.0, target: value, start: 0.0 }
     }
 
+    pub fn target(&self) -> f64 {
+        self.target
+    }
+
     pub fn state(&self, now: Time) -> State {
         let t = (now - self.start).max(0.0);
         let (w, z) = (self.omega, self.zeta);

@@ -7,6 +7,7 @@ edition = "2024"
 cairo-rs = { version = "0.22.9", features = ["png"] }
 pango = { version = "0.22.9", features = ["v1_56"] }
 pangocairo = "0.22.9"
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts"] }
 serde_json = "1.0.151"
 smithay-client-toolkit = "0.21"
 zbus = { version = "5", features = ["blocking-api"] }

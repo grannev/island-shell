@@ -10,6 +10,21 @@ brief, the current island's behaviour to match, and the plan.
 
 ## Status
 
+Step 4: the launcher (mod+d). The island unfolds into a 660×512 sheet —
+the clock stays at the top — with a search field and the matching
+applications: icon, name and subtitle per row. Desktop entries are read
+from every `applications` directory (localised names, `TryExec`, hidden
+entries skipped, namesakes merged) and icons resolved through the user's
+icon theme (PNG straight, SVG rendered with resvg, cached). Matching is
+literal-first with acronyms ("vsc" finds Visual Studio Code) and nothing
+looser, ranked by how often each entry has been launched from here.
+Typing re-ranks the list and the rows *glide* to their new places on
+springs while the selection follows; rows entering and leaving fade.
+Keyboard: text, Backspace, Ctrl+U, Up/Down/Tab, Enter to launch, Escape
+to fold; the pointer picks rows too. The launcher takes the keyboard
+(layer-shell exclusive) only while it is open, gives way to Touch ID, and
+notifications wait behind it.
+
 Step 3: notifications. The island watches the `Notify` calls going to
 `org.freedesktop.Notifications` as a D-Bus monitor — dunst keeps the
 history, the sounds and its own pop-ups, and the island needs no rule
@@ -79,6 +94,8 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell set <key> <value>              # tune live (see below)
     island-shell dump <file.png>                # render the current frame off screen
     island-shell demo <app> <summary>|<body>    # fabricate a notification
+    island-shell launcher                       # mod+d: unfold / fold the panel
+    island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell status | quit
 
 ### Configuration
@@ -116,5 +133,9 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/eq.rs       cava feed
     src/notify.rs   notifications (a D-Bus monitor on Notify)
     src/icons.rs    the vector app icons and the countdown ring
+    src/launcher.rs the launcher panel (search field, list, re-ranking)
+    src/apps.rs     desktop entries: scanning, matching, launching
+    src/iconload.rs icon-theme lookup and loading
     scripts/        install, switch, routing
     examples/icons.rs  renders the icon set to a PNG for eyeballing
+    examples/apps.rs   lists what the launcher would show, with icon sizes

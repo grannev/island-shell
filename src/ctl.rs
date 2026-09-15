@@ -22,6 +22,15 @@ pub enum Command {
     Dump(String),
     /// `demo <app> <summary> <body>`: fabricate a notification (debugging)
     Demo(String, String, String),
+    /// mod+d: unfold into the launcher panel, or fold back
+    Launcher,
+    /// close the launcher if it is open (e.g. after launching)
+    LauncherClose,
+    /// type into the launcher's search field (debugging)
+    Type(String),
+    /// `key <escape|return|up|down|backspace>`: a key for the launcher
+    /// (debugging, and handy from a script)
+    Key(String),
     Quit,
 }
 
@@ -43,13 +52,17 @@ impl Command {
                 let (summary, body) = rest.split_once('|').unwrap_or((rest.as_str(), ""));
                 Command::Demo(app.to_string(), summary.trim().to_string(), body.trim().to_string())
             }
+            ["launcher"] => Command::Launcher,
+            ["launcher-close"] => Command::LauncherClose,
+            ["type", rest @ ..] => Command::Type(rest.join(" ")),
+            ["key", name] => Command::Key(name.to_string()),
             ["quit"] => Command::Quit,
             _ => return None,
         })
     }
 }
 
-pub const USAGE: &str = "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|status|set <key> <value>|quit]";
+pub const USAGE: &str = "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|launcher|status|set <key> <value>|quit]";
 
 pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
