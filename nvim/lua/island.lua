@@ -18,6 +18,9 @@ local config = {
   toasts = { saved = true, diagnostics = true, progress = true, git = true },
   -- how often state may be pushed, milliseconds
   throttle = 60,
+  -- an LSP job shorter than this never gets a pill (pyright reports one
+  -- on every keystroke), milliseconds
+  progress_after = 1500,
   -- how many buffers the island's panel lists
   buffers = 6,
 }
@@ -359,6 +362,14 @@ function M.setup(opts)
 
   -- LSP progress (indexing, formatting): one pill that updates itself
   if config.toasts.progress and vim.fn.has("nvim-0.10") == 1 then
+    -- Servers report progress for the smallest things (pyright analyses
+    -- the file on every keystroke): a job earns a pill only once it has
+    -- run for a while, and the "done" only if the pill was shown at all.
+    local jobs = {}
+    local function job_key(args)
+      local token = args.data.params and args.data.params.token or args.data.result and args.data.result.token
+      return tostring(args.data.client_id) .. ":" .. tostring(token)
+    end
     on("LspProgress", function(args)
       local client = vim.lsp.get_client_by_id(args.data.client_id)
       local value = args.data.params and args.data.params.value or args.data.result and args.data.result.value
@@ -366,11 +377,43 @@ function M.setup(opts)
         return
       end
       local name = client and client.name or "LSP"
+      local key = job_key(args)
+      local job = jobs[key]
       if value.kind == "end" then
-        M.toast("progress", name, value.message or "done", 1.0)
-      else
-        local percentage = value.percentage and value.percentage / 100 or 0.1
-        M.toast("progress", name, value.title or value.message or "working…", percentage)
+        if job then
+          if job.timer then
+            job.timer:stop()
+            job.timer:close()
+          end
+          if job.shown then
+            M.toast("progress", name, value.message or "done", 1.0)
+          end
+          jobs[key] = nil
+        end
+        return
+      end
+      local percentage = value.percentage and value.percentage / 100 or 0.1
+      local title = value.title or value.message or "working…"
+      if not job then
+        job = { shown = false, title = title, percentage = percentage }
+        jobs[key] = job
+        local timer = uv.new_timer()
+        job.timer = timer
+        timer:start(config.progress_after, 0, function()
+          timer:close()
+          job.timer = nil
+          vim.schedule(function()
+            if jobs[key] == job then
+              job.shown = true
+              M.toast("progress", name, job.title, job.percentage)
+            end
+          end)
+        end)
+        return
+      end
+      job.title, job.percentage = title, percentage
+      if job.shown then
+        M.toast("progress", name, title, percentage)
       end
     end)
   end

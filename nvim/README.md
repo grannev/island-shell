@@ -58,6 +58,7 @@ require("island").setup({
   statusline = false,                 -- true keeps laststatus alone
   toasts = { saved = true, diagnostics = true, progress = true, git = true },
   throttle = 60,                      -- ms between state pushes
+  progress_after = 1500,              -- an LSP job shorter than this gets no pill
   buffers = 6,                        -- rows the island's panel may list
 })
 ```
