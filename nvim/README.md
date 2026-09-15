@@ -43,7 +43,8 @@ diff, the register a macro is recording into, the search count and the
 buffer list — at most every 60 ms, and only over the island's own socket.
 
 Toasts — `saved` on write (lines, size, +n −m), `error` for the first LSP
-error, `progress` for LSP jobs and `:IslandTask`, `git` when the branch
+error (held while you type, announced when you return to normal mode, and
+never twice for the same error), `progress` for LSP jobs and `:IslandTask`, `git` when the branch
 changes. `vim.notify` goes to the island too.
 
 ## Commands

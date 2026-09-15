@@ -33,6 +33,8 @@ local state = {
   timer = nil,
   last_branch = nil,
   progress = {},
+  error_pending = false,
+  last_error = nil,
 }
 
 local function config_home()
@@ -248,19 +250,36 @@ local function first_error()
   return string.format("%d:%d", (d.lnum or 0) + 1, (d.col or 0) + 1), message
 end
 
+--- The first error, as a pill — but only in normal mode: while you type,
+--- the server flags every half-written line, and a pill for each would be
+--- noise. Insert-mode changes are held until you come back to normal, and
+--- the same error is never announced twice.
 local function on_diagnostics()
   if not config.toasts.diagnostics then
     return
   end
+  local mode = vim.api.nvim_get_mode().mode
+  if mode:sub(1, 1) ~= "n" then
+    state.error_pending = true
+    return
+  end
+  state.error_pending = false
   local counts = diagnostics()
   if counts.errors == 0 then
+    state.last_error = nil
     return
   end
   local where, message = first_error()
   if not where then
     return
   end
-  M.toast("error", string.format("%s  %s", vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t"), where), message)
+  local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
+  local signature = name .. "\0" .. where .. "\0" .. message
+  if signature == state.last_error then
+    return
+  end
+  state.last_error = signature
+  M.toast("error", string.format("%s  %s", name, where), message)
 end
 
 --- Run a shell command and report it in the island: a ring while it runs,
@@ -346,6 +365,16 @@ function M.setup(opts)
   on("DiagnosticChanged", function()
     vim.defer_fn(on_diagnostics, 50)
   end)
+  -- back in normal mode: say what the typing left behind
+  vim.api.nvim_create_autocmd("ModeChanged", {
+    group = group,
+    pattern = "*:n*",
+    callback = function()
+      if state.error_pending then
+        vim.defer_fn(on_diagnostics, 150)
+      end
+    end,
+  })
 
   -- gitsigns tells us the branch through a buffer variable; watch for it
   -- changing to announce a checkout

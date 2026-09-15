@@ -65,7 +65,13 @@ fn chip_parts(editor: &Editor) -> (String, String) {
             extra.push_str(&format!("{}", d.warnings));
         }
     }
-    (mode.label().to_string(), extra)
+    let file = if editor.file.is_empty() { "Untitled" } else { &editor.file };
+    let mut name: String = file.chars().take(24).collect();
+    if file.chars().count() > 24 {
+        name.push('…');
+    }
+    let label = format!("{}  {}", mode.label(), name);
+    (label, extra)
 }
 
 pub fn chip_width(cr: &Context, renderer: &Renderer, editor: &Editor) -> f64 {

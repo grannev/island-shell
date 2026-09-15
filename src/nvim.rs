@@ -142,8 +142,8 @@ impl Editor {
     }
 
     /// The parts the collapsed island shows: a change here is worth a frame.
-    pub fn chip_state(&self) -> (Mode, bool, Diagnostics, String, Option<(u32, u32)>) {
-        (self.mode(), self.modified, self.diagnostics.clone(), self.recording.clone(), self.search)
+    pub fn chip_state(&self) -> (Mode, bool, Diagnostics, String, Option<(u32, u32)>, String) {
+        (self.mode(), self.modified, self.diagnostics.clone(), self.recording.clone(), self.search, self.file.clone())
     }
 }
 
