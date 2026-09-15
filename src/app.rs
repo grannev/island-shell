@@ -337,8 +337,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     loop_handle.insert_source(eq_rx, |event, _, app: &mut App| {
         if let channel::Event::Msg(levels) = event {
-            app.island.set_eq(levels);
-            app.redraw();
+            let now = app.frame_time();
+            if app.island.set_eq(levels, now) {
+                app.redraw();
+            }
         }
     })?;
     loop_handle.insert_source(note_rx, |event, _, app: &mut App| {

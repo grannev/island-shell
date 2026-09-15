@@ -670,11 +670,18 @@ impl Island {
         }
     }
 
-    /// New band levels from cava (0..1).
-    pub fn set_eq(&mut self, levels: [f32; EQ_BANDS]) {
+    /// New band levels from cava (0..1). Whether they are worth a frame is
+    /// another matter: the bars may be folded away (paused, dodged, behind
+    /// a notification), and then nobody would see them move.
+    pub fn set_eq(&mut self, levels: [f32; EQ_BANDS], now: Time) -> bool {
         if self.song.as_ref().is_some_and(|s| s.playing()) {
             self.eq_target = levels.map(|v| v as f64);
         }
+        self.eq_visible(now)
+    }
+
+    fn eq_visible(&self, now: Time) -> bool {
+        self.reveal.state(now).x > 0.01 || self.player.state(now).x > 0.01 || self.toast.is_some()
     }
 
     /// mod+d: the island unfolds into the launcher, or folds back. A
