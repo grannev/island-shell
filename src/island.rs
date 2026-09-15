@@ -50,7 +50,6 @@ const EQ_TAU: f64 = 0.045;
 const EQ_TAU_SINK: f64 = 0.25;
 /// Touch ID pill.
 const PILL_H: f64 = 92.0;
-const PILL_R: f64 = 44.0;
 const PILL_MIN_W: f64 = 212.0;
 const PILL_DUR: f64 = 0.35;
 /// progress at which the line has dissolved and the pill content starts
@@ -69,7 +68,11 @@ const ICON_SIZE: f64 = 48.0;
 /// the app's icon, and it holds for 3.5 s (restarted per notification).
 const NOTICE_HOLD: f64 = 3.5;
 const NOTICE_MIN_W: f64 = 420.0;
-const NOTICE_MAX_TEXT: f64 = 380.0;
+/// the message wraps to at most two lines inside this column
+const NOTICE_MAX_TEXT: f64 = 420.0;
+const NOTICE_MAX_LINES: i32 = 2;
+/// space above and below the content inside the pill
+const NOTICE_PAD_V: f64 = 26.0;
 const NOTICE_PAD_L: f64 = 22.0;
 const NOTICE_PAD_R: f64 = 24.0;
 const NOTICE_ICON: f64 = 40.0;
@@ -78,6 +81,7 @@ const NOTICE_LINE_GAP: f64 = 2.0;
 /// the roll when one notification replaces another
 const ROLL_DUR: f64 = 0.44;
 const PILL_W_DUR: f64 = 0.35;
+const PILL_H_DUR: f64 = 0.35;
 /// how far the content travels in the roll
 const ROLL_TRAVEL: f64 = 46.0;
 
@@ -218,8 +222,10 @@ pub struct Island {
     notice_prev: Option<Notice>,
     notice_queued: Option<crate::notify::Notification>,
     roll: Quintic,
-    /// the pill's width, eased when a new notification needs another
+    /// the pill's size, eased when a new notification needs another (a
+    /// long message wraps to two lines and the pill grows to fit)
     pill_w: Quintic,
+    pill_h: Quintic,
     /// the icon: fingerprint → ring, and the mark drawing itself on it
     ring: Quintic,
     mark: Quintic,
@@ -297,6 +303,7 @@ impl Island {
             notice_queued: None,
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
+            pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
             ring: Quintic::at_rest(0.0, RING_DUR),
             mark: Quintic::at_rest(0.0, MARK_DUR),
             hidden: HideReasons::default(),
@@ -316,6 +323,7 @@ impl Island {
             || self.eq_moving()
             || self.roll.is_moving(now)
             || self.pill_w.is_moving(now)
+            || self.pill_h.is_moving(now)
             // the pill's content animates the whole time it is up
             || self.pill_open() && self.pill.state(now).x > 0.0
     }
@@ -617,7 +625,7 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let radius = radius + (PILL_R - radius) * q;
+        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q;
 
         // "liquid": the box stretches along its direction of travel in
         // proportion to its speed (px/s) and relaxes as it stops
@@ -644,17 +652,25 @@ impl Island {
         let line_w = clock_w + reveal * group_len + 2.0 * pad;
 
         // --- the pill: Touch ID, or a notification ---
-        let notice_w = self.notice.as_ref().map(|n| renderer.notice_width(cr, &n.note));
-        let pill_target = if self.auth.is_some() { PILL_MIN_W } else { notice_w.unwrap_or(self.pill_w.state(now).x) };
+        let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
+        let (w_target, h_target) = match (self.auth.is_some(), notice_size) {
+            (true, _) => (PILL_MIN_W, PILL_H),
+            (false, Some(size)) => size,
+            (false, None) => (self.pill_w.state(now).x, self.pill_h.state(now).x),
+        };
         if q <= 0.0 {
-            self.pill_w.set_at(pill_target, now); // opening: start at the right width
+            // opening: start at the size the content needs
+            self.pill_w.set_at(w_target, now);
+            self.pill_h.set_at(h_target, now);
         } else {
-            self.pill_w.set(pill_target, now);
+            self.pill_w.set(w_target, now);
+            self.pill_h.set(h_target, now);
         }
         let pill_w = self.pill_w.state(now).x;
+        let pill_h = self.pill_h.state(now).x;
         let line_h = BOX_H;
         let bw = line_w + (pill_w - line_w) * q + stretch_x;
-        let bh = line_h + (PILL_H - line_h) * q + stretch_y - stretch_x * 0.15;
+        let bh = line_h + (pill_h - line_h) * q + stretch_y - stretch_x * 0.15;
         let (mut x0, mut x1, mut y1) = (cx - bw / 2.0, cx + bw / 2.0, dy + bh);
         if !moving {
             // crisp edges at rest; while moving they glide sub-pixel
@@ -825,7 +841,7 @@ impl Island {
         }
         let note = &notice.note;
         let t = now - notice.since;
-        let (app, msg, width) = renderer.notice_layouts(cr, note);
+        let (app, msg, width, _) = renderer.notice_layouts(cr, note);
         let x0 = cx - width / 2.0;
         let icon_cx = x0 + NOTICE_PAD_L + NOTICE_ICON / 2.0;
         let mid = dy + bh / 2.0 + offset;
@@ -1062,26 +1078,47 @@ impl Renderer {
 
     /// The two lines of a notification, each ellipsised to the pill's text
     /// column, and the width the pill needs for them.
-    pub fn notice_layouts(&self, cr: &Context, note: &crate::notify::Notification) -> (pango::Layout, pango::Layout, f64) {
-        let app = self.layout_ellipsized(cr, &note.app, Font::Caption, NOTICE_MAX_TEXT);
-        let msg = self.layout_ellipsized(cr, &note.message(), Font::Text, NOTICE_MAX_TEXT);
+    pub fn notice_layouts(&self, cr: &Context, note: &crate::notify::Notification) -> (pango::Layout, pango::Layout, f64, f64) {
+        let app = self.layout_ellipsized(cr, &note.app, Font::Caption, NOTICE_MAX_TEXT, 1);
+        let msg = self.layout_ellipsized(cr, &note.message(), Font::Text, NOTICE_MAX_TEXT, NOTICE_MAX_LINES);
+        // the summary stays semibold and white, the body after it is
+        // lighter and a touch dimmer (the way iOS sets a sender apart)
+        if !note.summary.is_empty() && !note.body.is_empty() {
+            let attrs = pango::AttrList::new();
+            let start = (note.summary.len() + " — ".len()) as u32;
+            let mut weight = pango::AttrInt::new_weight(pango::Weight::Normal);
+            weight.set_start_index(start);
+            attrs.insert(weight);
+            let mut alpha = pango::AttrInt::new_foreground_alpha(0xD000);
+            alpha.set_start_index(start);
+            attrs.insert(alpha);
+            msg.set_attributes(Some(&attrs));
+        }
         let text_w = (app.pixel_extents().1.width() as f64).max(msg.pixel_extents().1.width() as f64);
         let w = NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP + text_w + NOTICE_PAD_R;
-        (app, msg, w.max(NOTICE_MIN_W))
+        let text_h = app.pixel_extents().1.height() as f64 + NOTICE_LINE_GAP + msg.pixel_extents().1.height() as f64;
+        let h = (text_h + 2.0 * NOTICE_PAD_V).max(NOTICE_ICON + 2.0 * NOTICE_PAD_V - 6.0);
+        (app, msg, w.max(NOTICE_MIN_W), h.max(PILL_H))
     }
 
-    pub fn notice_width(&self, cr: &Context, note: &crate::notify::Notification) -> f64 {
-        self.notice_layouts(cr, note).2
+    /// The pill's size for this notification.
+    pub fn notice_size(&self, cr: &Context, note: &crate::notify::Notification) -> (f64, f64) {
+        let (_, _, w, h) = self.notice_layouts(cr, note);
+        (w, h)
     }
 
-    /// A layout cut with "…" at `max` logical px.
-    pub fn layout_ellipsized(&self, cr: &Context, text: &str, font: Font, max: f64) -> pango::Layout {
-        let key = (font, format!("{max}\u{1}{text}"));
+    /// A layout wrapped to at most `lines` lines inside `max` logical px,
+    /// the last one cut with "…".
+    pub fn layout_ellipsized(&self, cr: &Context, text: &str, font: Font, max: f64, lines: i32) -> pango::Layout {
+        let key = (font, format!("{max}\u{1}{lines}\u{1}{text}"));
         if let Some(l) = self.cache.borrow().get(&key) {
             return l.clone();
         }
         let layout = self.layout(cr, text, font).copy();
         layout.set_width((max * pango::SCALE as f64) as i32);
+        layout.set_wrap(pango::WrapMode::WordChar);
+        // a negative height means "this many lines" when ellipsizing
+        layout.set_height(-lines);
         layout.set_ellipsize(pango::EllipsizeMode::End);
         self.cache.borrow_mut().insert(key, layout.clone());
         layout

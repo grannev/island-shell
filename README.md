@@ -15,7 +15,9 @@ Step 3: notifications. The island watches the `Notify` calls going to
 history, the sounds and its own pop-ups, and the island needs no rule
 script or state file. The box morphs into a wide pill with the app's icon
 on the left, its name in the app's colour and the message beside it; the
-icon is a vector tile that pops in and plays its own entrance (the paper
+message wraps to two lines and the pill grows to fit it, with the sender
+kept semibold ahead of a lighter body. The icon is a vector tile that pops
+in and plays its own entrance (the paper
 plane flies in, the gear turns into place, the bell rings, the envelope's
 flap falls shut, Clyde bounces, the alert shakes), and a countdown ring
 around it empties over the 3.5 s the notification is up. A newer one rolls
