@@ -451,6 +451,9 @@ impl Island {
         if let Some(n) = &self.notice {
             consider(n.since + NOTICE_HOLD);
         }
+        if let Some(l) = &self.launcher {
+            consider(l.next_caret(now));
+        }
         if let Some(since) = self.silent_since {
             if now - since < SILENT_AFTER && self.song.is_some() {
                 consider(since + SILENT_AFTER);
@@ -533,13 +536,22 @@ impl Island {
         if self.launcher.is_some() {
             self.launcher = None;
         } else {
-            self.hidden.user = false;
+            // a hidden island stays hidden: the panel opens by itself and
+            // takes the island's place back above the edge when it folds
             self.notice = None;
             self.notice_prev = None;
             self.launcher = Some(Launcher::new(now));
         }
         self.sync(now);
         self.launcher.is_some()
+    }
+
+    /// The ⋯ drawer (mod+o) needs the island to dodge; the panel cannot
+    /// dodge with it, so it folds away first.
+    pub fn set_dodged(&mut self, dodged: bool, now: Time) {
+        self.dodged = dodged;
+        self.launcher = None;
+        self.sync(now);
     }
 
     pub fn close_launcher(&mut self, now: Time) {
@@ -663,9 +675,12 @@ impl Island {
         // function of the position so that show and hide trace the same path
         let spread_k = inv_min_jerk(hide.x).powf(2.2);
 
-        let cx = cx - DODGE * dodge.x;
-        let dy = -BOX_H * hide.x;
-        if dy <= -(BOX_H + FILLET) {
+        // the panel stands on its own: while it is open the island's own
+        // hiding and dodging do not move it, so mod+d works with the island
+        // parked above the edge and the panel folds back out of sight
+        let cx = cx - DODGE * dodge.x * (1.0 - p);
+        let dy = -BOX_H * hide.x * (1.0 - p);
+        if dy <= -(BOX_H + FILLET) && p <= 0.0 {
             return Frame::default();
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
@@ -704,9 +719,15 @@ impl Island {
             (false, None) => (self.pill_w.state(now).x, self.pill_h.state(now).x),
         };
         if q <= 0.0 {
-            // opening: start at the size the content needs
-            self.pill_w.set_at(w_target, now);
-            self.pill_h.set_at(h_target, now);
+            // closed: be at the size the next pill will need, without
+            // animating there (and without restarting the tween every
+            // frame — that kept the island redrawing forever)
+            if (self.pill_w.state(now).x - w_target).abs() > 0.01 {
+                self.pill_w.set_at(w_target, now);
+            }
+            if (self.pill_h.state(now).x - h_target).abs() > 0.01 {
+                self.pill_h.set_at(h_target, now);
+            }
         } else {
             self.pill_w.set(w_target, now);
             self.pill_h.set(h_target, now);
@@ -922,9 +943,9 @@ impl Island {
     /// Where the box's top-left corner is right now, for hit testing.
     pub fn box_origin(&self, cx: f64, now: Time) -> (f64, f64) {
         let p = self.panel.state(now).x;
-        let cx = cx - DODGE * self.dodge.state(now).x;
+        let cx = cx - DODGE * self.dodge.state(now).x * (1.0 - p);
         let w = launcher::PANEL_W * p;
-        (cx - w / 2.0, -BOX_H * self.hide.state(now).x)
+        (cx - w / 2.0, -BOX_H * self.hide.state(now).x * (1.0 - p))
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at
@@ -1129,6 +1150,10 @@ impl Renderer {
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
         Renderer { scale, text, caption, small, query, ctx, cache: RefCell::new(HashMap::new()) }
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.scale
     }
 
     /// Round a logical coordinate to a whole output pixel.

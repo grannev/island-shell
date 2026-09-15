@@ -29,6 +29,9 @@ pub const MAX_ROWS: usize = 7;
 const ROW_SPRING: (f64, f64) = (0.34, 0.82);
 const SEL_SPRING: (f64, f64) = (0.28, 0.78);
 const FADE: f64 = 0.22;
+/// the caret's blink (macOS runs at a bit under two a second)
+const CARET_HZ: f64 = 1.6;
+const CARET_DUTY: f64 = 0.55;
 
 /// One row on screen: which app it shows, where it is heading and how far
 /// it has faded in or out.
@@ -76,8 +79,21 @@ impl Launcher {
         self.rows.iter().any(|r| r.slot.is_moving(now) || r.alpha.is_moving(now))
             || self.sel_slot.is_moving(now)
             || self.sel_alpha.is_moving(now)
-            // the caret blinks
-            || true
+            // the icons finish popping in
+            || self.rows.iter().any(|r| now - r.born < 0.35)
+            || now - self.opened < 0.8
+    }
+
+    /// The caret blinks, which is not worth a frame callback sixty times a
+    /// second: the island wakes up for it at this instant instead.
+    pub fn next_caret(&self, now: Time) -> Time {
+        let period = 1.0 / CARET_HZ;
+        let phase = (now * CARET_HZ).fract();
+        now + period * (if phase < CARET_DUTY { CARET_DUTY - phase } else { 1.0 - phase }) + 0.005
+    }
+
+    fn caret_on(now: Time) -> bool {
+        (now * CARET_HZ).fract() < CARET_DUTY
     }
 
     /// Re-rank for the current query: rows that stay glide to their new
@@ -235,8 +251,7 @@ impl Launcher {
         pangocairo::functions::show_layout(cr, &q_layout);
 
         // the caret, blinking on the macOS cadence
-        let blink = ((now * 1.6).fract() < 0.55) as u8 as f64;
-        if blink > 0.0 {
+        if Self::caret_on(now) {
             let cx = renderer.snap(text_x + if placeholder { 0.0 } else { q_ext.width() as f64 } + 1.0);
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.85 * fa);
             cr.rectangle(cx, renderer.snap(fy + fo + 11.0), 2.0, FIELD_H - 22.0);
@@ -280,16 +295,16 @@ impl Launcher {
         // the icon pops in like a notification's
         let age = now - row.born;
         let pop = 0.86 + 0.14 * crate::island::smoothstep((age / 0.3).clamp(0.0, 1.0));
-        match row.app.icon.as_deref().and_then(|name| self.icons.get(name)) {
+        // the icon comes pre-scaled to the device pixels it covers, so a
+        // frame only has to blit it
+        let device = (ICON * renderer.scale()).round().max(1.0);
+        match row.app.icon.as_deref().and_then(|name| self.icons.get_scaled(name, device as i32)) {
             Some(surface) => {
-                let scale = ICON * pop / surface.width().max(surface.height()) as f64;
+                let scale = pop / renderer.scale();
                 cr.save().unwrap();
                 cr.translate(icon_x + ICON / 2.0, icon_y + ICON / 2.0);
                 cr.scale(scale, scale);
                 let _ = cr.set_source_surface(&surface, -(surface.width() as f64) / 2.0, -(surface.height() as f64) / 2.0);
-                if let Ok(p) = cr.source().try_into() as Result<cairo::SurfacePattern, _> {
-                    p.set_filter(cairo::Filter::Good);
-                }
                 let _ = cr.paint_with_alpha(alpha);
                 cr.restore().unwrap();
             }

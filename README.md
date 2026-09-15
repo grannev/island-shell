@@ -10,7 +10,9 @@ brief, the current island's behaviour to match, and the plan.
 
 ## Status
 
-Step 4: the launcher (mod+d). The island unfolds into a 660×512 sheet —
+Step 4: the launcher (mod+d). The panel stands on its own: it opens even
+with the island parked above the edge (mod+i) and folds back out of sight,
+and the ⋯ drawer (mod+o) folds it away before the island dodges. The island unfolds into a 660×512 sheet —
 the clock stays at the top — with a search field and the matching
 applications: icon, name and subtitle per row. Desktop entries are read
 from every `applications` directory (localised names, `TryExec`, hidden

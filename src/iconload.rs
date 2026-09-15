@@ -17,6 +17,10 @@ pub struct Icons {
     themes: Vec<String>,
     bases: Vec<PathBuf>,
     cache: RefCell<HashMap<String, Option<cairo::ImageSurface>>>,
+    /// icons already scaled to the size the list draws them at: rescaling
+    /// a 256 px PNG down to 57 px on every frame is the one thing in the
+    /// launcher that actually costs something
+    scaled: RefCell<HashMap<(String, i32), Option<cairo::ImageSurface>>>,
 }
 
 impl Icons {
@@ -47,7 +51,7 @@ impl Icons {
                 themes.push(t.into());
             }
         }
-        Icons { themes, bases, cache: RefCell::new(HashMap::new()) }
+        Icons { themes, bases, cache: RefCell::new(HashMap::new()), scaled: RefCell::new(HashMap::new()) }
     }
 
     /// The icon for `name`, loaded and cached (`None` when there is none).
@@ -58,6 +62,34 @@ impl Icons {
         let surface = self.resolve(name).and_then(|path| load(&path));
         self.cache.borrow_mut().insert(name.to_string(), surface.clone());
         surface
+    }
+
+    /// The icon at exactly `px` × `px` device pixels, rendered once.
+    pub fn get_scaled(&self, name: &str, px: i32) -> Option<cairo::ImageSurface> {
+        let key = (name.to_string(), px);
+        if let Some(hit) = self.scaled.borrow().get(&key) {
+            return hit.clone();
+        }
+        let scaled = self.get(name).and_then(|source| {
+            let target = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+            let cr = cairo::Context::new(&target).ok()?;
+            let scale = px as f64 / source.width().max(source.height()) as f64;
+            cr.translate(
+                (px as f64 - source.width() as f64 * scale) / 2.0,
+                (px as f64 - source.height() as f64 * scale) / 2.0,
+            );
+            cr.scale(scale, scale);
+            cr.set_source_surface(&source, 0.0, 0.0).ok()?;
+            if let Ok(pattern) = TryInto::<cairo::SurfacePattern>::try_into(cr.source()) {
+                pattern.set_filter(cairo::Filter::Good);
+            }
+            cr.paint().ok()?;
+            drop(cr);
+            target.flush();
+            Some(target)
+        });
+        self.scaled.borrow_mut().insert(key, scaled.clone());
+        scaled
     }
 
     fn resolve(&self, name: &str) -> Option<PathBuf> {

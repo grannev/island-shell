@@ -77,6 +77,8 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 /// How often the sink's mute state is checked while something plays.
 const VOLUME_POLL: Duration = Duration::from_secs(2);
+/// shm buffers kept in flight (the compositor releases them a frame later)
+const MAX_BUFFERS: usize = 4;
 
 /// Animation time base: the compositor's presentation clock and, from its
 /// feedback, a prediction of when the frame being drawn will be shown.
@@ -392,6 +394,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Ask for the next frame callback on `layer`'s surface.
+fn surface_frame(layer: &LayerSurface, qh: &QueueHandle<App>) {
+    let surface = layer.wl_surface();
+    surface.frame(qh, FrameCallbackData(surface.clone()));
+    layer.commit();
+}
+
 fn read_muted() -> bool {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     if let Ok(v) = std::fs::read_to_string(dir.join("waybar-volume")) {
@@ -453,12 +462,15 @@ impl App {
             Command::Toggle => self.island.hidden.user = !self.island.hidden.user,
             Command::Show => self.island.hidden.user = false,
             Command::Hide => self.island.hidden.user = true,
-            Command::Dodge => self.island.dodged = true,
-            Command::Undodge => self.island.dodged = false,
-            Command::DodgeToggle => self.island.dodged = !self.island.dodged,
+            Command::Dodge => self.island.set_dodged(true, now),
+            Command::Undodge => self.island.set_dodged(false, now),
+            Command::DodgeToggle => {
+                let dodged = self.island.dodged;
+                self.island.set_dodged(!dodged, now);
+            }
             Command::Status => {
                 return format!(
-                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} {} {}",
+                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} buffers={} {} {}",
                     if self.island.is_hidden() { "hidden" } else { "shown" },
                     if self.island.dodged { "dodged" } else { "centred" },
                     self.scale,
@@ -466,6 +478,7 @@ impl App {
                     self.height,
                     self.clock.refresh * 1e3,
                     self.clock.pipeline,
+                    self.buffers.len(),
                     self.island.config.describe(),
                     self.island.describe(now)
                 );
@@ -728,7 +741,11 @@ impl App {
                 let _ = cr.fill();
                 cr.set_operator(cairo::Operator::Over);
             }
+            let t_paint = std::time::Instant::now();
             let frame = self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t);
+            if self.clock.debug {
+                eprintln!("paint: {:.0} us", t_paint.elapsed().as_secs_f64() * 1e6);
+            }
             let changed = match (stale, frame.bounds) {
                 (Some(a), Some(b)) => Some(a.union(b)),
                 (a, b) => a.or(b),
@@ -736,6 +753,7 @@ impl App {
             (frame, changed)
         };
         canvas.flush();
+        let t_copy = std::time::Instant::now();
 
         // every buffer now lags behind the canvas in `changed` too
         for (_, lag) in &mut self.buffers {
@@ -744,13 +762,23 @@ impl App {
                 (a, b) => a.or(b),
             };
         }
-        // a free buffer (released by the compositor), or a new one
+        // a free buffer (released by the compositor), or a new one — but
+        // never more than a small pool: if the compositor is holding them
+        // all, drop this frame instead of allocating another megabyte
         let idx = match self.buffers.iter().position(|(b, _)| self.pool.canvas(b).is_some()) {
             Some(i) => i,
-            None => {
+            None if self.buffers.len() < MAX_BUFFERS => {
                 let (buffer, _) = self.pool.create_buffer(bw, bh, stride, wl_shm::Format::Argb8888).expect("shm buffer");
                 self.buffers.push((buffer, Some(whole)));
                 self.buffers.len() - 1
+            }
+            None => {
+                // try again on the next frame callback
+                if !self.frame_pending {
+                    surface_frame(&self.layer, &self.qh);
+                    self.frame_pending = true;
+                }
+                return;
             }
         };
         let lag = self.buffers[idx].1.take();
@@ -775,6 +803,11 @@ impl App {
                         }
                     })
                     .expect("cairo surface data");
+            }
+        }
+        if self.clock.debug {
+            if let Some((x0, y0, x1, y1)) = damage {
+                eprintln!("copy: {:.0} us ({}x{})", t_copy.elapsed().as_secs_f64() * 1e6, x1 - x0, y1 - y0);
             }
         }
         let buffer = &self.buffers[idx].0;
