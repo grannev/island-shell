@@ -7,19 +7,21 @@ panel with the buffer list and Save / Format / Close.
 
 ## Install
 
-`scripts/install.sh` copies `island.lua` to
-`~/.local/share/nvim/site/lua/island.lua` (on Neovim's runtime path), so a
-lazy.nvim spec only has to call it:
+This directory is a plugin (`lua/island.lua`): point lazy.nvim at it, or
+let `scripts/install.sh` copy the module to
+`~/.local/share/nvim/site/lua/island.lua` and use the runtime path.
+[iVim](../../ivim) — the Neovim configuration built around the island —
+does the former:
 
 ```lua
--- ~/.config/nvim/lua/plugins/island.lua
+-- lua/plugins/island.lua
 return {
   {
     "nvim-lualine/lualine.nvim",
     enabled = false, -- the island is the status line now
   },
   {
-    dir = vim.fn.stdpath("data") .. "/site",
+    dir = vim.fn.expand("~/it/coding/island-shell/nvim"),
     name = "island.nvim",
     lazy = false,
     priority = 100,

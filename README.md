@@ -19,7 +19,8 @@ file, the position, git, the diagnostics and the buffer list — click a
 buffer to switch to it, or Save / Format / Close. The island writes
 `~/.config/island-shell/nvim-token` (0600) on first run and ignores any
 message that does not quote it, so only an editor running the plugin ever
-appears. See `nvim/README.md`.
+appears. See `nvim/README.md`; the Neovim configuration built around it
+lives in its own repository, iVim (`~/it/coding/ivim`).
 
 Step 4: the launcher (mod+d). The panel stands on its own: it opens even
 with the island parked above the edge (mod+i) and folds back out of sight,
@@ -159,7 +160,7 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/iconload.rs icon-theme lookup and loading
     src/nvim.rs     the Neovim protocol, its state and the calls back into it
     src/editor.rs   the mode chip and the editor panel
-    nvim/island.lua the companion plugin (installed onto nvim's runtime path)
+    nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install, switch, routing
     examples/icons.rs  renders the icon set to a PNG for eyeballing
     examples/apps.rs   lists what the launcher would show, with icon sizes
