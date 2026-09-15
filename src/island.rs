@@ -92,6 +92,12 @@ const PLAYER_DUR: f64 = 0.34;
 const PLAYER_R: f64 = 28.0;
 /// how often a drag tells the player where it has got to
 const SCRUB_INTERVAL: f64 = 0.25;
+/// the progress line's swell and the controls' glow (response, damping);
+/// both overshoot a little, so grabbing the playhead has a spring in it
+const TRACK_SPRING: (f64, f64) = (0.3, 0.62);
+const CONTROL_SPRING: (f64, f64) = (0.26, 0.7);
+/// how far the line swells under the pointer, and in the hand
+const TRACK_HOVER: f64 = 0.45;
 const TOAST_HOLD: f64 = 4.0;
 /// the gap between the clock and the compact bars
 const BARS_GAP: f64 = 12.0;
@@ -193,15 +199,7 @@ impl Song {
         self.position_at = now;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn view<'a>(
-        &'a self,
-        eq: &'a [f64],
-        pressed: Option<(player::Control, Time)>,
-        hovered: Option<player::Control>,
-        scrub: Option<f64>,
-        now: Time,
-    ) -> player::View<'a> {
+    fn view<'a>(&'a self, eq: &'a [f64], pressed: Option<(player::Control, Time)>, scrub: Option<f64>, now: Time) -> player::View<'a> {
         player::View {
             title: &self.now.title,
             artist: &self.now.artist,
@@ -217,8 +215,8 @@ impl Song {
             },
             length: self.now.length,
             pressed,
-            hovered,
-            scrubbing: scrub.is_some(),
+            track_grow: 0.0,
+            control_hover: [0.0; 3],
         }
     }
 }
@@ -264,6 +262,10 @@ pub struct Island {
     /// the playhead is being dragged: where it is, and when the player was
     /// last told about it (the drag is not worth a D-Bus call per frame)
     scrub: Option<(f64, Time)>,
+    /// the progress line swelling under the pointer / in the hand, and the
+    /// three transport controls lighting up — all on springs
+    track_grow: Spring,
+    control_hover: [Spring; 3],
     art: Art,
     /// equaliser bands: the latest levels from cava and the eased heights
     eq_target: [f64; EQ_BANDS],
@@ -360,6 +362,8 @@ impl Island {
             pressed: None,
             hovered_control: None,
             scrub: None,
+            track_grow: Spring::new(0.0, TRACK_SPRING.0, TRACK_SPRING.1),
+            control_hover: std::array::from_fn(|_| Spring::new(0.0, CONTROL_SPRING.0, CONTROL_SPRING.1)),
             art: Art::new(),
             eq_target: [0.0; EQ_BANDS],
             eq: [0.0; EQ_BANDS],
@@ -399,6 +403,8 @@ impl Island {
             || self.player.state(now).x > 0.0 && self.song.as_ref().is_some_and(|s| s.playing())
             || self.pressed.is_some_and(|(_, t)| now - t < 0.3)
             || self.scrub.is_some()
+            || self.track_grow.is_moving(now)
+            || self.control_hover.iter().any(|s| s.is_moving(now))
             // the small bars beside the clock are redrawn as cava feeds
             // them (~20 fps); the big ones glide with the display
             || self.eq_moving() && (self.pill.state(now).x > 0.0 || self.player.state(now).x > 0.0)
@@ -458,6 +464,25 @@ impl Island {
         // at, and with a player the island opens instead of just widening
         let hover = self.config.hover && self.hovered && !self.hidden.any() && !self.pill_open() && self.song.is_none() && self.launcher.is_none();
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
+        // the progress line and the controls follow the pointer on springs
+        let over_track = matches!(self.hovered_control, Some(player::Control::Seek(_)));
+        let track = if self.scrub.is_some() {
+            1.0
+        } else if over_track && self.want_player() {
+            TRACK_HOVER
+        } else {
+            0.0
+        };
+        self.track_grow.set(track, now);
+        for (i, spring) in self.control_hover.iter_mut().enumerate() {
+            let control = match i {
+                0 => player::Control::Previous,
+                1 => player::Control::PlayPause,
+                _ => player::Control::Next,
+            };
+            let lit = self.hovered_control == Some(control) && self.scrub.is_none();
+            spring.set(if lit { 1.0 } else { 0.0 }, now);
+        }
         let player = self.want_player();
         if player {
             // reaching for the island answers the toast
@@ -829,7 +854,7 @@ impl Island {
         // --- the pill: Touch ID, or a notification ---
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
         let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
-            let view = song.view(&self.eq, None, None, None, now);
+            let view = song.view(&self.eq, None, None, now);
             (player::toast_width(cr, renderer, &view), player::TOAST_H)
         });
         let (w_target, h_target) = match (self.auth.is_some(), notice_size.or(toast_size)) {
@@ -974,7 +999,7 @@ impl Island {
                 pangocairo::functions::show_layout(cr, &cap_l);
             } else if let Some(since) = self.toast {
                 if let Some(song) = &self.song {
-                    let view = song.view(&self.eq, None, None, None, now);
+                    let view = song.view(&self.eq, None, None, now);
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                     player::draw_toast(cr, renderer, &self.art, &view, x0, dy + climb, x1 - x0, bh, pill_alpha, since, now);
                 }
@@ -995,7 +1020,9 @@ impl Island {
         }
         if pl > 0.0 {
             if let Some(song) = &self.song {
-                let view = song.view(&self.eq, self.pressed, self.hovered_control, self.scrub.map(|(f, _)| f), now);
+                let mut view = song.view(&self.eq, self.pressed, self.scrub.map(|(f, _)| f), now);
+                view.track_grow = self.track_grow.state(now).x.max(0.0);
+                view.control_hover = std::array::from_fn(|i| self.control_hover[i].state(now).x.max(0.0));
                 let alpha = smoothstep((pl - 0.3) / 0.6);
                 player::draw(cr, renderer, &self.art, &view, x0, dy, x1 - x0, alpha, now, self.player_opened);
             }

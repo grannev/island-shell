@@ -19,6 +19,8 @@ const ART_R: f64 = 16.0;
 const TEXT_X: f64 = PAD + ART + 16.0;
 const PROGRESS_Y: f64 = 82.0;
 const PROGRESS_H: f64 = 3.0;
+/// how far the line swells under the pointer (the island's own constant)
+const TRACK_HOVER: f64 = 0.45;
 const CONTROLS_Y: f64 = 116.0;
 const CONTROL_GAP: f64 = 52.0;
 
@@ -90,9 +92,11 @@ pub struct View<'a> {
     pub length: f64,
     /// a control the pointer is holding down, for the little squish
     pub pressed: Option<(Control, Time)>,
-    pub hovered: Option<Control>,
-    /// the pointer is dragging the playhead: the bar swells and follows
-    pub scrubbing: bool,
+    /// how far the progress line has swollen: 0 at rest, ~0.45 under the
+    /// pointer, 1 while the playhead is held (eased, not switched)
+    pub track_grow: f64,
+    /// how lit each transport control is, previous / play / next
+    pub control_hover: [f64; 3],
 }
 
 /// Draw the open player inside the box at (`x`, `y`, `w`, `h`).
@@ -135,14 +139,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
     let (pa, po) = stage(0.12);
     let track_x = x + TEXT_X;
     let track_w = w - TEXT_X - PAD;
-    let over_track = matches!(view.hovered, Some(Control::Seek(_)));
-    let grow = if view.scrubbing {
-        1.0
-    } else if over_track {
-        0.45
-    } else {
-        0.0
-    };
+    let grow = view.track_grow;
     let bar_h = PROGRESS_H + 3.0 * grow;
     let bar_y = y + PROGRESS_Y + po - (bar_h - PROGRESS_H) / 2.0;
     let done = if view.length > 0.0 { (view.position / view.length).clamp(0.0, 1.0) } else { 0.0 };
@@ -150,15 +147,25 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
     cr.set_source_rgba(1.0, 1.0, 1.0, (0.18 + 0.07 * grow) * pa);
     let _ = cr.fill();
     if done > 0.0 {
+        // the filled part brightens a touch while the playhead is held
+        let lift = 0.18 * (grow - TRACK_HOVER).max(0.0) / (1.0 - TRACK_HOVER);
         rounded(cr, track_x, bar_y, track_w * done, bar_h, bar_h / 2.0);
-        cr.set_source_rgba(EQ_COLOR.0, EQ_COLOR.1, EQ_COLOR.2, 0.95 * pa);
+        cr.set_source_rgba(
+            EQ_COLOR.0 + (1.0 - EQ_COLOR.0) * lift,
+            EQ_COLOR.1 + (1.0 - EQ_COLOR.1) * lift,
+            EQ_COLOR.2,
+            0.95 * pa,
+        );
         let _ = cr.fill();
     }
-    if grow > 0.0 && view.length > 0.0 {
-        let knob = 3.5 + 3.5 * grow;
+    if grow > 0.01 && view.length > 0.0 {
+        // the knob grows out of the line; the spring behind `grow` gives
+        // it a little overshoot when the playhead is grabbed
+        let knob = 2.0 + 5.0 * grow;
         cr.new_path();
         cr.arc(track_x + track_w * done, bar_y + bar_h / 2.0, knob, 0.0, 2.0 * PI);
-        cr.set_source_rgba(1.0, 1.0, 1.0, pa);
+        // it is solid white as soon as it is there; only its size follows
+        cr.set_source_rgba(1.0, 1.0, 1.0, pa * (grow * 3.0).min(1.0));
         let _ = cr.fill();
     }
     if view.length > 0.0 {
@@ -176,20 +183,22 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
 
     // transport controls
     let (ca, co) = stage(0.16);
-    for (control, cx, cy) in control_centres(w) {
+    for (i, (control, cx, cy)) in control_centres(w).into_iter().enumerate() {
         let squish = match view.pressed {
             Some((c, since)) if c == control => 1.0 - 0.16 * (-(now - since) / 0.12).exp(),
             _ => 1.0,
         };
-        // the control under the pointer sits on a soft disc
-        if view.hovered == Some(control) {
+        // the control under the pointer rises on a soft disc that swells
+        // into place rather than blinking on
+        let hover = view.control_hover[i].clamp(0.0, 1.4);
+        if hover > 0.01 {
             cr.new_path();
-            cr.arc(x + cx, y + cy + co, 21.0, 0.0, 2.0 * PI);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * ca);
+            cr.arc(x + cx, y + cy + co, 15.0 + 6.0 * hover, 0.0, 2.0 * PI);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * ca * hover.min(1.0));
             let _ = cr.fill();
         }
-        let lit = if view.hovered == Some(control) { 1.0 } else { 0.85 };
-        control_glyph(cr, control, view.playing, x + cx, y + cy + co, squish, ca * lit);
+        let lit = 0.85 + 0.15 * hover.min(1.0);
+        control_glyph(cr, control, view.playing, x + cx, y + cy + co, squish * (1.0 + 0.04 * hover), ca * lit);
     }
 }
 

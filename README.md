@@ -51,7 +51,9 @@ announces itself with a "now playing" toast — album art, the app, the
 title, the bars — which then collapses to four cava-fed equaliser bars
 beating beside the clock; resting the pointer on the island opens it into
 a player with the art, the title and artist, a live equaliser, a progress
-line you can click or drag to scrub and vector transport controls. Silent playback
+line you can click or drag to scrub — it swells under the pointer and
+again in the hand, on springs — and vector transport controls that light
+up as the pointer reaches them. Silent playback
 (paused / muted) folds the bars away after 15 s; click / right / middle /
 scroll on the collapsed island still are play-pause / next / previous; Touch ID (fprintd on the system bus) — the box morphs into the
 92 px pill with a vector fingerprint whose ridges breathe in a ripple; on
