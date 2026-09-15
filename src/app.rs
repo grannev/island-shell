@@ -77,6 +77,8 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 /// How often the sink's mute state is checked while something plays.
 const VOLUME_POLL: Duration = Duration::from_secs(2);
+/// how often the open player asks where the track is
+const POSITION_POLL: Duration = Duration::from_secs(1);
 /// shm buffers kept in flight (the compositor releases them a frame later)
 const MAX_BUFFERS: usize = 4;
 
@@ -211,6 +213,8 @@ pub struct App {
     /// where its content lags behind the canvas
     buffers: Vec<(Buffer, Option<Rect>)>,
     clock: FrameClock,
+    /// the presentation time of the last frame we drew
+    drawn_for: Option<Time>,
 
     pub island: Island,
     renderer: Renderer,
@@ -221,6 +225,9 @@ pub struct App {
     /// the timer for the island's next time-driven change
     deadline: Option<(Time, RegistrationToken)>,
     volume_poll: Option<RegistrationToken>,
+    /// while the player is open its position is asked for every second
+    position_poll: Option<RegistrationToken>,
+    dbus_tx: channel::Sender<dbus::Event>,
     pub exit: bool,
 }
 
@@ -261,7 +268,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // D-Bus watchers (MPRIS players, fprintd) and the equaliser feed
     let (dbus_tx, dbus_rx) = channel::channel::<dbus::Event>();
     dbus::spawn_player_watch(dbus_tx.clone());
-    dbus::spawn_auth_watch(dbus_tx);
+    dbus::spawn_auth_watch(dbus_tx.clone());
     let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
     let (note_tx, note_rx) = channel::channel::<notify::Notification>();
     notify::spawn_watch(note_tx);
@@ -304,6 +311,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         canvas: None,
         buffers: Vec::new(),
         clock: FrameClock::new(),
+        drawn_for: None,
         island,
         renderer: Renderer::new(1.0),
         sway_query,
@@ -311,6 +319,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         eq_tx,
         deadline: None,
         volume_poll: None,
+        position_poll: None,
+        dbus_tx,
         exit: false,
     };
 
@@ -321,6 +331,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             dbus::Event::Player(np) => app.island.set_player(np.as_ref(), now),
             dbus::Event::AuthStarted => app.island.auth_started(now),
             dbus::Event::AuthStatus(status, done) => app.island.auth_status(&status, done, now),
+            dbus::Event::Position(position) => app.island.set_position(position, now),
         }
         app.after_change();
     })?;
@@ -660,6 +671,36 @@ impl App {
                 self.loop_handle.remove(token);
             }
         }
+        // the player's position: asked for while it is on screen
+        let now = self.clock.now();
+        match self.island.position_wanted(now) {
+            Some(bus) if self.position_poll.is_none() => {
+                dbus::spawn_position(&bus, self.dbus_tx.clone());
+                let token = self
+                    .loop_handle
+                    .insert_source(Timer::from_duration(POSITION_POLL), |_, _, app: &mut App| {
+                        let now = app.clock.now();
+                        match app.island.position_wanted(now) {
+                            Some(bus) => {
+                                dbus::spawn_position(&bus, app.dbus_tx.clone());
+                                TimeoutAction::ToDuration(POSITION_POLL)
+                            }
+                            None => {
+                                app.position_poll = None;
+                                TimeoutAction::Drop
+                            }
+                        }
+                    })
+                    .expect("position timer");
+                self.position_poll = Some(token);
+            }
+            None => {
+                if let Some(token) = self.position_poll.take() {
+                    self.loop_handle.remove(token);
+                }
+            }
+            _ => {}
+        }
         self.arm_deadline();
         self.redraw();
     }
@@ -713,6 +754,17 @@ impl App {
     fn draw(&mut self, steady: bool) {
         let started = std::time::Instant::now();
         let t = self.clock.predict(steady);
+        // one frame per refresh: the compositor hands out frame callbacks
+        // more generously than the display can show them, and a second
+        // frame for the same vblank is work nobody ever sees
+        if self.drawn_for.is_some_and(|prev| t <= prev + self.clock.refresh * 0.5) {
+            if !self.frame_pending {
+                surface_frame(&self.layer, &self.qh);
+                self.frame_pending = true;
+            }
+            return;
+        }
+        self.drawn_for = Some(t);
         if self.island.advance(t) {
             self.arm_deadline();
         }
@@ -774,6 +826,9 @@ impl App {
             }
             None => {
                 // try again on the next frame callback
+                if self.clock.debug {
+                    eprintln!("stall: no free buffer");
+                }
                 if !self.frame_pending {
                     surface_frame(&self.layer, &self.qh);
                     self.frame_pending = true;
@@ -851,7 +906,7 @@ impl App {
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
         if self.clock.debug {
-            eprintln!("draw: {:.0} us", started.elapsed().as_secs_f64() * 1e6);
+            eprintln!("draw: {:.0} us steady={}", started.elapsed().as_secs_f64() * 1e6, steady as u8);
         }
     }
 
@@ -985,11 +1040,17 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Leave { .. } => {
                     self.island.hovered = false;
+                    self.island.set_hovered_control(None);
                     changed = true;
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_at = event.position;
                     if self.hover_launcher_row() {
+                        changed = true;
+                    }
+                    let now = self.clock.predict(false);
+                    let control = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now);
+                    if self.island.set_hovered_control(control) {
                         changed = true;
                     }
                 }
@@ -1009,6 +1070,17 @@ impl PointerHandler for App {
                         }
                         changed = true;
                         continue;
+                    }
+                    // inside the open player the buttons and the progress
+                    // line take the click
+                    if let Some(control) = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
+                        if button == BTN_LEFT {
+                            if let Some((bus, track, command)) = self.island.press_control(control, now) {
+                                dbus::control(&bus, &track, command);
+                            }
+                            changed = true;
+                            continue;
+                        }
                     }
                     // a click on a notification dismisses it
                     if self.island.dismiss_notice(now) {
@@ -1075,7 +1147,7 @@ impl App {
     fn player_control(&self, cmd: PlayerCommand) {
         if self.island.accepts_player_clicks() {
             if let Some(song) = self.island.song() {
-                dbus::control(&song.bus_name, cmd);
+                dbus::control(&song.now.bus_name, &song.now.track_id, cmd);
             }
         }
     }

@@ -74,6 +74,10 @@ impl Quintic {
         self.start = now;
     }
 
+    pub fn target(&self) -> f64 {
+        self.target
+    }
+
     /// Progress in time, 0..1.
     pub fn progress(&self, now: Time) -> f64 {
         if self.dur <= 0.0 {

@@ -5,6 +5,7 @@
 mod anim;
 mod app;
 mod apps;
+mod art;
 mod ctl;
 mod dbus;
 mod eq;
@@ -13,6 +14,7 @@ mod iconload;
 mod island;
 mod launcher;
 mod notify;
+mod player;
 mod notify_kinds;
 mod sway;
 mod touchid;

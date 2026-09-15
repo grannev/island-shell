@@ -20,9 +20,17 @@ const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 #[derive(Clone, Debug, PartialEq)]
 pub struct NowPlaying {
     pub bus_name: String,
+    /// the player's own name ("Telegram", "Firefox"…)
+    pub app: String,
     pub playing: bool,
     pub artist: String,
     pub title: String,
+    /// `mpris:artUrl`, usually a file:// path
+    pub art_url: String,
+    /// `mpris:trackid`, needed to seek
+    pub track_id: String,
+    /// track length in seconds, 0 when the player does not say
+    pub length: f64,
 }
 
 pub enum Event {
@@ -32,6 +40,8 @@ pub enum Event {
     AuthStarted,
     /// fprintd VerifyStatus: (status, done).
     AuthStatus(String, bool),
+    /// where the active player is in the track, in seconds
+    Position(f64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,27 +49,54 @@ pub enum PlayerCommand {
     PlayPause,
     Next,
     Previous,
+    /// jump to this position, in seconds
+    Seek(f64),
 }
 
 /// Send a control to the player; the call runs on a throwaway thread so a
 /// frozen player never stalls the island.
-pub fn control(bus_name: &str, cmd: PlayerCommand) {
+pub fn control(bus_name: &str, track_id: &str, cmd: PlayerCommand) {
     let name = bus_name.to_string();
+    let track = track_id.to_string();
     thread::spawn(move || {
-        let method = match cmd {
-            PlayerCommand::PlayPause => "PlayPause",
-            PlayerCommand::Next => "Next",
-            PlayerCommand::Previous => "Previous",
-        };
         let run = || -> zbus::Result<()> {
             let conn = Connection::session()?;
             let proxy = Proxy::new(&conn, name.as_str(), MPRIS_PATH, PLAYER_IFACE)?;
-            proxy.call_noreply(method, &())
+            match cmd {
+                PlayerCommand::PlayPause => proxy.call_noreply("PlayPause", &()),
+                PlayerCommand::Next => proxy.call_noreply("Next", &()),
+                PlayerCommand::Previous => proxy.call_noreply("Previous", &()),
+                PlayerCommand::Seek(secs) => {
+                    let path = zbus::zvariant::ObjectPath::try_from(track.as_str())
+                        .map_err(|e| zbus::Error::Variant(e.into()))?;
+                    proxy.call_noreply("SetPosition", &(path, (secs * 1e6) as i64))
+                }
+            }
         };
         if let Err(e) = run() {
-            eprintln!("island-shell: player {method}: {e}");
+            eprintln!("island-shell: player control: {e}");
         }
     });
+}
+
+/// Ask the player where it is, on a thread — the island never blocks on a
+/// D-Bus call of its own.
+pub fn spawn_position(bus_name: &str, tx: Sender<Event>) {
+    let name = bus_name.to_string();
+    thread::spawn(move || {
+        if let Some(position) = position(&name) {
+            let _ = tx.send(Event::Position(position));
+        }
+    });
+}
+
+/// Where the player is in the track, in seconds (a property, so it has to
+/// be asked for; nobody signals it).
+pub fn position(bus_name: &str) -> Option<f64> {
+    let conn = Connection::session().ok()?;
+    let proxy = Proxy::new(&conn, bus_name, MPRIS_PATH, PLAYER_IFACE).ok()?;
+    let us: i64 = proxy.get_property("Position").ok()?;
+    Some(us as f64 / 1e6)
 }
 
 pub fn spawn_player_watch(tx: Sender<Event>) {
@@ -92,7 +129,41 @@ fn read_player(conn: &Connection, name: &str) -> Option<NowPlaying> {
             v => str_of(v),
         })
         .unwrap_or_default();
-    Some(NowPlaying { bus_name: name.to_string(), playing, artist, title })
+    let art_url = meta.get("mpris:artUrl").and_then(|v| str_of(v)).unwrap_or_default();
+    let track_id = meta.get("mpris:trackid").and_then(|v| path_of(v)).unwrap_or_default();
+    let length = meta.get("mpris:length").and_then(|v| int_of(v)).unwrap_or(0) as f64 / 1e6;
+    Some(NowPlaying {
+        bus_name: name.to_string(),
+        app: player_label(name),
+        playing,
+        artist,
+        title,
+        art_url,
+        track_id,
+        length,
+    })
+}
+
+fn int_of(v: &Value<'_>) -> Option<i64> {
+    match v {
+        Value::I64(n) => Some(*n),
+        Value::U64(n) => Some(*n as i64),
+        Value::I32(n) => Some(*n as i64),
+        Value::U32(n) => Some(*n as i64),
+        Value::F64(n) => Some(*n as i64),
+        Value::Value(inner) => int_of(inner),
+        _ => None,
+    }
+}
+
+/// `mpris:trackid` should be an object path but some players send a string.
+fn path_of(v: &Value<'_>) -> Option<String> {
+    match v {
+        Value::ObjectPath(p) => Some(p.to_string()),
+        Value::Str(s) => Some(s.to_string()),
+        Value::Value(inner) => path_of(inner),
+        _ => None,
+    }
 }
 
 fn str_of(v: &Value<'_>) -> Option<String> {

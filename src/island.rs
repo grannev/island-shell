@@ -10,7 +10,9 @@ use cairo::Context;
 
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
 use crate::icons;
+use crate::art::Art;
 use crate::launcher::{self, Launcher};
+use crate::player;
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -33,22 +35,14 @@ pub const FONT_PX: f64 = 16.0;
 const CAPTION_PX: f64 = 15.33;
 const FONT_REGULAR: &str = "SF Pro Text";
 const SMALL_PX: f64 = 12.5;
+const TINY_PX: f64 = 11.0;
 const QUERY_PX: f64 = 21.0;
 
-const SONG_MAX_CHARS: usize = 42;
 /// Silent playback (paused / muted) is shown this long before the title
 /// slides away.
 const SILENT_AFTER: f64 = 15.0;
-/// Equaliser: four 3 px bars in a 36 px slot at the start of the line.
+/// Equaliser bands (cava's output width).
 pub const EQ_BANDS: usize = crate::eq::BANDS;
-const EQ_W: f64 = 36.0;
-const EQ_X0: f64 = 6.0;
-const EQ_STEP: f64 = 7.0;
-const EQ_BAR_W: f64 = 3.0;
-const EQ_BOTTOM: f64 = 6.0;
-const EQ_MIN_H: f64 = 2.0;
-const EQ_MAX_H: f64 = 11.5;
-const EQ_COLOR: (f64, f64, f64) = (0x66 as f64 / 255.0, 0xD9 as f64 / 255.0, 1.0);
 /// easing of the bars towards the latest levels / down to flat when paused
 const EQ_TAU: f64 = 0.045;
 const EQ_TAU_SINK: f64 = 0.25;
@@ -93,6 +87,14 @@ const PANEL_DUR: f64 = 0.32;
 
 const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
+/// the island opening into the player, and the toast's life
+const PLAYER_DUR: f64 = 0.34;
+const PLAYER_R: f64 = 28.0;
+const TOAST_HOLD: f64 = 4.0;
+/// the gap between the clock and the compact bars
+const BARS_GAP: f64 = 12.0;
+const BARS_W: f64 = 26.0;
+const BARS_H: f64 = 14.0;
 const DODGE_DUR: f64 = 0.25;
 /// Hover: a spring with a little overshoot, like the CSS
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
@@ -155,22 +157,53 @@ impl HideReasons {
     }
 }
 
-/// A track shown in the island.
-#[derive(Clone, Debug, PartialEq)]
+/// The track the island knows about, and where the player is in it (the
+/// position is asked for now and then and runs on by itself in between).
+#[derive(Clone, Debug)]
 pub struct Song {
-    pub bus_name: String,
-    /// "Artist — Title", cut to 42 characters
-    pub text: String,
-    pub playing: bool,
+    pub now: crate::dbus::NowPlaying,
+    position: f64,
+    position_at: Time,
 }
 
 impl Song {
-    pub fn from_player(np: &crate::dbus::NowPlaying) -> Song {
-        let mut text = if np.artist.is_empty() { np.title.clone() } else { format!("{} — {}", np.artist, np.title) };
-        if text.chars().count() > SONG_MAX_CHARS {
-            text = text.chars().take(SONG_MAX_CHARS - 1).collect::<String>() + "…";
+    fn new(np: &crate::dbus::NowPlaying, now: Time) -> Song {
+        Song { now: np.clone(), position: 0.0, position_at: now }
+    }
+
+    pub fn playing(&self) -> bool {
+        self.now.playing
+    }
+
+    /// Is this the same track, or has the player moved on?
+    fn same_track(&self, np: &crate::dbus::NowPlaying) -> bool {
+        self.now.title == np.title && self.now.artist == np.artist
+    }
+
+    pub fn position(&self, now: Time) -> f64 {
+        let elapsed = if self.now.playing { now - self.position_at } else { 0.0 };
+        let position = self.position + elapsed;
+        if self.now.length > 0.0 { position.min(self.now.length) } else { position }
+    }
+
+    fn set_position(&mut self, position: f64, now: Time) {
+        self.position = position;
+        self.position_at = now;
+    }
+
+    fn view<'a>(&'a self, eq: &'a [f64], pressed: Option<(player::Control, Time)>, hovered: Option<player::Control>, now: Time) -> player::View<'a> {
+        player::View {
+            title: &self.now.title,
+            artist: &self.now.artist,
+            app: &self.now.app,
+            art_url: &self.now.art_url,
+            playing: self.now.playing,
+            eq,
+            position: self.position(now),
+            length: self.now.length,
+            pressed,
+            hovered,
         }
-        Song { bus_name: np.bus_name.clone(), text, playing: np.playing }
     }
 }
 
@@ -202,12 +235,17 @@ pub struct Island {
     /// Pointer over the box: the padding springs (no tint — the box stays
     /// pure black).
     hover_pad: Spring,
-    /// Now playing: the song text slides out from behind the divider
-    /// (0 = clock only, 1 = fully out).
+    /// Now playing: the compact bars beside the clock (0 = clock alone),
+    /// the toast that announces a track, and the player the island opens
+    /// into while the pointer rests on it.
     reveal: Quintic,
     song: Option<Song>,
-    /// a track change waits for the current text to retract first
-    song_pending: Option<Option<Song>>,
+    toast: Option<Time>,
+    player: Quintic,
+    player_opened: Time,
+    pressed: Option<(player::Control, Time)>,
+    hovered_control: Option<player::Control>,
+    art: Art,
     /// equaliser bands: the latest levels from cava and the eased heights
     eq_target: [f64; EQ_BANDS],
     eq: [f64; EQ_BANDS],
@@ -297,7 +335,12 @@ impl Island {
             hover_pad: Spring::new(0.0, HOVER_RESPONSE, HOVER_DAMPING),
             reveal: Quintic::at_rest(0.0, REVEAL_DUR),
             song: None,
-            song_pending: None,
+            toast: None,
+            player: Quintic::at_rest(0.0, PLAYER_DUR),
+            player_opened: 0.0,
+            pressed: None,
+            hovered_control: None,
+            art: Art::new(),
             eq_target: [0.0; EQ_BANDS],
             eq: [0.0; EQ_BANDS],
             eq_t: 0.0,
@@ -330,8 +373,14 @@ impl Island {
             || self.dodge.is_moving(now)
             || self.hover_pad.is_moving(now)
             || self.reveal.is_moving(now)
+            || self.player.is_moving(now)
             || self.pill.is_moving(now)
-            || self.eq_moving()
+            // the player's own content keeps moving while it is open
+            || self.player.state(now).x > 0.0 && self.song.as_ref().is_some_and(|s| s.playing())
+            || self.pressed.is_some_and(|(_, t)| now - t < 0.3)
+            // the small bars beside the clock are redrawn as cava feeds
+            // them (~20 fps); the big ones glide with the display
+            || self.eq_moving() && (self.pill.state(now).x > 0.0 || self.player.state(now).x > 0.0)
             || self.roll.is_moving(now)
             || self.pill_w.is_moving(now)
             || self.pill_h.is_moving(now)
@@ -345,20 +394,28 @@ impl Island {
         self.eq.iter().zip(&self.eq_target).any(|(a, b)| (a - b).abs() > 0.004)
     }
 
-    /// Is the song text meant to be out?
+    /// Are the compact bars meant to show beside the clock?
     fn want_reveal(&self, now: Time) -> bool {
-        self.song.is_some()
-            && self.song_pending.is_none()
-            && !self.dodged
-            && !self.pill_open()
+        self.song.is_some() && !self.dodged && !self.pill_open() && self.launcher.is_none() && !self.silent_expired(now)
+    }
+
+    /// Should the island be open as the player right now? A toast gives
+    /// way to the pointer (you reached for it, after all); Touch ID and a
+    /// notification do not.
+    fn want_player(&self) -> bool {
+        self.hovered
+            && self.song.is_some()
+            && self.auth.is_none()
+            && self.notice.is_none()
             && self.launcher.is_none()
-            && !self.silent_expired(now)
+            && !self.hidden.any()
+            && !self.dodged
     }
 
     /// Is anything using the pill (Touch ID owns it; a notification takes
     /// it when Touch ID does not)?
     fn pill_open(&self) -> bool {
-        self.auth.is_some() || self.notice.is_some()
+        self.auth.is_some() || self.notice.is_some() || self.toast.is_some()
     }
 
     fn silent_expired(&self, now: Time) -> bool {
@@ -376,18 +433,28 @@ impl Island {
         }
         self.hide.set(if self.hidden.any() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
-        // no hover feedback while hidden: the box is not there to point at
-        let hover = self.config.hover && self.hovered && !self.hidden.any() && self.auth.is_none();
+        // no hover feedback while hidden: the box is not there to point
+        // at, and with a player the island opens instead of just widening
+        let hover = self.config.hover && self.hovered && !self.hidden.any() && !self.pill_open() && self.song.is_none() && self.launcher.is_none();
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
+        let player = self.want_player();
+        if player {
+            // reaching for the island answers the toast
+            self.toast = None;
+        }
+        if player && self.player.target() < 0.5 {
+            self.player_opened = now;
+        }
+        self.player.set(if player { 1.0 } else { 0.0 }, now);
         self.reveal.set(if self.want_reveal(now) { 1.0 } else { 0.0 }, now);
-        self.pill.set(if self.pill_open() { 1.0 } else { 0.0 }, now);
+        self.pill.set(if self.pill_open() && !self.want_player() { 1.0 } else { 0.0 }, now);
         self.panel.set(if self.launcher.is_some() { 1.0 } else { 0.0 }, now);
         let result = matches!(self.auth, Some(Auth::Ok(_) | Auth::Fail(_)));
         self.ring.set(if result { 1.0 } else { 0.0 }, now);
         if !result {
             self.mark.set(0.0, now);
         }
-        if !self.song.as_ref().is_some_and(|s| s.playing) {
+        if !self.song.as_ref().is_some_and(|s| s.playing()) {
             self.eq_target = [0.0; EQ_BANDS];
         }
     }
@@ -397,8 +464,8 @@ impl Island {
     /// whether anything changed (then redraw).
     pub fn advance(&mut self, now: Time) -> bool {
         let mut changed = false;
-        if self.song_pending.is_some() && (!self.reveal.is_moving(now) && self.reveal.state(now).x == 0.0 || self.song.is_none()) {
-            self.song = self.song_pending.take().unwrap();
+        if self.toast.is_some_and(|since| now - since >= TOAST_HOLD) {
+            self.toast = None;
             changed = true;
         }
         match self.auth {
@@ -430,8 +497,8 @@ impl Island {
         if self.notice_prev.is_some() && !self.roll.is_moving(now) {
             self.notice_prev = None;
         }
-        if self.silent_expired(now) && self.reveal.state(now).x > 0.0 && self.song_pending.is_none() {
-            changed = true; // sync retracts it
+        if self.silent_expired(now) && self.reveal.state(now).x > 0.0 {
+            changed = true; // sync retracts the bars
         }
         if changed {
             self.sync(now);
@@ -454,6 +521,9 @@ impl Island {
         if let Some(l) = &self.launcher {
             consider(l.next_caret(now));
         }
+        if let Some(since) = self.toast {
+            consider(since + TOAST_HOLD);
+        }
         if let Some(since) = self.silent_since {
             if now - since < SILENT_AFTER && self.song.is_some() {
                 consider(since + SILENT_AFTER);
@@ -473,9 +543,9 @@ impl Island {
     /// One line for `island-shell status`.
     pub fn describe(&self, now: Time) -> String {
         format!(
-            "song={:?} pending={} reveal={:.2} pill={:.2} auth={:?} silent={}",
-            self.song.as_ref().map(|s| format!("{}{}", if s.playing { "" } else { "(paused) " }, s.text)),
-            self.song_pending.is_some(),
+            "song={:?} player={:.2} bars={:.2} pill={:.2} auth={:?} silent={}",
+            self.song.as_ref().map(|s| format!("{}{} — {}", if s.playing() { "" } else { "(paused) " }, s.now.artist, s.now.title)),
+            self.player.state(now).x,
             self.reveal.state(now).x,
             self.pill.state(now).x,
             self.auth.map(|a| format!("{a:?}")).or_else(|| self.notice.as_ref().map(|n| format!("notice {:?}", n.note.app))),
@@ -483,28 +553,58 @@ impl Island {
         )
     }
 
-    /// The active player changed (or went away).
+    /// The active player changed (or went away). A track that starts
+    /// announces itself with a toast, the way a notification arrives.
     pub fn set_player(&mut self, np: Option<&crate::dbus::NowPlaying>, now: Time) {
-        let new = np.map(Song::from_player);
-        match (&mut self.song, new) {
-            (None, new) => {
-                self.song = new;
-                self.song_pending = None;
+        match (np, &mut self.song) {
+            (None, _) => {
+                self.song = None;
+                self.toast = None;
+                self.art.clear();
             }
-            (Some(cur), Some(new)) if cur.text == new.text => {
-                // play / pause or another player with the same track
-                cur.playing = new.playing;
-                cur.bus_name = new.bus_name;
-                self.song_pending = None;
+            (Some(np), Some(song)) if song.same_track(np) => {
+                // play / pause, or fresher metadata for the same track
+                let was_playing = song.now.playing;
+                let position = song.position(now);
+                song.now = np.clone();
+                song.set_position(position, now);
+                if np.playing && !was_playing && self.toast.is_none() {
+                    self.announce(now);
+                }
             }
-            (Some(_), new) => {
-                // another track: the old text slides away first, then the
-                // new one slides in (`advance` does the swap)
-                self.song_pending = Some(new);
+            (Some(np), _) => {
+                // another track: the art on the old path is stale
+                self.art.clear();
+                self.song = Some(Song::new(np, now));
+                self.announce(now);
             }
         }
         self.update_silence(now);
         self.sync(now);
+    }
+
+    /// Show the "now playing" toast, unless the island has something more
+    /// important on (or the player is already open under the pointer).
+    fn announce(&mut self, now: Time) {
+        if self.hidden.any() || self.auth.is_some() || self.notice.is_some() || self.launcher.is_some() || self.want_player() {
+            return;
+        }
+        if self.song.as_ref().is_some_and(|s| s.playing()) {
+            self.toast = Some(now);
+        }
+    }
+
+    /// The player's position, fetched over D-Bus.
+    pub fn set_position(&mut self, position: f64, now: Time) {
+        if let Some(song) = self.song.as_mut() {
+            song.set_position(position, now);
+        }
+    }
+
+    /// The bus name whose position is worth asking for right now.
+    pub fn position_wanted(&self, now: Time) -> Option<String> {
+        let song = self.song.as_ref()?;
+        (self.player.state(now).x > 0.0 || self.toast.is_some()).then(|| song.now.bus_name.clone())
     }
 
     /// The sink's mute state changed.
@@ -515,7 +615,7 @@ impl Island {
     }
 
     fn update_silence(&mut self, now: Time) {
-        let silent = self.song.as_ref().is_some_and(|s| !s.playing || self.muted);
+        let silent = self.song.as_ref().is_some_and(|s| !s.playing() || self.muted);
         match (silent, self.silent_since) {
             (true, None) => self.silent_since = Some(now),
             (false, Some(_)) => self.silent_since = None,
@@ -525,7 +625,7 @@ impl Island {
 
     /// New band levels from cava (0..1).
     pub fn set_eq(&mut self, levels: [f32; EQ_BANDS]) {
-        if self.song.as_ref().is_some_and(|s| s.playing) {
+        if self.song.as_ref().is_some_and(|s| s.playing()) {
             self.eq_target = levels.map(|v| v as f64);
         }
     }
@@ -654,7 +754,7 @@ impl Island {
         // paused
         let dt = (now - self.eq_t).clamp(0.0, 0.5);
         self.eq_t = now;
-        let playing = self.song.as_ref().is_some_and(|s| s.playing);
+        let playing = self.song.as_ref().is_some_and(|s| s.playing());
         let tau = if playing { EQ_TAU } else { EQ_TAU_SINK };
         let k = 1.0 - (-dt / tau).exp();
         for (h, t) in self.eq.iter_mut().zip(&self.eq_target) {
@@ -667,9 +767,10 @@ impl Island {
         let hover_pad = self.hover_pad.value(now);
         let reveal = self.reveal.state(now).x;
         let q = self.pill.state(now).x;
-        // the panel is the third shape the box can take (mutually exclusive
-        // with the pill)
+        // the pill, the player and the launcher panel are the shapes the
+        // box can take besides the plain line; they never overlap
         let p = self.panel.state(now).x;
+        let pl = self.player.state(now).x;
         // the spread lags behind the slide — most of it happens while the box
         // is already mostly gone, like a drop flattening on water; it is a
         // function of the position so that show and hide trace the same path
@@ -685,7 +786,7 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q + (launcher::PANEL_R - radius) * p;
+        let radius = radius + (self.pill_h.state(now).x / 2.0 - radius) * q + (PLAYER_R - radius) * pl + (launcher::PANEL_R - radius) * p;
 
         // "liquid": the box stretches along its direction of travel in
         // proportion to its speed (px/s) and relaxes as it stops
@@ -693,27 +794,23 @@ impl Island {
         let stretch_y = liquid * 0.02 * (hide.v * BOX_H).abs();
         let stretch_x = liquid * 0.01 * (dodge.v * DODGE).abs();
 
-        // --- the line: [eq][gap][song][gap]|[gap] clock ---
+        // --- the line: the clock, with the bars beating beside it while
+        // something plays (the track's name lives in the toast and in the
+        // player now, not here) ---
         let clock = renderer.layout(cr, &self.clock, Font::Text);
         let (_, clock_ext) = clock.pixel_extents();
         let clock_w = clock_ext.width() as f64;
         let clock_h = clock_ext.height() as f64;
-        let group = self.song.as_ref().filter(|_| reveal > 0.0).map(|song| {
-            let title = renderer.layout(cr, &song.text, Font::Text);
-            let divider = renderer.layout(cr, "|", Font::Text);
-            let gap2 = renderer.layout(cr, "  ", Font::Text).pixel_extents().1.width() as f64;
-            let gap3 = renderer.layout(cr, "   ", Font::Text).pixel_extents().1.width() as f64;
-            let title_w = title.pixel_extents().1.width() as f64;
-            let div_w = divider.pixel_extents().1.width() as f64;
-            let len = EQ_W + gap2 + title_w + gap3 + div_w + gap3;
-            (title, divider, gap2, gap3, title_w, div_w, len)
-        });
-        let group_len = group.as_ref().map_or(0.0, |g| g.6);
-        let line_w = clock_w + reveal * group_len + 2.0 * pad;
+        let bars_len = reveal * (BARS_GAP + BARS_W);
+        let line_w = clock_w + bars_len + 2.0 * pad;
 
         // --- the pill: Touch ID, or a notification ---
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
-        let (w_target, h_target) = match (self.auth.is_some(), notice_size) {
+        let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
+            let view = song.view(&self.eq, None, None, now);
+            (player::toast_width(cr, renderer, &view), player::TOAST_H)
+        });
+        let (w_target, h_target) = match (self.auth.is_some(), notice_size.or(toast_size)) {
             (true, _) => (PILL_MIN_W, PILL_H),
             (false, Some(size)) => size,
             (false, None) => (self.pill_w.state(now).x, self.pill_h.state(now).x),
@@ -735,8 +832,9 @@ impl Island {
         let pill_w = self.pill_w.state(now).x;
         let pill_h = self.pill_h.state(now).x;
         let line_h = BOX_H;
-        let bw = line_w + (pill_w - line_w) * q + (launcher::PANEL_W - line_w) * p + stretch_x;
-        let bh = line_h + (pill_h - line_h) * q + (launcher::PANEL_H - line_h) * p + stretch_y - stretch_x * 0.15;
+        let bw = line_w + (pill_w - line_w) * q + (player::PLAYER_W - line_w) * pl + (launcher::PANEL_W - line_w) * p + stretch_x;
+        let bh = line_h + (pill_h - line_h) * q + (player::PLAYER_H - line_h) * pl + (launcher::PANEL_H - line_h) * p + stretch_y
+            - stretch_x * 0.15;
         let (mut x0, mut x1, mut y1) = (cx - bw / 2.0, cx + bw / 2.0, dy + bh);
         if !moving {
             // crisp edges at rest; while moving they glide sub-pixel
@@ -769,47 +867,27 @@ impl Island {
         // the line's content rides at the top of the box and dissolves
         // while the pill opens (first third), the pill's content climbs in
         // from below and fades in over the rest
-        let line_alpha = 1.0 - smoothstep(q / PILL_SWAP);
+        let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45));
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
-            let content_w = clock_w + reveal * group_len;
-            let clock_x = renderer.snap(cx + content_w / 2.0 - clock_w - clock_ext.x() as f64);
+            let content_w = clock_w + bars_len;
+            let clock_x = renderer.snap(cx - content_w / 2.0 - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
-            let _ = ty;
             cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
             cr.move_to(clock_x, ty);
             pangocairo::functions::show_layout(cr, &clock);
-
-            if let Some((title, divider, gap2, gap3, title_w, div_w, len)) = group {
-                // the group is anchored to the clock and clipped to what has
-                // emerged from behind the divider
-                let group_x = clock_x - len;
+            if reveal > 0.0 {
+                // the bars grow out of the clock's right edge
+                let bx = clock_x + clock_w + BARS_GAP * reveal;
                 cr.save().unwrap();
-                cr.rectangle(clock_x - reveal * len, dy, reveal * len, line_h);
+                cr.rectangle(bx, dy, BARS_W * reveal, line_h);
                 cr.clip();
-                let mut x = group_x;
-                // equaliser: four 3 px bars, bottoms 6 px above the line's
-                // bottom, 2..11.5 px tall
-                let bottom = dy + line_h - EQ_BOTTOM;
-                cr.set_source_rgba(EQ_COLOR.0, EQ_COLOR.1, EQ_COLOR.2, line_alpha);
-                for (i, level) in self.eq.iter().enumerate() {
-                    let h = EQ_MIN_H + (EQ_MAX_H - EQ_MIN_H) * level;
-                    let bx = renderer.snap(x + EQ_X0 + i as f64 * EQ_STEP);
-                    cr.rectangle(bx, bottom - h, EQ_BAR_W, h);
-                }
-                let _ = cr.fill();
-                x += EQ_W + gap2;
-                cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
-                cr.move_to(renderer.snap(x), ty);
-                pangocairo::functions::show_layout(cr, &title);
-                x += title_w + gap3;
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * line_alpha);
-                cr.move_to(renderer.snap(x), ty);
-                pangocairo::functions::show_layout(cr, &divider);
-                let _ = div_w;
+                player::bars(cr, renderer, &self.eq, bx, dy + (line_h - BARS_H) / 2.0, BARS_W, BARS_H, line_alpha * reveal);
                 cr.restore().unwrap();
             }
         }
+
+
         if pill_alpha > 0.0 {
             if let Some(auth) = self.auth {
                 let (result, caption, since) = match auth {
@@ -872,6 +950,12 @@ impl Island {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.8 * pill_alpha);
                 cr.move_to(cxp, cy);
                 pangocairo::functions::show_layout(cr, &cap_l);
+            } else if let Some(since) = self.toast {
+                if let Some(song) = &self.song {
+                    let view = song.view(&self.eq, None, None, now);
+                    let climb = (1.0 - pill_alpha) * PILL_CLIMB;
+                    player::draw_toast(cr, renderer, &self.art, &view, x0, dy + climb, x1 - x0, bh, pill_alpha, since, now);
+                }
             } else {
                 // a notification: the icon with its countdown on the left,
                 // the app's name and the message beside it. A newer one
@@ -885,6 +969,13 @@ impl Island {
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB + ROLL_TRAVEL * (1.0 - roll);
                     self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7), climb, now);
                 }
+            }
+        }
+        if pl > 0.0 {
+            if let Some(song) = &self.song {
+                let view = song.view(&self.eq, self.pressed, self.hovered_control, now);
+                let alpha = smoothstep((pl - 0.3) / 0.6);
+                player::draw(cr, renderer, &self.art, &view, x0, dy, x1 - x0, alpha, now, self.player_opened);
             }
         }
         if let Some(l) = &self.launcher {
@@ -935,16 +1026,67 @@ impl Island {
         pangocairo::functions::show_layout(cr, &msg);
     }
 
-    /// Hit test for clicks: the song controls only make sense on the line.
+    /// Is the player open (so clicks go to its controls)?
+    pub fn player_open(&self, now: Time) -> bool {
+        self.player.state(now).x > 0.5 && self.song.is_some()
+    }
+
+    /// Hit test for clicks on the collapsed island: play / pause and
+    /// track skipping, as the old touch target had.
     pub fn accepts_player_clicks(&self) -> bool {
         self.song.is_some() && !self.pill_open() && self.launcher.is_none()
+    }
+
+    /// Which control is under a point given in surface coordinates.
+    pub fn control_at(&self, cx: f64, px: f64, py: f64, now: Time) -> Option<player::Control> {
+        if !self.player_open(now) {
+            return None;
+        }
+        let (x0, y0) = self.box_origin(cx, now);
+        player::hit(player::PLAYER_W, px - x0, py - y0)
+    }
+
+    /// Remember the pointer's position over the player for the hover and
+    /// the press feedback.
+    pub fn set_hovered_control(&mut self, control: Option<player::Control>) -> bool {
+        let control = control.filter(|c| !matches!(c, player::Control::Seek(_)));
+        if control != self.hovered_control {
+            self.hovered_control = control;
+            return true;
+        }
+        false
+    }
+
+    pub fn press_control(&mut self, control: player::Control, now: Time) -> Option<(String, String, crate::dbus::PlayerCommand)> {
+        let song = self.song.as_ref()?;
+        self.pressed = Some((control, now));
+        let command = match control {
+            player::Control::Previous => crate::dbus::PlayerCommand::Previous,
+            player::Control::PlayPause => crate::dbus::PlayerCommand::PlayPause,
+            player::Control::Next => crate::dbus::PlayerCommand::Next,
+            player::Control::Seek(fraction) => {
+                if song.now.length <= 0.0 || song.now.track_id.is_empty() {
+                    return None;
+                }
+                crate::dbus::PlayerCommand::Seek(fraction * song.now.length)
+            }
+        };
+        // the progress line follows the click at once, the player will
+        // confirm it on the next poll
+        if let (player::Control::Seek(fraction), Some(song)) = (control, self.song.as_mut()) {
+            let length = song.now.length;
+            song.set_position(fraction * length, now);
+        }
+        let song = self.song.as_ref()?;
+        Some((song.now.bus_name.clone(), song.now.track_id.clone(), command))
     }
 
     /// Where the box's top-left corner is right now, for hit testing.
     pub fn box_origin(&self, cx: f64, now: Time) -> (f64, f64) {
         let p = self.panel.state(now).x;
+        let pl = self.player.state(now).x;
         let cx = cx - DODGE * self.dodge.state(now).x * (1.0 - p);
-        let w = launcher::PANEL_W * p;
+        let w = launcher::PANEL_W * p + player::PLAYER_W * pl;
         (cx - w / 2.0, -BOX_H * self.hide.state(now).x * (1.0 - p))
     }
 
@@ -1110,6 +1252,8 @@ pub enum Font {
     Caption,
     /// subtitles in the launcher's list, 12.5 px
     Small,
+    /// the player's timestamps, 11 px
+    Tiny,
     /// the launcher's search field, 21 px
     Query,
 }
@@ -1122,6 +1266,7 @@ pub struct Renderer {
     text: pango::FontDescription,
     caption: pango::FontDescription,
     small: pango::FontDescription,
+    tiny: pango::FontDescription,
     query: pango::FontDescription,
     ctx: pango::Context,
     cache: RefCell<HashMap<(Font, String), pango::Layout>>,
@@ -1135,6 +1280,8 @@ impl Renderer {
         caption.set_absolute_size(CAPTION_PX * pango::SCALE as f64);
         let mut small = pango::FontDescription::from_string(FONT_REGULAR);
         small.set_absolute_size(SMALL_PX * pango::SCALE as f64);
+        let mut tiny = pango::FontDescription::from_string(FONT_REGULAR);
+        tiny.set_absolute_size(TINY_PX * pango::SCALE as f64);
         let mut query = pango::FontDescription::from_string(FONT);
         query.set_absolute_size(QUERY_PX * pango::SCALE as f64);
         // the context takes the scale from a scratch surface; frames keep
@@ -1149,7 +1296,7 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        Renderer { scale, text, caption, small, query, ctx, cache: RefCell::new(HashMap::new()) }
+        Renderer { scale, text, caption, small, tiny, query, ctx, cache: RefCell::new(HashMap::new()) }
     }
 
     pub fn scale(&self) -> f64 {
@@ -1235,6 +1382,7 @@ impl Renderer {
             Font::Text => &self.text,
             Font::Caption => &self.caption,
             Font::Small => &self.small,
+            Font::Tiny => &self.tiny,
             Font::Query => &self.query,
         }));
         layout.set_text(text);

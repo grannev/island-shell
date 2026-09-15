@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cairo-rs = { version = "0.22.9", features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 pango = { version = "0.22.9", features = ["v1_56"] }
 pangocairo = "0.22.9"
 resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts"] }
