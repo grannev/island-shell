@@ -90,3 +90,8 @@ notifications living inside the island.
 3. Notifications (own org.freedesktop.Notifications or via dunst).
 4. Launcher (search, .desktop entries, icons, keyboard focus).
 5. Polish: multi-output, config file, idle CPU ~0.
+
+Status: steps 1–4 done; the old waybar island and its scripts are removed
+(backup: ~/.config/waybar/old-island-backup.tar.gz), island-shell runs as
+a systemd user service. Neovim integration lives in nvim/ and the iVim
+repository (~/it/coding/ivim).

@@ -1,0 +1,17 @@
+# island-shell as a user service: restarted if it ever falls over, its log
+# in the journal (journalctl --user -u island-shell). Started from the sway
+# config with `exec_always systemctl --user start island-shell`, which needs
+# WAYLAND_DISPLAY and SWAYSOCK in the systemd user environment (the sway
+# session already exports them).
+[Unit]
+Description=Dynamic Island for SwayFX
+After=sway-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/island-shell
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=default.target

@@ -4,9 +4,8 @@ A Dynamic-Island-style notch for SwayFX: clock, now playing with a live
 equaliser, Touch ID, notifications, a launcher — one Wayland layer-shell
 client rendering everything itself at the display's refresh rate.
 
-Replaces the waybar-based island in `~/.config/waybar` (island-*.sh,
-sway.css) and the walker/fuzzel launcher patches. See `CLAUDE.md` for the
-brief, the current island's behaviour to match, and the plan.
+Replaced the waybar-based island (island-*.sh, 500 lines of CSS frames)
+and the walker launcher; see `CLAUDE.md` for the brief and the plan.
 
 ## Status
 
@@ -129,18 +128,18 @@ start; `island-shell set key value` changes a value in the running island:
     liquid = 1        # velocity stretch, 0 = rigid
     hover = 1         # widen the box under the pointer
 
-### Switching between the old and the new island
+### Running as a service
 
-    scripts/island-switch.sh new     # start island-shell, park the waybar island
-    scripts/island-switch.sh old     # stop it, bring the waybar island back
-    scripts/island-switch.sh status
-
-The choice is remembered in `~/.config/island-shell/enabled` and applied on
-every sway reload (`exec_always island-switch.sh autostart` in the sway
-config). While the new island is live a marker
-`$XDG_RUNTIME_DIR/island-shell.active` tells the old scripts
-(`waybar.sh`, `island-launcher.sh`, `details-toggle.sh`) to leave their
-island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
+`scripts/install.sh` also installs `systemd/island-shell.service` as a
+user unit; the sway config starts it with
+`exec_always systemctl --user start island-shell.service` (a no-op on
+reload while it is up), systemd restarts it if it ever falls over, and its
+log is `journalctl --user -u island-shell`. A second instance finding the
+socket answered exits quietly instead of failing. The old waybar island
+is gone: `scripts/island-cmd.sh launcher` is what mod+d runs (it closes
+the ⋯ drawer first), `island-shell toggle` is mod+i, and
+`~/.config/sway/scripts/details-toggle.sh` (mod+o) signals waybar's
+drawer and tells the island to dodge.
 
 ## Layout
 
@@ -161,6 +160,7 @@ island parked; `scripts/island-cmd.sh` routes mod+i to whichever is live.
     src/nvim.rs     the Neovim protocol, its state and the calls back into it
     src/editor.rs   the mode chip and the editor panel
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
-    scripts/        install, switch, routing
+    scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
+    systemd/        the user service
     examples/icons.rs  renders the icon set to a PNG for eyeballing
     examples/apps.rs   lists what the launcher would show, with icon sizes

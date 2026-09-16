@@ -103,7 +103,10 @@ impl Server {
         // a stale socket from a crashed daemon: take it over if nobody answers
         if path.exists() {
             if UnixStream::connect(&path).is_ok() {
-                return Err(io::Error::new(io::ErrorKind::AddrInUse, "island-shell is already running"));
+                // not a failure worth a restart loop from systemd: the island
+                // is up, just not this process
+                eprintln!("island-shell: already running");
+                std::process::exit(0);
             }
             std::fs::remove_file(&path)?;
         }
