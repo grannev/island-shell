@@ -5,6 +5,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,7 +15,56 @@ use std::process::Command;
 const SIZES: [&str; 11] =
     ["256x256", "192x192", "128x128", "96x96", "64x64", "48x48", "scalable", "symbolic", "32x32", "512x512", ""];
 
+/// Main-thread cache, shared by every launcher opening.
 pub struct Icons {
+    worker: crate::background::Worker<(String, i32), Option<crate::background::Pixels>>,
+    pending: RefCell<HashSet<(String, i32)>>,
+    ready: RefCell<HashMap<(String, i32), Option<cairo::ImageSurface>>>,
+}
+
+impl Icons {
+    pub fn new() -> Self {
+        // Construct the non-Send Cairo cache on the worker, not on the UI thread.
+        let worker = crate::background::Worker::new("launcher-icons", {
+            // The loader is thread-local so no Cairo object crosses threads.
+            move |(name, px): (String, i32)| {
+                thread_local! { static LOADER: Loader = Loader::new(); }
+                LOADER.with(|loader| loader.get_scaled(&name, px).and_then(crate::background::Pixels::from_surface))
+            }
+        });
+        Self { worker, pending: RefCell::new(HashSet::new()), ready: RefCell::new(HashMap::new()) }
+    }
+    pub fn set_waker(&self, tx: smithay_client_toolkit::reexports::calloop::channel::Sender<()>) {
+        self.worker.set_waker(tx);
+    }
+    pub fn drain(&self) -> bool {
+        let results = self.worker.drain();
+        let changed = !results.is_empty();
+        let mut ready = self.ready.borrow_mut();
+        for (key, pixels) in results {
+            self.pending.borrow_mut().remove(&key);
+            if ready.len() >= 256 {
+                if let Some(oldest) = ready.keys().next().cloned() {
+                    ready.remove(&oldest);
+                }
+            }
+            ready.insert(key, pixels.and_then(crate::background::Pixels::into_surface));
+        }
+        changed
+    }
+    pub fn get_scaled(&self, name: &str, px: i32) -> Option<cairo::ImageSurface> {
+        let key = (name.to_string(), px.clamp(1, 512));
+        if let Some(surface) = self.ready.borrow().get(&key) {
+            return surface.clone();
+        }
+        if !self.pending.borrow().contains(&key) && self.worker.request(key.clone()) {
+            self.pending.borrow_mut().insert(key);
+        }
+        None
+    }
+}
+
+struct Loader {
     themes: Vec<String>,
     bases: Vec<PathBuf>,
     cache: RefCell<HashMap<String, Option<cairo::ImageSurface>>>,
@@ -23,8 +74,8 @@ pub struct Icons {
     scaled: RefCell<HashMap<(String, i32), Option<cairo::ImageSurface>>>,
 }
 
-impl Icons {
-    pub fn new() -> Icons {
+impl Loader {
+    fn new() -> Loader {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let mut bases = vec![home.join(".local/share/icons"), home.join(".icons")];
         let system = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
@@ -51,7 +102,7 @@ impl Icons {
                 themes.push(t.into());
             }
         }
-        Icons { themes, bases, cache: RefCell::new(HashMap::new()), scaled: RefCell::new(HashMap::new()) }
+        Loader { themes, bases, cache: RefCell::new(HashMap::new()), scaled: RefCell::new(HashMap::new()) }
     }
 
     /// The icon for `name`, loaded and cached (`None` when there is none).
@@ -60,6 +111,9 @@ impl Icons {
             return hit.clone();
         }
         let surface = self.resolve(name).and_then(|path| load(&path));
+        if self.cache.borrow().len() >= 64 {
+            self.cache.borrow_mut().clear();
+        }
         self.cache.borrow_mut().insert(name.to_string(), surface.clone());
         surface
     }
@@ -88,6 +142,9 @@ impl Icons {
             target.flush();
             Some(target)
         });
+        if self.scaled.borrow().len() >= 256 {
+            self.scaled.borrow_mut().clear();
+        }
         self.scaled.borrow_mut().insert(key, scaled.clone());
         scaled
     }
@@ -125,8 +182,7 @@ impl Icons {
 
 fn gtk_theme(home: &Path) -> Option<String> {
     let text = std::fs::read_to_string(home.join(".config/gtk-3.0/settings.ini")).ok()?;
-    text.lines()
-        .find_map(|l| l.trim().strip_prefix("gtk-icon-theme-name=").map(|v| v.trim().to_string()))
+    text.lines().find_map(|l| l.trim().strip_prefix("gtk-icon-theme-name=").map(|v| v.trim().to_string()))
 }
 
 fn index_inherits(bases: &[PathBuf], theme: &str) -> Vec<String> {
@@ -142,11 +198,8 @@ fn index_inherits(bases: &[PathBuf], theme: &str) -> Vec<String> {
 /// Load a PNG straight, anything else through a rasterised copy in the
 /// cache directory (rendered once).
 fn load(path: &Path) -> Option<cairo::ImageSurface> {
-    let png = if path.extension().and_then(|e| e.to_str()) == Some("png") {
-        path.to_path_buf()
-    } else {
-        rasterise(path)?
-    };
+    let png =
+        if path.extension().and_then(|e| e.to_str()) == Some("png") { path.to_path_buf() } else { rasterise(path)? };
     let mut file = std::fs::File::open(&png).ok()?;
     cairo::ImageSurface::create_from_png(&mut file).ok()
 }
@@ -163,7 +216,15 @@ fn rasterise(path: &Path) -> Option<PathBuf> {
         .join("icons");
     std::fs::create_dir_all(&dir).ok()?;
     let stem = path.file_stem()?.to_string_lossy().to_string();
-    let out = dir.join(format!("{stem}-{RASTER}.png"));
+    // Equal basenames in different themes are different icons. Also invalidate
+    // a raster when its source is replaced, without scanning/deleting caches.
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    if let Ok(metadata) = path.metadata() {
+        metadata.len().hash(&mut hash);
+        metadata.modified().ok().hash(&mut hash);
+    }
+    let out = dir.join(format!("{stem}-{:016x}-{RASTER}.png", hash.finish()));
     if out.exists() {
         return Some(out);
     }
@@ -187,7 +248,19 @@ fn rasterise(path: &Path) -> Option<PathBuf> {
 fn render_svg(path: &Path, out: &Path) -> bool {
     let Ok(data) = std::fs::read(path) else { return false };
     let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    // Most icons are paths, not text. Loading every installed font for each
+    // SVG used to take longer than a whole animation frame.
+    if data.windows(5).any(|part| part == b"<text") {
+        thread_local! {
+            static FONTS: std::sync::Arc<resvg::usvg::fontdb::Database> = {
+                let mut db = resvg::usvg::fontdb::Database::new();
+                db.load_system_fonts();
+                std::sync::Arc::new(db)
+            };
+        }
+        options.fontdb = FONTS.with(Clone::clone);
+    }
+    options.resources_dir = path.parent().map(Path::to_path_buf);
     let Ok(tree) = resvg::usvg::Tree::from_data(&data, &options) else { return false };
     let size = tree.size();
     let scale = RASTER as f32 / size.width().max(size.height()).max(1.0);

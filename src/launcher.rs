@@ -4,6 +4,7 @@
 //! places instead of jumping; the selection follows on a spring.
 
 use cairo::Context;
+use std::{rc::Rc, sync::Arc};
 
 use crate::anim::{Quintic, Spring, Time};
 use crate::apps::{self, App};
@@ -40,12 +41,28 @@ const FADE: f64 = 0.22;
 /// the caret's blink (macOS runs at a bit under two a second)
 const CARET_HZ: f64 = 1.6;
 const CARET_DUTY: f64 = 0.55;
+const FILE_DEBOUNCE: f64 = 0.18;
+
+#[derive(Clone)]
+enum Entry {
+    Application(App),
+    File(crate::files::FileHit),
+}
+
+impl Entry {
+    fn id(&self) -> String {
+        match self { Self::Application(a) => a.id.clone(), Self::File(f) => format!("file:{:?}", f.path) }
+    }
+    fn name(&self) -> &str { match self { Self::Application(a) => &a.name, Self::File(f) => &f.name } }
+    fn subtitle(&self) -> &str { match self { Self::Application(a) => &a.subtitle, Self::File(f) => &f.subtitle } }
+    fn icon(&self) -> Option<&str> { match self { Self::Application(a) => a.icon.as_deref(), Self::File(_) => None } }
+}
 
 /// One row on screen: which app it shows, where it is heading and how far
 /// it has faded in or out.
 struct Row {
     id: String,
-    app: App,
+    entry: Entry,
     /// its place in the list, as a spring so re-ranking glides
     slot: Spring,
     alpha: Quintic,
@@ -55,8 +72,13 @@ struct Row {
 }
 
 pub struct Launcher {
-    all: Vec<App>,
-    icons: Icons,
+    all: Arc<Vec<App>>,
+    icons: Rc<Icons>,
+    file_search: Rc<crate::files::Search>,
+    files: Vec<crate::files::FileHit>,
+    file_request: Option<u64>,
+    file_due: Option<Time>,
+    file_note: Option<String>,
     pub query: String,
     rows: Vec<Row>,
     /// the selected row, by app id (survives re-ranking)
@@ -70,10 +92,15 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    pub fn new(now: Time) -> Launcher {
+    pub fn new(now: Time, all: Arc<Vec<App>>, icons: Rc<Icons>, file_search: Rc<crate::files::Search>) -> Launcher {
         let mut l = Launcher {
-            all: apps::scan(),
-            icons: Icons::new(),
+            all,
+            icons,
+            file_search,
+            files: Vec::new(),
+            file_request: None,
+            file_due: None,
+            file_note: None,
             query: String::new(),
             rows: Vec::new(),
             selected: String::new(),
@@ -86,6 +113,41 @@ impl Launcher {
         l.refresh(now);
         l.sel_alpha.set(1.0, now);
         l
+    }
+
+    pub fn set_apps(&mut self, apps: Arc<Vec<App>>, now: Time) {
+        self.all = apps;
+        self.refresh(now);
+    }
+
+    pub fn result_count(&self) -> usize { self.matches }
+
+    pub fn file_count(&self) -> usize { self.files.len() }
+
+    fn query_changed(&mut self, now: Time) {
+        self.file_search.cancel();
+        self.file_request = None;
+        self.files.clear();
+        self.file_note = None;
+        self.file_due = (crate::files::query(&self.query).0.chars().count() >= 2).then_some(now + FILE_DEBOUNCE);
+        self.refresh(now);
+    }
+
+    pub fn advance(&mut self, now: Time) -> bool {
+        if !self.file_due.is_some_and(|due| now >= due) { return false; }
+        self.file_due = None;
+        self.file_request = self.file_search.request(crate::files::query(&self.query).0.to_string());
+        if self.file_request.is_none() { self.file_note = Some("Поиск занят · повторите запрос".into()); }
+        true
+    }
+
+    pub fn receive_files(&mut self, generation: u64, reply: crate::files::Reply, now: Time) -> bool {
+        if self.file_request != Some(generation) { return false; }
+        self.file_request = None;
+        self.files = reply.files;
+        self.file_note = reply.note;
+        self.refresh(now);
+        true
     }
 
     pub fn is_animating(&self, now: Time) -> bool {
@@ -103,7 +165,8 @@ impl Launcher {
     pub fn next_caret(&self, now: Time) -> Time {
         let period = 1.0 / CARET_HZ;
         let phase = (now * CARET_HZ).fract();
-        now + period * (if phase < CARET_DUTY { CARET_DUTY - phase } else { 1.0 - phase }) + 0.005
+        let caret = now + period * (if phase < CARET_DUTY { CARET_DUTY - phase } else { 1.0 - phase }) + 0.005;
+        self.file_due.map_or(caret, |due| due.min(caret))
     }
 
     fn caret_on(now: Time) -> bool {
@@ -113,35 +176,46 @@ impl Launcher {
     /// Re-rank for the current query: rows that stay glide to their new
     /// places, rows that go fade out where they are, new ones fade in.
     pub fn refresh(&mut self, now: Time) {
-        let hits: Vec<App> = apps::search(&self.all, &self.query, MAX_MATCHES).into_iter().cloned().collect();
+        let (query, files_only) = crate::files::query(&self.query);
+        let mut hits: Vec<Entry> = if files_only { Vec::new() } else {
+            apps::search(&self.all, query, MAX_MATCHES).into_iter().cloned().map(Entry::Application).collect()
+        };
+        if !self.files.is_empty() {
+            let other_apps = hits.split_off(hits.len().min(5));
+            hits.extend(self.files.iter().cloned().map(Entry::File));
+            hits.extend(other_apps);
+        }
+        let ids: Vec<_> = hits.iter().map(Entry::id).collect();
+        let present: std::collections::HashSet<_> = ids.iter().map(String::as_str).collect();
         self.matches = hits.len();
-        for (i, app) in hits.iter().enumerate() {
-            match self.rows.iter_mut().find(|r| r.id == app.id) {
+        for (i, entry) in hits.iter().enumerate() {
+            let id = &ids[i];
+            match self.rows.iter_mut().find(|r| &r.id == id) {
                 Some(row) => {
                     row.leaving = false;
                     row.slot.set(i as f64, now);
                     row.alpha.set(1.0, now);
-                    row.app = app.clone();
+                    row.entry = entry.clone();
                 }
                 None => {
                     let mut slot = Spring::new(i as f64 + 0.35, ROW_SPRING.0, ROW_SPRING.1);
                     slot.set(i as f64, now);
                     let mut alpha = Quintic::at_rest(0.0, FADE);
                     alpha.set(1.0, now);
-                    self.rows.push(Row { id: app.id.clone(), app: app.clone(), slot, alpha, born: now, leaving: false });
+                    self.rows.push(Row { id: id.clone(), entry: entry.clone(), slot, alpha, born: now, leaving: false });
                 }
             }
         }
         for row in &mut self.rows {
-            if !hits.iter().any(|a| a.id == row.id) && !row.leaving {
+            if !present.contains(row.id.as_str()) && !row.leaving {
                 row.leaving = true;
                 row.alpha.set(0.0, now);
             }
         }
         self.rows.retain(|r| !(r.leaving && !r.alpha.is_moving(now) && r.alpha.state(now).x <= 0.0));
         // keep the selection if it is still in the list, else take the top
-        if !hits.iter().any(|a| a.id == self.selected) {
-            self.selected = hits.first().map(|a| a.id.clone()).unwrap_or_default();
+        if !present.contains(self.selected.as_str()) {
+            self.selected = ids.first().cloned().unwrap_or_default();
             self.scroll.set(0.0, now);
         }
         self.sync_selection(now);
@@ -233,26 +307,28 @@ impl Launcher {
 
     pub fn push(&mut self, text: &str, now: Time) {
         self.query.push_str(text);
-        self.refresh(now);
+        self.query_changed(now);
     }
 
     pub fn backspace(&mut self, now: Time) {
         self.query.pop();
-        self.refresh(now);
+        self.query_changed(now);
     }
 
     /// Ctrl+U: wipe the query.
     pub fn clear(&mut self, now: Time) {
         self.query.clear();
-        self.refresh(now);
+        self.query_changed(now);
     }
 
     /// Launch what is selected; `false` when nothing matches.
     pub fn launch(&self) -> bool {
-        match self.rows.iter().find(|r| r.id == self.selected) {
+        match self.rows.iter().find(|r| !r.leaving && r.id == self.selected) {
             Some(row) => {
-                apps::launch(&row.app);
-                true
+                match &row.entry {
+                    Entry::Application(app) => { apps::launch(app); true }
+                    Entry::File(file) => crate::files::open(&file.path),
+                }
             }
             None => false,
         }
@@ -265,7 +341,7 @@ impl Launcher {
             return None;
         }
         let index = (rel / ROW_H + self.scroll.state(now).x).floor();
-        (index >= 0.0 && (index as usize) < self.results().len()).then_some(index as usize)
+        (index >= 0.0 && (index as usize) < self.matches).then_some(index as usize)
     }
 
     /// Draw the panel's content inside the box at (`x`, `y`, `w`), faded in
@@ -299,7 +375,7 @@ impl Launcher {
         // the caret sits ahead of the placeholder, not on top of it
         let placeholder_shift = 10.0;
         let (query, placeholder) = if self.query.is_empty() {
-            ("Search".to_string(), true)
+            ("Приложения и файлы".to_string(), true)
         } else {
             (self.query.clone(), false)
         };
@@ -375,13 +451,23 @@ impl Launcher {
         }
         cr.restore().unwrap();
 
-        if self.results().is_empty() {
-            let text = renderer.layout(cr, "No results", Font::Text);
+        if self.matches == 0 {
+            let text = renderer.layout(cr, if self.file_due.is_some() || self.file_request.is_some() {
+                "Ищем файлы…"
+            } else { "Ничего не найдено" }, Font::Text);
             let (_, e) = text.pixel_extents();
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.4 * alpha);
             cr.move_to(renderer.snap(x + w / 2.0 - e.width() as f64 / 2.0), renderer.snap(y + LIST_TOP + 30.0));
             pangocairo::functions::show_layout(cr, &text);
         }
+        let footer = if self.file_due.is_some() || self.file_request.is_some() {
+            "Поиск файлов…"
+        } else if let Some(note) = &self.file_note { note }
+        else { "file: — только файлы и каталоги · Enter — открыть" };
+        let hint = renderer.layout_ellipsized(cr, footer, Font::Tiny, w - 2.0 * FIELD_PAD, 1);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.36 * alpha);
+        cr.move_to(renderer.snap(x + FIELD_PAD), renderer.snap(y + 494.0));
+        pangocairo::functions::show_layout(cr, &hint);
     }
 
     fn draw_row(&self, cr: &Context, renderer: &Renderer, row: &Row, x: f64, y: f64, w: f64, alpha: f64, now: Time) {
@@ -393,7 +479,7 @@ impl Launcher {
         // the icon comes pre-scaled to the device pixels it covers, so a
         // frame only has to blit it
         let device = (ICON * renderer.scale()).round().max(1.0);
-        match row.app.icon.as_deref().and_then(|name| self.icons.get_scaled(name, device as i32)) {
+        match row.entry.icon().and_then(|name| self.icons.get_scaled(name, device as i32)) {
             Some(surface) => {
                 let scale = pop / renderer.scale();
                 cr.save().unwrap();
@@ -403,19 +489,22 @@ impl Launcher {
                 let _ = cr.paint_with_alpha(alpha);
                 cr.restore().unwrap();
             }
-            None => monogram(cr, renderer, &row.app.name, icon_x, icon_y, ICON * pop, alpha),
+            None => match &row.entry {
+                Entry::File(file) => file_icon(cr, file.directory, icon_x, icon_y, ICON * pop, alpha),
+                Entry::Application(app) => monogram(cr, renderer, &app.name, icon_x, icon_y, ICON * pop, alpha),
+            },
         }
 
         let text_x = renderer.snap(icon_x + ICON + ICON_GAP);
         let max_w = w - (text_x - x) - FIELD_PAD;
-        let name = renderer.layout_ellipsized(cr, &row.app.name, Font::Text, max_w, 1);
+        let name = renderer.layout_ellipsized(cr, row.entry.name(), Font::Text, max_w, 1);
         let (_, n_ext) = name.pixel_extents();
-        if row.app.subtitle.is_empty() {
+        if row.entry.subtitle().is_empty() {
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
             cr.move_to(text_x, renderer.snap(y + (ROW_H - n_ext.height() as f64) / 2.0 - n_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &name);
         } else {
-            let sub = renderer.layout_ellipsized(cr, &row.app.subtitle, Font::Small, max_w, 1);
+            let sub = renderer.layout_ellipsized(cr, row.entry.subtitle(), Font::Small, max_w, 1);
             let (_, s_ext) = sub.pixel_extents();
             let total = n_ext.height() as f64 + 1.0 + s_ext.height() as f64;
             let top = y + (ROW_H - total) / 2.0;
@@ -427,6 +516,95 @@ impl Launcher {
             pangocairo::functions::show_layout(cr, &sub);
         }
     }
+}
+
+impl Drop for Launcher {
+    fn drop(&mut self) { self.file_search.cancel(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launcher() -> Launcher {
+        Launcher::new(0.0, Arc::new(Vec::new()), Rc::new(Icons::new()), Rc::new(crate::files::Search::new()))
+    }
+    fn reply(name: &str) -> crate::files::Reply {
+        crate::files::Reply { files: vec![crate::files::FileHit {
+            path: std::path::Path::new("/tmp").join(name), name: name.into(), subtitle: "Файл · ~/Documents".into(), directory: false,
+        }], note: None }
+    }
+
+    #[test]
+    fn file_search_debounces_and_clearing_removes_the_deadline() {
+        let mut l = launcher();
+        l.push("r", 1.0);
+        assert!(l.file_due.is_none());
+        l.push("e", 1.1);
+        assert!((l.file_due.unwrap() - 1.28).abs() < 1e-9);
+        assert!(!l.advance(1.2));
+        l.push("ad", 1.21);
+        assert!((l.file_due.unwrap() - 1.39).abs() < 1e-9);
+        l.clear(1.3);
+        assert!(l.file_due.is_none());
+        assert!(!l.advance(10.0));
+    }
+
+    #[test]
+    fn late_file_replies_cannot_replace_a_new_query_or_reactivate_old_rows() {
+        let mut l = launcher();
+        l.push("file:notes", 1.0);
+        l.file_due = None;
+        l.file_request = Some(7);
+        assert!(!l.receive_files(6, reply("old.txt"), 1.2));
+        assert!(l.receive_files(7, reply("notes.txt"), 1.3));
+        assert_eq!(l.result_count(), 1);
+        assert_eq!(l.file_count(), 1);
+        let selected = l.selected.clone();
+        l.set_apps(Arc::new(Vec::new()), 1.4);
+        assert_eq!(l.selected, selected);
+        l.clear(1.5);
+        assert_eq!(l.file_count(), 0);
+        assert!(!l.receive_files(7, reply("notes.txt"), 1.6));
+        assert!(!l.launch(), "a fading-out file must not be opened");
+    }
+}
+
+fn file_icon(cr: &Context, directory: bool, x: f64, y: f64, size: f64, alpha: f64) {
+    cr.save().unwrap();
+    cr.translate(x + (ICON - size) / 2.0, y + (ICON - size) / 2.0);
+    cr.scale(size / 38.0, size / 38.0);
+    if directory {
+        rounded(cr, 2.0, 7.0, 16.0, 11.0, 3.0);
+        cr.set_source_rgba(0.19, 0.55, 0.85, alpha);
+        let _ = cr.fill();
+        rounded(cr, 2.0, 12.0, 34.0, 22.0, 4.0);
+        cr.set_source_rgba(0.28, 0.69, 1.0, alpha);
+        let _ = cr.fill();
+    } else {
+        cr.new_path();
+        cr.move_to(8.0, 2.0);
+        cr.line_to(23.0, 2.0);
+        cr.line_to(31.0, 10.0);
+        cr.line_to(31.0, 35.0);
+        cr.line_to(8.0, 35.0);
+        cr.close_path();
+        cr.set_source_rgba(0.84, 0.88, 0.94, alpha);
+        let _ = cr.fill();
+        cr.move_to(23.0, 2.0);
+        cr.line_to(23.0, 10.0);
+        cr.line_to(31.0, 10.0);
+        cr.set_source_rgba(0.43, 0.53, 0.65, alpha);
+        let _ = cr.fill();
+        cr.set_line_width(1.8);
+        cr.set_line_cap(cairo::LineCap::Round);
+        for y in [17.0, 22.0, 27.0] {
+            cr.move_to(13.0, y);
+            cr.line_to(26.0, y);
+        }
+        let _ = cr.stroke();
+    }
+    cr.restore().unwrap();
 }
 
 /// An app with no icon of its own gets a monogram tile.

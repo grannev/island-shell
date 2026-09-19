@@ -69,3 +69,36 @@ require("island").setup({
 The island writes `~/.config/island-shell/nvim-token` (0600) on first run
 and ignores any message that does not quote it, so a Neovim without this
 plugin — or another user's process — never appears in the island.
+
+## Command line and diagnostics
+
+The iVim configuration currently disables island command input and output.
+The implementation below is archived on the
+`archive/island-command-ui-2026-09-19` branch for later work.
+
+The companion presents `:`, `/` and `?` in an 84-pixel island sheet. Neovim
+keeps keyboard focus, command history, execution and search. The island must
+acknowledge that it is visible before Neovim hides its native command line.
+If the island is hidden, busy with another sheet, outdated or unreachable,
+the native command line returns automatically (within roughly 430 ms).
+The connection is checked only while input is active; abandoned input in the
+island expires after 800 ms. Password and complex nested prompts stay native.
+Use `:IslandCommandLine off` for the current session, or `cmdline = false`
+in `setup()` to keep native input permanently.
+
+Click the diagnostic counters in the editor panel to switch its three rows
+from buffers to problems in the current file, ordered by severity and line.
+Click a problem to jump to its exact buffer, line and column. Click `‹ Buffers`
+to return. Switching files resets the panel to buffers.
+
+Short results (up to 240 bytes / two lines) from simple `:echo`, `:echomsg`,
+`:echoerr`, `:pwd`, `:file` and option queries appear as island notifications.
+Command parse errors are shown there too. Evaluated function calls, chained
+commands, plugin commands, interactive prompts and long output stay native;
+`:messages` keeps its native history view. Failed or unacknowledged delivery
+replays the result in Neovim. Set `results = false` in `setup()` to disable
+result forwarding independently of island input.
+
+Regression checks: `cargo test --offline --bin island-shell`, `python3 tests/nvim_input.py`
+`python3 tests/nvim_results.py` and `python3 tests/nvim_companion.py`. The Python checks need pynvim and
+a local Unix socket; the companion check also covers diagnostics and jumps.

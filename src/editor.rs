@@ -42,9 +42,11 @@ pub enum Action {
     Buffer(i64),
     /// jump to the first diagnostic
     Diagnostics,
+    Diagnostic(usize),
     Save,
     Format,
     CloseBuffer,
+    CloseOutput,
 }
 
 /// The chip's text: the mode letter, then whatever is worth saying.
@@ -177,7 +179,7 @@ fn button_centres(w: f64) -> [(Action, f64, f64); 3] {
 }
 
 /// Hit test in the panel's own coordinates.
-pub fn hit(editor: &Editor, w: f64, x: f64, y: f64) -> Option<Action> {
+pub fn hit(editor: &Editor, w: f64, x: f64, y: f64, diagnostic_view: bool) -> Option<Action> {
     for (action, bx, by) in button_centres(w) {
         if (x - bx).abs() <= 34.0 && (y - by).abs() <= 20.0 {
             return Some(action);
@@ -185,11 +187,14 @@ pub fn hit(editor: &Editor, w: f64, x: f64, y: f64) -> Option<Action> {
     }
     if y >= LIST_TOP && y < LIST_TOP + ROW_H * MAX_BUFFERS as f64 {
         let index = ((y - LIST_TOP) / ROW_H) as usize;
+        if diagnostic_view {
+            return editor.diagnostic_items.get(index).map(|_| Action::Diagnostic(index));
+        }
         if let Some(buffer) = editor.buffers.iter().take(MAX_BUFFERS).nth(index) {
             return Some(Action::Buffer(buffer.id));
         }
     }
-    if editor.diagnostics.any() && (y - STATS_Y).abs() < 16.0 && x > w * 0.55 {
+    if (diagnostic_view || editor.diagnostics.any()) && (y - STATS_Y).abs() < 16.0 && x > w * 0.55 {
         return Some(Action::Diagnostics);
     }
     None
@@ -207,10 +212,16 @@ pub fn draw(
     alpha: f64,
     hovered: Option<Action>,
     pressed: Option<(Action, Time)>,
+    diagnostic_view: bool,
+    command: Option<&crate::nvim::Cmdline>,
     now: Time,
     opened: Time,
 ) {
     if alpha <= 0.003 {
+        return;
+    }
+    if let Some(command) = command {
+        draw_command(cr, renderer, command, x, y, w, alpha);
         return;
     }
     let t = now - opened;
@@ -279,7 +290,14 @@ pub fn draw(
 
     // diagnostics on the right of the same line, clickable
     let mut rx = x + w - PAD;
-    if editor.diagnostics.any() {
+    if diagnostic_view {
+        let layout = renderer.layout(cr, "‹ Buffers", Font::Tiny);
+        let (_, ext) = layout.pixel_extents();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.7 * sa);
+        cr.move_to(renderer.snap(rx - ext.width() as f64), renderer.snap(sy - ext.height() as f64 / 2.0 - ext.y() as f64));
+        pangocairo::functions::show_layout(cr, &layout);
+        rx -= ext.width() as f64 + 12.0;
+    } else if editor.diagnostics.any() {
         let lit = hovered == Some(Action::Diagnostics);
         rx = draw_diagnostics(cr, renderer, &editor.diagnostics, rx, sy, sa * if lit { 1.0 } else { 0.85 });
     }
@@ -297,6 +315,29 @@ pub fn draw(
         pangocairo::functions::show_layout(cr, &layout);
     }
 
+    if diagnostic_view {
+        for (i, d) in editor.diagnostic_items.iter().take(MAX_BUFFERS).enumerate() {
+            let ry = y + LIST_TOP + ROW_H * i as f64;
+            if hovered == Some(Action::Diagnostic(i)) {
+                capsule(cr, x + PAD - 8.0, ry, w - 2.0 * PAD + 16.0, ROW_H - 2.0, 8.0);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha);
+                let _ = cr.fill();
+            }
+            let colour = match d.severity { 1 => ERROR_COLOR, 2 => WARN_COLOR, _ => INFO_COLOR };
+            let text = format!("{}:{}  {}", d.line, d.col, d.message);
+            let layout = renderer.layout_ellipsized(cr, &text, Font::Small, w - 2.0 * PAD, 1);
+            let (_, ext) = layout.pixel_extents();
+            cr.set_source_rgba(colour.0, colour.1, colour.2, alpha * 0.9);
+            cr.move_to(renderer.snap(x + PAD), renderer.snap(ry + (ROW_H - ext.height() as f64) / 2.0 - ext.y() as f64));
+            pangocairo::functions::show_layout(cr, &layout);
+        }
+        if editor.diagnostic_items.is_empty() {
+            let layout = renderer.layout(cr, "No problems in this file", Font::Small);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * alpha);
+            cr.move_to(x + PAD, y + LIST_TOP + 12.0);
+            pangocairo::functions::show_layout(cr, &layout);
+        }
+    } else {
     // the buffer list
     for (i, buffer) in editor.buffers.iter().take(MAX_BUFFERS).enumerate() {
         let (ba, bo) = stage(0.1 + 0.04 * i as f64);
@@ -323,6 +364,8 @@ pub fn draw(
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * ba);
             let _ = cr.fill();
         }
+    }
+
     }
 
     // the buttons
@@ -452,3 +495,66 @@ fn capsule(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 
 /// The gap between the chip and the clock.
 pub const GAP: f64 = CHIP_GAP;
+
+/// Pango uses byte offsets too, so Unicode and proportional glyphs share one caret.
+fn draw_command(cr: &Context, renderer: &Renderer, command: &crate::nvim::Cmdline, x: f64, y: f64, w: f64, alpha: f64) {
+    let label = match command.prefix.as_str() { "/" | "?" => "Search", _ => "Command" };
+    let title = renderer.layout(cr, label, Font::Tiny);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.45 * alpha);
+    cr.move_to(renderer.snap(x + PAD), renderer.snap(y + 14.0));
+    pangocairo::functions::show_layout(cr, &title);
+    let prefix = format!("{} ", command.prefix);
+    let text = format!("{}{}", prefix, command.text);
+    let mut pos = command.pos.min(command.text.len());
+    while !command.text.is_char_boundary(pos) { pos -= 1; }
+    let layout = renderer.layout(cr, &text, Font::Text);
+    let caret = layout.cursor_pos((prefix.len() + pos) as i32).0;
+    let caret_x = caret.x() as f64 / pango::SCALE as f64;
+    let available = w - 2.0 * PAD;
+    let scroll = (caret_x - available + 8.0).max(0.0);
+    cr.save().unwrap();
+    cr.rectangle(x + PAD, y + 35.0, available, 30.0);
+    cr.clip();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.94 * alpha);
+    cr.move_to(renderer.snap(x + PAD - scroll), renderer.snap(y + 40.0));
+    pangocairo::functions::show_layout(cr, &layout);
+    cr.new_path();
+    cr.rectangle(renderer.snap(x + PAD + caret_x - scroll), renderer.snap(y + 40.0), 1.5, 20.0);
+    cr.set_source_rgba(0.65, 0.8, 1.0, alpha);
+    let _ = cr.fill();
+    cr.restore().unwrap();
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn diagnostics_hit_the_exact_row_and_back_control() {
+        let e = Editor { diagnostic_items: vec![crate::nvim::DiagnosticItem {
+            buffer: 42, line: 10, col: 3, severity: 1, message: "Undefined name".into(),
+        }], ..Editor::default() };
+        assert_eq!(hit(&e, PANEL_W, 30.0, LIST_TOP + 5.0, true), Some(Action::Diagnostic(0)));
+        assert_eq!(hit(&e, PANEL_W, 440.0, STATS_Y, true), Some(Action::Diagnostics));
+        assert_eq!(hit(&e, PANEL_W, 30.0, LIST_TOP + ROW_H + 5.0, true), None);
+    }
+    #[test]
+    fn command_renders_unicode_and_long_input_at_fractional_scale() {
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 705, 126).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        for text in ["echo 'Привет, мир'".to_string(), "界".repeat(200)] {
+            for pos in [0, 1, text.len(), usize::MAX] {
+                let command = crate::nvim::Cmdline { text: text.clone(), prefix: ":".into(), pos };
+                draw_command(&cr, &renderer, &command, 0.0, 0.0, PANEL_W, 1.0);
+                assert!(cr.status().is_ok());
+            }
+        }
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.paint().unwrap();
+        draw_command(&cr, &renderer, &crate::nvim::Cmdline { text: "Telescope find_files".into(), prefix: ":".into(), pos: 19 }, 0.0, 0.0, PANEL_W, 1.0);
+        if let Ok(path) = std::env::var("ISLAND_COMMAND_PREVIEW") {
+            surface.write_to_png(&mut std::fs::File::create(path).unwrap()).unwrap();
+        }
+    }
+}

@@ -35,6 +35,7 @@ local state = {
   progress = {},
   error_pending = false,
   last_error = nil,
+  diagnostic_items = {},
 }
 
 local function config_home()
@@ -114,6 +115,33 @@ local function diagnostics()
   return counts
 end
 
+local function refresh_diagnostics()
+  local list = vim.diagnostic.get(0)
+  table.sort(list, function(a, b)
+    if a.severity ~= b.severity then return (a.severity or 4) < (b.severity or 4) end
+    if a.lnum ~= b.lnum then return a.lnum < b.lnum end
+    return (a.col or 0) < (b.col or 0)
+  end)
+  state.diagnostic_items = {}
+  for _, d in ipairs(list) do
+    table.insert(state.diagnostic_items, {
+      buffer = vim.api.nvim_get_current_buf(), line = d.lnum + 1, col = (d.col or 0) + 1,
+      severity = d.severity or 4, message = (d.message or ""):gsub("%s+", " "):sub(1, 1000),
+    })
+    if #state.diagnostic_items == 3 then break end
+  end
+end
+
+function M.jump(buffer, line, col)
+  if not vim.api.nvim_buf_is_valid(buffer) then return false end
+  vim.api.nvim_set_current_buf(buffer)
+  line = math.min(math.max(1, line), vim.api.nvim_buf_line_count(buffer))
+  local text = vim.api.nvim_buf_get_lines(buffer, line - 1, line, false)[1] or ""
+  vim.api.nvim_win_set_cursor(0, { line, math.min(math.max(0, col - 1), #text) })
+  vim.cmd("normal! zz")
+  return true
+end
+
 local function search_count()
   if vim.v.hlsearch ~= 1 then
     return nil
@@ -183,6 +211,7 @@ local function collect(focused)
     encoding = vim.bo.fileencoding ~= "" and vim.bo.fileencoding or vim.o.encoding,
     indent = indent_label(),
     diagnostics = diagnostics(),
+    diagnostic_items = state.diagnostic_items,
     branch = (git_info()),
     added = select(2, git_info()),
     removed = select(3, git_info()),
@@ -341,6 +370,12 @@ function M.setup(opts)
   local group = vim.api.nvim_create_augroup("island", { clear = true })
   local function on(events, callback)
     vim.api.nvim_create_autocmd(events, { group = group, callback = callback })
+  end
+
+  on({ "BufEnter", "DiagnosticChanged" }, refresh_diagnostics)
+  refresh_diagnostics()
+  if config.cmdline ~= false then
+    require("island.cmdline").setup({ token = state.token, socket = state.socket, server = state.server, results = config.results })
   end
 
   on({ "ModeChanged", "BufEnter", "BufWritePost", "TextChanged", "TextChangedI", "DiagnosticChanged", "RecordingEnter", "RecordingLeave", "CmdlineEnter", "CmdlineLeave", "LspAttach", "CursorHold", "WinEnter", "DirChanged" }, function()

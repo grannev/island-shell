@@ -24,7 +24,7 @@ a PipeWire capture, dunst (or an own org.freedesktop.Notifications).
   opens to the left of the right-hand modules — the island must dodge it.
 - Fonts: SF Pro Text (Regular…Black) in ~/.local/share/fonts/SF-Pro; SF
   Symbols glyphs are PUA code points of the same fonts (used: speaker
-  U+1002A5/A7/A9, mute U+10063A, keyboard.fill U+100E91, battery
+  U+1002A5/A7/A9, mute U+1002A3 (right-facing, not the RTL U+10063A), keyboard.fill U+100E91, battery
   U+1006EA/E9/100EB6/EB8/1006E8, bolt U+10088B, ellipsis U+100360, wifi
   U+100647, magnifyingglass U+1002AB). Nerd-font glyphs used for Touch ID:
   fingerprint U+F0237, check U+F05E0, cross U+F0159 (JetBrainsMono Nerd).
@@ -76,6 +76,13 @@ Semibold 16 px white, padding 16, content-sized width; clock text
   hidden island is shown and an open drawer closed first.
 - Lock screen (hyprlock) is separate and stays as is.
 
+The island's four-shortcut menu (Wi-Fi, Bluetooth, Timer, Launcher) opens from
+a normal left click on the ordinary compact body. mod+d still opens the
+launcher directly. Music controls are scoped to the equaliser on the compact
+island or the visible player panel: left play/pause, right next, middle
+previous; scrolling changes tracks only there. Explicit controls, timer,
+authentication and modal panels retain their interactions.
+
 ## Improvements wanted
 True 60 fps interpolated motion (springs / min-jerk), pixel-stable text,
 morphing shapes without GTK limits, native input (hover/click) instead of a
@@ -95,3 +102,64 @@ Status: steps 1–4 done; the old waybar island and its scripts are removed
 (backup: ~/.config/waybar/old-island-backup.tar.gz), island-shell runs as
 a systemd user service. Neovim integration lives in nvim/ and the iVim
 repository (~/it/coding/ivim).
+
+Live activities are native too: volume and brightness sliders, charging
+and low-battery states, Bluetooth and Wi-Fi connection changes, screenshot
+thumbnails, and a compact clickable countdown / Pomodoro beside the clock.
+Environment readers live in `src/activity.rs`; a grim wrapper is installed
+as `~/.local/bin/island-screenshot`.
+The timer opens from the island's shortcut menu; a running
+countdown appears beside the clock; left click pauses/resumes, right click
+opens controls, and Escape closes the panel. `island-shell timer` opens the
+same panel. The main Waybar has no timer, Wi-Fi or Bluetooth buttons, and its
+⋯ drawer contains only disk, CPU and memory. `src/connections.rs` owns native connection sheets and their
+motion; `src/network.rs` owns asynchronous NetworkManager and BlueZ operations.
+Wi-Fi supports scanning, saved/open/personal secured connections, password
+entry and disconnect. Bluetooth has paired/discovery tabs, connection,
+disconnect and pairing with a scoped BlueZ agent for PIN/code confirmation.
+Search is cancellable; replies carry session/request IDs and cannot reopen
+a dismissed sheet. Escape or an outside click closes modal sheets and releases
+keyboard focus. A temporary transparent layer surface catches outside clicks,
+with an input-region hole that follows the island's animated geometry; the
+closing click is consumed. Timer and Bluetooth icons are matched SVG assets
+in `assets/waybar`, installed under `~/.local/share/island-shell/icons`.
+The compact equaliser on the right is the only hover trigger for music;
+Neovim's chip on the left is the hover trigger for editor details. An already
+open panel stays open while the pointer moves across it.
+Hovering the ordinary compact body still widens its side padding on a spring,
+even when music and Neovim are active. A panel target suppresses that padding
+while the corresponding sheet unfolds.
+Bluetooth discovery runs up to 30 seconds and updates names live; unnamed
+advertisements remain explicitly unnamed with an address in the subtitle. OSD
+entrance timestamps are separate from last-update timestamps: key repeat only
+extends the hold. Cairo icon helpers start fresh paths so text positions never
+become stray stroked lines.
+
+Performance: desktop entries, icons and art are loaded on bounded background
+workers (`background.rs`); launcher caches survive closing. Worker replies wake
+the event loop; never add file decoding, process waits or directory scans to a
+paint/input handler. Art generations reject stale results. Pango's cache is a
+bounded LRU with pixel-quantized widths. Audio startup/mute polling are also
+background jobs. Keep a single timed redraw source for a steady countdown.
+The ignored `animation_benchmark` release test measures offscreen paint cost
+at 1.5× against the real desktop catalog (not compositor latency).
+
+The launcher also searches filenames/folders under HOME using fdfind/fd:
+two-character minimum, 180 ms debounce, 80 results, two worker threads,
+three-second search limit. `file:`/`файл:` restricts results to files and
+folders; ordinary queries combine apps and files. `files.rs` owns cancellable
+search and shell-free, asynchronous opening. Directories use Alacritty;
+text uses Neovim inside Alacritty; PDF uses Evince; office formats use
+LibreOffice; other formats or missing openers fall back to xdg-open.
+MIME probing with `file` runs only on opening the selected file, off the UI
+thread; search itself never probes contents. Query generations and Launcher::drop cancel
+stale work; results arrive through the existing asset wake channel. Never
+read file contents or index hidden/cache/build directories as part of search.
+
+All user applications and file openers use `launch.rs` to run in independent
+systemd user scopes. Never spawn them directly in island-shell.service or use
+setsid alone: service stop/restart kills the entire cgroup, including user
+editors. Scope startup stays off the UI thread, preserves argv/environment,
+and disables systemd argument expansion. Keep the service's default KillMode
+for its own helpers. The ignored scope lifetime test stops only its private
+test service and verifies that its spawned process survives.

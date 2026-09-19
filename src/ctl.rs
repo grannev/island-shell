@@ -24,8 +24,12 @@ pub enum Command {
     Demo(String, String, String),
     /// mod+d: unfold into the launcher panel, or fold back
     Launcher,
+    /// Open the four shortcuts normally revealed by holding the island.
+    Quick,
     /// close the launcher if it is open (e.g. after launching)
     LauncherClose,
+    /// Close modal menus, like a click on the transparent outside region.
+    Dismiss,
     /// type into the launcher's search field (debugging)
     Type(String),
     /// `key <escape|return|up|down|backspace>`: a key for the launcher
@@ -36,6 +40,10 @@ pub enum Command {
     Scrub(String),
     /// `nvim <json>`: a message from the companion Neovim plugin
     Nvim(String),
+    /// A live activity supplied explicitly (also used by screenshot hooks).
+    Activity(crate::activity::Event),
+    /// `timer <duration|pause|resume|toggle|cancel|status>`.
+    Timer(String),
     Quit,
 }
 
@@ -45,6 +53,9 @@ impl Command {
         // cut into words
         if let Some(json) = s.trim().strip_prefix("nvim ") {
             return Some(Command::Nvim(json.to_string()));
+        }
+        if let Some(path) = s.trim().strip_prefix("screenshot ") {
+            return (!path.is_empty()).then(|| Command::Activity(crate::activity::Event::Screenshot { path: PathBuf::from(path) }));
         }
         let words: Vec<&str> = s.split_whitespace().collect();
         Some(match words.as_slice() {
@@ -63,17 +74,49 @@ impl Command {
                 Command::Demo(app.to_string(), summary.trim().to_string(), body.trim().to_string())
             }
             ["launcher"] => Command::Launcher,
+            ["quick"] | ["menu"] => Command::Quick,
             ["launcher-close"] => Command::LauncherClose,
+            ["dismiss"] => Command::Dismiss,
             ["type", rest @ ..] => Command::Type(rest.join(" ")),
             ["key", name] => Command::Key(name.to_string()),
             ["scrub", value] => Command::Scrub(value.to_string()),
+            ["volume", value, tail @ ..] => Command::Activity(crate::activity::Event::Slider {
+                kind: crate::activity::SliderKind::Volume,
+                value: value.parse::<f64>().ok()?.clamp(0.0, 1.0),
+                muted: tail.contains(&"muted"),
+            }),
+            ["brightness", value] => Command::Activity(crate::activity::Event::Slider {
+                kind: crate::activity::SliderKind::Brightness,
+                value: value.parse::<f64>().ok()?.clamp(0.0, 1.0),
+                muted: false,
+            }),
+            ["battery", percent, "charging"] => Command::Activity(crate::activity::Event::Charging {
+                percent: percent.parse::<u8>().ok()?.min(100),
+            }),
+            ["battery", percent, "low"] => Command::Activity(crate::activity::Event::BatteryLow {
+                percent: percent.parse::<u8>().ok()?.min(100),
+            }),
+            ["bluetooth", battery, name @ ..] if !name.is_empty() => Command::Activity(crate::activity::Event::Bluetooth {
+                name: name.join(" "),
+                battery: (battery != &"-").then(|| battery.parse::<u8>().ok().map(|p| p.min(100))).flatten(),
+            }),
+            ["wifi", ssid @ ..] if !ssid.is_empty() => Command::Activity(crate::activity::Event::Wifi { ssid: ssid.join(" ") }),
+            ["timer", action] => Command::Timer(action.to_string()),
+            ["timer"] => Command::Timer("menu".into()),
+            ["timer", "start", duration] => Command::Timer(duration.to_string()),
+            ["wifi"] => Command::Activity(crate::activity::Event::WifiOpen),
+            ["bluetooth"] => Command::Activity(crate::activity::Event::BluetoothOpen),
             ["quit"] => Command::Quit,
             _ => return None,
         })
     }
 }
 
-pub const USAGE: &str = "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|launcher|status|set <key> <value>|quit]";
+pub const USAGE: &str = concat!(
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|launcher|wifi|bluetooth|",
+    "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
+    "status|set <key> <value>|quit]",
+);
 
 pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -154,5 +197,35 @@ impl AsFd for Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(socket_path());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_live_activity_commands() {
+        assert_eq!(
+            Command::parse("volume 0.42 muted"),
+            Some(Command::Activity(crate::activity::Event::Slider {
+                kind: crate::activity::SliderKind::Volume,
+                value: 0.42,
+                muted: true,
+            }))
+        );
+        assert_eq!(
+            Command::parse("wifi A network with spaces"),
+            Some(Command::Activity(crate::activity::Event::Wifi {
+                ssid: "A network with spaces".into(),
+            }))
+        );
+        assert_eq!(
+            Command::parse("screenshot /tmp/A shot.png"),
+            Some(Command::Activity(crate::activity::Event::Screenshot {
+                path: PathBuf::from("/tmp/A shot.png"),
+            }))
+        );
+        assert_eq!(Command::parse("timer start 25m"), Some(Command::Timer("25m".into())));
     }
 }

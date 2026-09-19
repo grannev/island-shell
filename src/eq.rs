@@ -14,7 +14,7 @@ const MAX_RANGE: u32 = 100;
 const FRAMERATE: u32 = 30;
 
 pub struct Cava {
-    child: Child,
+    child: Option<Child>,
 }
 
 impl Cava {
@@ -71,13 +71,15 @@ impl Cava {
                 }
             })
             .expect("spawn cava reader");
-        Ok(Cava { child })
+        Ok(Cava { child: Some(child) })
     }
 }
 
 impl Drop for Cava {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            std::thread::spawn(move || { let _ = child.wait(); });
+        }
     }
 }

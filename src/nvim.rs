@@ -96,6 +96,22 @@ impl Diagnostics {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cmdline {
+    pub text: String,
+    pub pos: usize,
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagnosticItem {
+    pub buffer: i64,
+    pub line: u32,
+    pub col: u32,
+    pub severity: u32,
+    pub message: String,
+}
+
 /// One entry of the editor's buffer list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Buffer {
@@ -134,6 +150,8 @@ pub struct Editor {
     pub search: Option<(u32, u32)>,
     pub buffers: Vec<Buffer>,
     pub cwd: String,
+    pub diagnostic_items: Vec<DiagnosticItem>,
+    pub cmdline: Option<Cmdline>,
 }
 
 impl Editor {
@@ -155,6 +173,8 @@ pub enum Message {
     /// the editor went away (its own socket path, so one instance leaving
     /// does not silence another)
     Gone(String),
+    Cmdline { server: String, command: Option<Cmdline> },
+    Result { server: String, kind: ToastKind, title: String, body: String, id: String, append: bool },
     /// something to show in a pill: kind, title, body, progress 0..1
     Toast { kind: ToastKind, title: String, body: String, progress: Option<f64> },
 }
@@ -241,6 +261,22 @@ pub fn parse(json: &str, token: &str) -> Option<Message> {
         return None;
     }
     match value["event"].as_str()? {
+        "result" => Some(Message::Result {
+            id: value["id"].as_str().unwrap_or_default().to_string(),
+            append: value["append"].as_bool().unwrap_or(false),
+            server: value["server"].as_str().unwrap_or_default().to_string(),
+            kind: ToastKind::parse(value["kind"].as_str().unwrap_or("info")),
+            title: value["title"].as_str().unwrap_or("Command").chars().take(80).collect(),
+            body: value["body"].as_str().unwrap_or_default().to_string(),
+        }),
+        "cmdline" => Some(Message::Cmdline {
+            server: value["server"].as_str().unwrap_or_default().to_string(),
+            command: value["command"].as_object().map(|_| Cmdline {
+                text: value["command"]["text"].as_str().unwrap_or_default().chars().take(16384).collect(),
+                pos: value["command"]["pos"].as_u64().unwrap_or(0) as usize,
+                prefix: value["command"]["prefix"].as_str().unwrap_or(":").chars().take(80).collect(),
+            }),
+        }),
         "state" => Some(Message::State(Box::new(editor_from(&value)))),
         "gone" => Some(Message::Gone(value["server"].as_str().unwrap_or_default().to_string())),
         "toast" => Some(Message::Toast {
@@ -302,6 +338,14 @@ fn editor_from(v: &Value) -> Editor {
         search,
         buffers,
         cwd: str_of("cwd"),
+        cmdline: None,
+        diagnostic_items: v["diagnostic_items"].as_array().map(|items| items.iter().take(3).map(|d| DiagnosticItem {
+            buffer: d["buffer"].as_i64().unwrap_or(0),
+            line: d["line"].as_u64().unwrap_or(1).clamp(1, u32::MAX as u64) as u32,
+            col: d["col"].as_u64().unwrap_or(1).clamp(1, u32::MAX as u64) as u32,
+            severity: d["severity"].as_u64().unwrap_or(4) as u32,
+            message: d["message"].as_str().unwrap_or_default().chars().take(500).collect(),
+        }).collect()).unwrap_or_default(),
     }
 }
 
@@ -328,4 +372,36 @@ pub fn call(server: &str, expr: &str) {
 /// Time helper: has this editor gone quiet?
 pub fn stale(last_seen: Time, now: Time) -> bool {
     now - last_seen > STALE_AFTER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn command_protocol_accepts_unicode_and_checks_token() {
+        let message = serde_json::json!({"protocol": PROTOCOL, "token": "test", "event": "cmdline", "server": "one",
+            "command": {"prefix": "/", "text": "найти", "pos": 10}}).to_string();
+        assert!(parse(&message, "wrong").is_none());
+        let Some(Message::Cmdline { server, command: Some(command) }) = parse(&message, "test") else { panic!() };
+        assert_eq!(server, "one");
+        assert_eq!(command.text, "найти");
+        assert_eq!(command.pos, 10);
+    }
+    #[test]
+    fn result_protocol_preserves_full_unicode_output() {
+        let message = serde_json::json!({"protocol": PROTOCOL, "token": "test", "event": "result",
+            "server": "one", "kind": "error", "title": "Command failed", "body": "я".repeat(300)}).to_string();
+        assert!(parse(&message, "wrong").is_none());
+        let Some(Message::Result { server, kind, title, body, .. }) = parse(&message, "test") else { panic!() };
+        assert_eq!(server, "one");
+        assert!(matches!(kind, ToastKind::Error));
+        assert_eq!(title, "Command failed");
+        assert_eq!(body.chars().count(), 300);
+    }
+    #[test]
+    fn older_companions_do_not_require_new_fields() {
+        let editor = editor_from(&serde_json::json!({"server": "old", "file": "main.c"}));
+        assert!(editor.cmdline.is_none());
+        assert!(editor.diagnostic_items.is_empty());
+    }
 }

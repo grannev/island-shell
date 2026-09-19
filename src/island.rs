@@ -9,12 +9,14 @@ use std::f64::consts::FRAC_PI_2;
 use cairo::Context;
 
 use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
+use crate::activity;
 use crate::icons;
 use crate::art::Art;
 use crate::editor;
 use crate::launcher::{self, Launcher};
 use crate::nvim::{self, Editor};
 use crate::player;
+use crate::quick;
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -233,6 +235,35 @@ pub struct Notice {
     pub since: Time,
 }
 
+#[derive(Clone, Debug)]
+struct LiveActivity {
+    event: activity::Event,
+    since: Time,
+    updated_at: Time,
+}
+
+#[derive(Clone, Debug)]
+struct Countdown {
+    duration: f64,
+    remaining: f64,
+    changed_at: Time,
+    running: bool,
+}
+
+impl Countdown {
+    fn new(duration: f64, now: Time) -> Self {
+        Countdown { duration, remaining: duration, changed_at: now, running: true }
+    }
+
+    fn remaining(&self, now: Time) -> f64 {
+        if self.running { (self.remaining - (now - self.changed_at)).max(0.0) } else { self.remaining }
+    }
+
+    fn fraction(&self, now: Time) -> f64 {
+        if self.duration <= 0.0 { 0.0 } else { self.remaining(now) / self.duration }
+    }
+}
+
 /// Touch ID: what the pill shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Auth {
@@ -295,9 +326,44 @@ pub struct Island {
     /// long message wraps to two lines and the pill grows to fit)
     pill_w: Quintic,
     pill_h: Quintic,
+    /// Short hardware and system activities share the pill but outrank
+    /// ordinary notifications.  Repeated slider changes update in place.
+    activity: Option<LiveActivity>,
+    activity_retiring: Option<LiveActivity>,
+    activity_queued: Option<activity::Event>,
+    activity_value: Spring,
+    activity_art: Art,
+    /// A countdown remains compact beside the clock until it completes.
+    timer: Option<Countdown>,
+    timer_chip: Quintic,
+    timer_w: f64,
+    timer_rect: Option<Rect>,
+    timer_hovered: bool,
+    timer_menu_rect: Option<Rect>,
+    timer_menu_hover: Option<&'static str>,
+    network_menu_rect: Option<Rect>,
+    network_panel: Option<crate::connections::Panel>,
+    network_session: u64,
+    timer_button_hover: [Spring; 7],
+    timer_button_enabled: [Spring; 7],
+    timer_last: Option<Countdown>,
+    quick_open: bool,
+    quick_rect: Option<Rect>,
+    quick_hover: Option<quick::Action>,
+    quick_selected: usize,
+    quick_hover_springs: [Spring; 4],
+    quick_close_hover: Spring,
+    eq_rect: Option<Rect>,
+    player_rect: Option<Rect>,
+    eq_hovered: bool,
+    editor_chip_rect: Option<Rect>,
+    editor_chip_hovered: bool,
     /// the launcher: the panel's growth and its content
     panel: Quintic,
     pub launcher: Option<Launcher>,
+    catalog: crate::apps::Catalog,
+    launcher_icons: std::rc::Rc<crate::iconload::Icons>,
+    file_search: std::rc::Rc<crate::files::Search>,
     /// Neovim (the companion plugin): the editor's state, the chip that
     /// shows it beside the clock, and the panel it opens into
     nvim: Option<Editor>,
@@ -306,6 +372,14 @@ pub struct Island {
     chip_w: f64,
     editor_panel: Quintic,
     editor_opened: Time,
+    editor_diagnostics: bool,
+    // Keep the command sheet while it folds; clearing input must not reveal the buffer panel.
+    editor_command: Option<nvim::Cmdline>,
+    editor_output: Option<crate::editor_output::Output>,
+    output_open: bool,
+    output_view: bool,
+    output_until: Time,
+    command_seen: Time,
     editor_hover: Option<editor::Action>,
     editor_pressed: Option<(editor::Action, Time)>,
     /// the icon: fingerprint → ring, and the mark drawing itself on it
@@ -400,13 +474,52 @@ impl Island {
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
+            activity: None,
+            activity_retiring: None,
+            activity_queued: None,
+            activity_value: Spring::new(0.0, 0.28, 0.82),
+            activity_art: Art::new(),
+            timer: None,
+            timer_chip: Quintic::at_rest(0.0, CHIP_DUR),
+            timer_w: 0.0,
+            timer_rect: None,
+            timer_hovered: false,
+            timer_menu_rect: None,
+            timer_menu_hover: None,
+            network_menu_rect: None,
+            network_panel: None,
+            network_session: 0,
+            timer_button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.25, 1.0)),
+            timer_button_enabled: std::array::from_fn(|i| Spring::new(if i == 4 || i == 5 { 0.0 } else { 1.0 }, 0.25, 1.0)),
+            timer_last: None,
+            quick_open: false,
+            quick_rect: None,
+            quick_hover: None,
+            quick_selected: 0,
+            quick_hover_springs: std::array::from_fn(|_| Spring::new(0.0, 0.24, 0.83)),
+            quick_close_hover: Spring::new(0.0, 0.24, 0.83),
+            eq_rect: None,
+            player_rect: None,
+            eq_hovered: false,
+            editor_chip_rect: None,
+            editor_chip_hovered: false,
             panel: Quintic::at_rest(0.0, PANEL_DUR),
             launcher: None,
+            catalog: crate::apps::Catalog::new(),
+            launcher_icons: std::rc::Rc::new(crate::iconload::Icons::new()),
+            file_search: std::rc::Rc::new(crate::files::Search::new()),
             nvim: None,
             nvim_seen: 0.0,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
             editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
+            editor_diagnostics: false,
+            editor_command: None,
+            editor_output: None,
+            output_open: false,
+            output_view: false,
+            output_until: 0.0,
+            command_seen: 0.0,
             editor_opened: 0.0,
             editor_hover: None,
             editor_pressed: None,
@@ -440,6 +553,12 @@ impl Island {
             || self.roll.is_moving(now)
             || self.pill_w.is_moving(now)
             || self.pill_h.is_moving(now)
+            || self.activity_value.is_moving(now) && self.activity.is_some()
+            || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
+            || self.quick_hover_springs.iter().any(|s| s.is_moving(now))
+            || self.quick_close_hover.is_moving(now)
+            || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
+            || self.timer_chip.is_moving(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
             || self.editor_panel.is_moving(now)
@@ -448,6 +567,7 @@ impl Island {
             || self.nvim.as_ref().is_some_and(|e| !e.recording.is_empty()) && self.chip.state(now).x > 0.0
             // the pill's content animates the whole time it is up
             || self.pill_open() && self.pill.state(now).x > 0.0
+                && !self.activity.as_ref().is_some_and(|a| activity::takes_keyboard(&a.event) && now - a.since >= 0.5)
     }
 
     fn eq_moving(&self) -> bool {
@@ -465,22 +585,30 @@ impl Island {
     /// The pointer on the island opens the editor's panel when Neovim is
     /// the window in front; music keeps the pointer otherwise.
     fn want_editor_panel(&self, now: Time) -> bool {
-        self.hovered
+        (self.editor_chip_hovered || (self.hovered && self.editor_panel.target() > 0.5)
+            || self.output_open || self.nvim.as_ref().is_some_and(|e| e.cmdline.is_some()))
+            && !self.timer_hovered
             && self.editor_live(now)
             && self.auth.is_none()
+            && self.activity.is_none()
             && self.notice.is_none()
             && self.launcher.is_none()
+            && !self.quick_open
             && !self.hidden.any()
             && !self.dodged
     }
 
     fn want_player(&self) -> bool {
-        (self.hovered || self.scrub.is_some())
+        (self.eq_hovered || (self.hovered && self.player.target() > 0.5) || self.scrub.is_some())
+            && !self.timer_hovered
             && self.song.is_some()
-            && self.nvim.as_ref().is_none_or(|e| !e.focused)
+            && self.nvim.as_ref().is_none_or(|e| e.cmdline.is_none())
+            && self.editor_panel.target() < 0.5
             && self.auth.is_none()
+            && self.activity.is_none()
             && self.notice.is_none()
             && self.launcher.is_none()
+            && !self.quick_open
             && !self.hidden.any()
             && !self.dodged
     }
@@ -488,7 +616,7 @@ impl Island {
     /// Is anything using the pill (Touch ID owns it; a notification takes
     /// it when Touch ID does not)?
     fn pill_open(&self) -> bool {
-        self.auth.is_some() || self.notice.is_some() || self.toast.is_some()
+        self.auth.is_some() || self.activity.is_some() || self.notice.is_some() || self.toast.is_some() || self.quick_open
     }
 
     fn silent_expired(&self, now: Time) -> bool {
@@ -503,12 +631,18 @@ impl Island {
             self.notice = None;
             self.notice_prev = None;
             self.notice_queued = None;
+            self.activity = None;
+            self.activity_retiring = None;
+            self.activity_queued = None;
         }
         self.hide.set(if self.hidden.any() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
-        // no hover feedback while hidden: the box is not there to point
-        // at, and with a player the island opens instead of just widening
-        let hover = self.config.hover && self.hovered && !self.hidden.any() && !self.pill_open() && self.song.is_none() && self.launcher.is_none();
+        // The compact island always breathes on ordinary hover, including
+        // while music and an editor chip are present. Their own hit targets
+        // still unfold their panels instead of adding extra padding.
+        let hover = self.config.hover && self.hovered && !self.hidden.any()
+            && !self.pill_open() && self.launcher.is_none()
+            && !self.want_player() && !self.want_editor_panel(now);
         self.hover_pad.set(if hover { 1.0 } else { 0.0 }, now);
         // the progress line and the controls follow the pointer on springs
         let over_track = matches!(self.hovered_control, Some(player::Control::Seek(_)));
@@ -532,7 +666,28 @@ impl Island {
         // the editor's chip rides beside the clock while Neovim is in front
         let chip = self.editor_live(now) && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
+        let timer = self.timer.is_some() && !self.dodged && self.launcher.is_none();
+        for (i, (command, ..)) in activity::TIMER_BUTTONS.iter().enumerate() {
+            let enabled = !matches!(*command, "toggle" | "cancel") || self.timer.is_some();
+            self.timer_button_hover[i].set(if enabled && self.timer_menu_hover == Some(command) { 1.0 } else { 0.0 }, now);
+            self.timer_button_enabled[i].set(if enabled { 1.0 } else { 0.0 }, now);
+        }
+        for (i, spring) in self.quick_hover_springs.iter_mut().enumerate() {
+            spring.set(if self.quick_hover == Some(quick::ACTIONS[i]) { 1.0 } else { 0.0 }, now);
+        }
+        self.quick_close_hover.set(if self.quick_hover == Some(quick::Action::Close) { 1.0 } else { 0.0 }, now);
+        if !self.connections_open() {
+            if let Some(panel) = &mut self.network_panel { panel.close(); }
+            if !self.activity_retiring.as_ref().is_some_and(|a| matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen)) {
+                self.network_panel = None;
+            }
+        }
+        self.timer_chip.set(if timer { 1.0 } else { 0.0 }, now);
         let editor_panel = self.want_editor_panel(now);
+        if editor_panel {
+            self.editor_command = self.nvim.as_ref().and_then(|e| e.cmdline.clone());
+            self.output_view = self.output_open;
+        }
         if editor_panel && self.editor_panel.target() < 0.5 {
             self.editor_opened = now;
         }
@@ -564,6 +719,19 @@ impl Island {
     /// whether anything changed (then redraw).
     pub fn advance(&mut self, now: Time) -> bool {
         let mut changed = false;
+        if self.output_open && now >= self.output_until && !self.hovered
+            && self.nvim.as_ref().is_none_or(|e| e.cmdline.is_none()) {
+            self.output_open = false;
+            changed = true;
+        }
+        if self.nvim.as_ref().is_some_and(|e| e.cmdline.is_some()) && now - self.command_seen > 0.8 {
+            self.nvim.as_mut().unwrap().cmdline = None;
+            changed = true;
+        }
+        if let Some(launcher) = &mut self.launcher { changed |= launcher.advance(now); }
+        if self.connections_open() {
+            if let Some(panel) = &mut self.network_panel { changed |= panel.advance(now); }
+        }
         if self.toast.is_some_and(|since| now - since >= TOAST_HOLD) {
             self.toast = None;
             changed = true;
@@ -581,9 +749,31 @@ impl Island {
             Some(Auth::Ok(since) | Auth::Fail(since)) if now - since >= MARK_DELAY => self.mark.set(1.0, now),
             _ => {}
         }
+        if self.activity.as_ref().is_some_and(|a| now - a.updated_at >= a.event.hold()) {
+            self.activity_retiring = self.activity.take();
+            changed = true;
+        }
+        if self.activity_retiring.is_some() && self.pill.state(now).x <= 0.0 {
+            self.activity_retiring = None;
+            self.activity_art.clear();
+            if !self.connections_open() { self.network_panel = None; }
+        }
+        if self.timer.as_ref().is_some_and(|timer| timer.running && timer.remaining(now) <= 0.0) {
+            self.timer = None;
+            self.live_activity(activity::Event::TimerDone, now);
+            changed = true;
+        }
+        // An activity that waited for Touch ID or the launcher gets the
+        // pill before an ordinary notification.
+        if self.auth.is_none() && self.launcher.is_none() && self.activity.is_none() {
+            if let Some(event) = self.activity_queued.take() {
+                self.show_activity(event, now);
+                changed = true;
+            }
+        }
         // a notification that waited for Touch ID or the launcher takes
         // the pill now
-        if self.auth.is_none() && self.launcher.is_none() {
+        if self.auth.is_none() && self.activity.is_none() && self.launcher.is_none() {
             if let Some(note) = self.notice_queued.take() {
                 self.show_notice(note, now);
                 changed = true;
@@ -610,6 +800,13 @@ impl Island {
     pub fn deadline(&self, now: Time) -> Option<Time> {
         let mut next: Option<Time> = None;
         let mut consider = |t: Time| next = Some(next.map_or(t, |n: Time| n.min(t)));
+        if self.connections_open() {
+            if let Some(deadline) = self.network_panel.as_ref().and_then(|p| p.deadline()) { consider(deadline); }
+        }
+        if self.output_open && !self.hovered && self.nvim.as_ref().is_none_or(|e| e.cmdline.is_none()) {
+            consider(self.output_until.max(now + 0.01));
+        }
+        if self.nvim.as_ref().is_some_and(|e| e.cmdline.is_some()) { consider(self.command_seen + 0.81); }
         match self.auth {
             Some(Auth::Ok(since)) => consider(since + AUTH_OK_HOLD),
             Some(Auth::Fail(since)) => consider(since + AUTH_FAIL_HOLD),
@@ -617,6 +814,24 @@ impl Island {
         }
         if let Some(n) = &self.notice {
             consider(n.since + NOTICE_HOLD);
+        }
+        if let Some(a) = &self.activity {
+            if a.event.hold().is_finite() {
+                consider(a.updated_at + a.event.hold());
+            }
+        }
+        if let Some(timer) = &self.timer {
+            if timer.running {
+                let remaining = timer.remaining(now);
+                if remaining <= 0.06 {
+                    consider(now + remaining.max(0.005));
+                } else if !self.hidden.any() {
+                    // A minutes-long ring barely moves in a second; only the
+                    // final minute benefits from a 30 Hz sweep. Do not keep
+                    // both a frame callback and a timer driving the same chip.
+                    consider(now + if remaining <= 60.0 { 1.0 / 30.0 } else { remaining.fract().max(0.02) });
+                }
+            }
         }
         if let Some(l) = &self.launcher {
             consider(l.next_caret(now));
@@ -651,7 +866,12 @@ impl Island {
             self.auth.map(|a| format!("{a:?}")).or_else(|| self.notice.as_ref().map(|n| format!("notice {:?}", n.note.app))),
             self.silent_since.map_or(0.0, |s| now - s),
             self.scrub.map(|(f, _)| (f * 100.0).round())
-        ) + &match &self.nvim {
+        ) + &self.activity.as_ref().map_or_else(String::new, |a| format!(" activity={:?}", a.event))
+            + &self.launcher.as_ref().map_or_else(String::new, |l| format!(" launcher_rows={} files={}", l.result_count(), l.file_count()))
+            + &if self.quick_open { " quick=1" } else { "" }
+            + &if self.connections_open() { self.network_panel.as_ref().map_or_else(String::new, |p| p.describe()) } else { String::new() }
+            + &self.timer.as_ref().map_or_else(String::new, |t| format!(" timer={:.0}s{}", t.remaining(now), if t.running { "" } else { "(paused)" }))
+            + &match &self.nvim {
             Some(e) => format!(
                 " nvim={{{} {} {}:{} chip={:.2} panel={:.2}}}",
                 e.mode().label(),
@@ -698,7 +918,7 @@ impl Island {
     /// Show the "now playing" toast, unless the island has something more
     /// important on (or the player is already open under the pointer).
     fn announce(&mut self, now: Time) {
-        if self.hidden.any() || self.auth.is_some() || self.notice.is_some() || self.launcher.is_some() || self.want_player() {
+        if self.hidden.any() || self.auth.is_some() || self.activity.is_some() || self.notice.is_some() || self.launcher.is_some() || self.want_player() {
             return;
         }
         if self.song.as_ref().is_some_and(|s| s.playing()) {
@@ -752,6 +972,8 @@ impl Island {
     /// mod+d: the island unfolds into the launcher, or folds back. A
     /// hidden island shows itself first and a notification gives way.
     pub fn toggle_launcher(&mut self, now: Time) -> bool {
+        self.quick_open = false;
+        self.quick_hover = None;
         if self.launcher.is_some() {
             self.launcher = None;
         } else {
@@ -759,7 +981,11 @@ impl Island {
             // takes the island's place back above the edge when it folds
             self.notice = None;
             self.notice_prev = None;
-            self.launcher = Some(Launcher::new(now));
+            self.activity = None;
+            self.activity_queued = None;
+            self.toast = None;
+            self.catalog.refresh();
+            self.launcher = Some(Launcher::new(now, self.catalog.apps.clone(), self.launcher_icons.clone(), self.file_search.clone()));
         }
         self.sync(now);
         self.launcher.is_some()
@@ -770,6 +996,7 @@ impl Island {
     pub fn set_dodged(&mut self, dodged: bool, now: Time) {
         self.dodged = dodged;
         self.launcher = None;
+        self.quick_open = false;
         self.sync(now);
     }
 
@@ -780,8 +1007,52 @@ impl Island {
         }
     }
 
+    pub fn set_asset_waker(&self, tx: smithay_client_toolkit::reexports::calloop::channel::Sender<()>) {
+        self.catalog.set_waker(tx.clone());
+        self.launcher_icons.set_waker(tx.clone());
+        self.file_search.set_waker(tx.clone());
+        self.art.set_waker(tx.clone());
+        self.activity_art.set_waker(tx);
+    }
+
+    pub fn drain_assets(&mut self, now: Time, scale: f64) -> bool {
+        let catalog = self.catalog.drain();
+        if catalog {
+            // Warm visible icons before the user opens the launcher.
+            for app in self.catalog.apps.iter().take(crate::launcher::VISIBLE_ROWS + 2) {
+                if let Some(name) = &app.icon {
+                    self.launcher_icons.get_scaled(name, (38.0 * scale).round() as i32);
+                }
+            }
+            if let Some(launcher) = &mut self.launcher {
+                launcher.set_apps(self.catalog.apps.clone(), now);
+            }
+        }
+        let icons = self.launcher_icons.drain();
+        let art = self.art.drain();
+        let activity = self.activity_art.drain();
+        let mut files = false;
+        for (generation, reply) in self.file_search.drain() {
+            if let Some(launcher) = &mut self.launcher {
+                files |= launcher.receive_files(generation, reply, now);
+            }
+        }
+        ((catalog || icons) && self.launcher.is_some()) || art || activity || files
+    }
+
     /// The companion Neovim plugin sent its state.
-    pub fn set_editor(&mut self, editor: Editor, now: Time) -> bool {
+    pub fn set_editor(&mut self, mut editor: Editor, now: Time) -> bool {
+        if let Some(previous) = &self.nvim {
+            if previous.server != editor.server && !editor.focused && self.editor_live(now) {
+                return false;
+            }
+            if previous.server == editor.server {
+                editor.cmdline = previous.cmdline.clone();
+            }
+            if previous.server != editor.server || previous.file != editor.file {
+                self.editor_diagnostics = false;
+            }
+        }
         let before = self.nvim.as_ref().map(|e| e.chip_state());
         let visible_before = self.chip.target() > 0.5;
         self.nvim_seen = now;
@@ -795,6 +1066,58 @@ impl Island {
         before.as_ref() != Some(&after) || visible_before != (self.chip.target() > 0.5) || self.editor_panel.state(now).x > 0.0
     }
 
+    /// Acknowledgement means the command can actually be presented now.
+    pub fn set_cmdline(&mut self, server: &str, command: Option<nvim::Cmdline>, now: Time) -> bool {
+        if !self.nvim.as_ref().is_some_and(|e| e.server == server) { return false; }
+        let available = self.editor_live(now) && !self.hidden.any() && !self.dodged
+            && self.auth.is_none() && self.activity.is_none() && self.notice.is_none()
+            && self.launcher.is_none() && self.toast.is_none() && !self.timer_hovered;
+        if command.as_ref().is_some_and(|c| matches!(c.prefix.as_str(), ":" | "/" | "?"))
+            && self.nvim.as_ref().is_some_and(|e| e.cmdline.is_none()) {
+            self.output_open = false;
+        }
+        if command.is_none() && self.output_open {
+            self.output_until = now + self.editor_output.as_ref().map_or(4.0, |o| o.hold());
+        }
+        self.nvim.as_mut().unwrap().cmdline = if available { command } else { None };
+        self.command_seen = now;
+        self.sync(now);
+        available
+    }
+
+    pub fn accepts_result(&self, server: &str, now: Time) -> bool {
+        self.nvim.as_ref().is_some_and(|e| e.server == server) && self.editor_live(now)
+            && !self.hidden.any() && !self.dodged && self.auth.is_none()
+            && self.activity.is_none() && self.launcher.is_none()
+    }
+
+    fn editor_height(&self) -> f64 {
+        if self.output_view {
+            crate::editor_output::HEIGHT + if self.editor_command.is_some() { 84.0 } else { 0.0 }
+        } else if self.editor_command.is_some() { 84.0 } else { editor::PANEL_H }
+    }
+
+    pub fn set_result(&mut self, id: String, title: String, body: String, error: bool,
+        append: bool, renderer: &Renderer, now: Time) {
+        if append && self.editor_output.as_ref().is_some_and(|o| o.id == id) {
+            let output = self.editor_output.as_mut().unwrap();
+            output.append(&body, renderer);
+            output.error |= error;
+        } else {
+            self.editor_output = Some(crate::editor_output::Output::new(id, title, body, error, renderer));
+        }
+        self.output_open = true;
+        self.output_until = now + self.editor_output.as_ref().unwrap().hold();
+        self.sync(now);
+    }
+
+    pub fn scroll_output(&mut self, rows: f64, now: Time) -> bool {
+        if !self.output_open || !self.editor_panel_open(now) { return false; }
+        if let Some(output) = &mut self.editor_output { output.scroll(rows); }
+        self.output_until = now + 12.0;
+        true
+    }
+
     /// An editor went away. Only the instance that left is forgotten: two
     /// Neovims may be up, and the one quitting is rarely the one in front.
     pub fn editor_gone(&mut self, server: &str, now: Time) {
@@ -802,6 +1125,8 @@ impl Island {
             return;
         }
         self.nvim = None;
+        self.output_open = false;
+        self.editor_output = None;
         self.editor_hover = None;
         self.editor_pressed = None;
         self.sync(now);
@@ -820,7 +1145,7 @@ impl Island {
         }
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
-        if self.auth.is_some() || self.launcher.is_some() {
+        if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() {
             self.notice_queued = Some(note);
             return;
         }
@@ -852,6 +1177,14 @@ impl Island {
 
     /// Dismiss what the pill shows (a click on it).
     pub fn dismiss_notice(&mut self, now: Time) -> bool {
+        if self.auth.is_some() {
+            return false;
+        }
+        if self.activity.is_some() {
+            self.activity_retiring = self.activity.take();
+            self.sync(now);
+            return true;
+        }
         if self.notice.is_some() {
             self.notice = None;
             self.notice_prev = None;
@@ -862,6 +1195,261 @@ impl Island {
         false
     }
 
+    /// Present a live activity. Hardware feedback is immediate, so it
+    /// takes the pill from a notification; Touch ID and the launcher still
+    /// keep ownership until they close.
+    pub fn live_activity(&mut self, event: activity::Event, now: Time) {
+        if self.hidden.any() {
+            return;
+        }
+        if self.auth.is_some() || self.launcher.is_some() {
+            self.activity_queued = Some(event);
+            return;
+        }
+        self.show_activity(event, now);
+    }
+
+    fn show_activity(&mut self, event: activity::Event, now: Time) {
+        // Connection attempts and password entry keep ownership of the sheet.
+        if self.keyboard_panel_open() && !activity::takes_keyboard(&event) {
+            self.activity_queued = Some(event);
+            return;
+        }
+        self.activity_retiring = None;
+        self.toast = None;
+        self.scrub = None;
+        if self.notice.is_some() {
+            self.notice_queued = self.notice.take().map(|n| n.note);
+            self.notice_prev = None;
+        }
+        if let activity::Event::Slider { value, .. } = &event {
+            self.activity_value.set(*value, now);
+        }
+        // Key repeat must extend the hold without resetting opacity. Keep
+        // the entrance even when alternating volume and brightness keys.
+        if let Some(current) = &mut self.activity {
+            if matches!(current.event, activity::Event::Slider { .. }) && matches!(event, activity::Event::Slider { .. }) {
+                current.event = event;
+                current.updated_at = now;
+                self.sync(now);
+                return;
+            }
+        }
+        if matches!(event, activity::Event::Screenshot { .. }) {
+            self.activity_art.clear();
+        }
+        self.activity = Some(LiveActivity { event, since: now, updated_at: now });
+        self.sync(now);
+    }
+
+    fn visible_activity(&self) -> Option<&LiveActivity> {
+        self.activity.as_ref().or_else(|| {
+            if self.auth.is_none() && self.notice.is_none() && self.toast.is_none() && self.launcher.is_none() {
+                self.activity_retiring.as_ref()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn keyboard_panel_open(&self) -> bool {
+        self.quick_open || self.activity.as_ref().is_some_and(|current| activity::takes_keyboard(&current.event))
+    }
+
+    pub fn close_activity_panel(&mut self, now: Time) -> bool {
+        if self.quick_open {
+            self.close_quick_menu(now);
+            return true;
+        }
+        if !self.keyboard_panel_open() {
+            return false;
+        }
+        self.activity_retiring = self.activity.take();
+        self.sync(now);
+        true
+    }
+
+    /// Start or control the compact countdown.
+    pub fn timer_command(&mut self, command: &str, now: Time) -> Result<String, String> {
+        match command {
+            "menu" => {
+                if self.auth.is_some() || self.launcher.is_some() {
+                    return Err("close the current panel first".into());
+                }
+                self.hidden.user = false;
+                self.live_activity(activity::Event::TimerMenu, now);
+            }
+            "pause" => {
+                let timer = self.timer.as_mut().ok_or("no active timer")?;
+                if timer.running {
+                    timer.remaining = timer.remaining(now);
+                    timer.changed_at = now;
+                    timer.running = false;
+                }
+            }
+            "resume" => {
+                let timer = self.timer.as_mut().ok_or("no active timer")?;
+                if !timer.running && timer.remaining > 0.0 {
+                    timer.changed_at = now;
+                    timer.running = true;
+                }
+            }
+            "toggle" => {
+                if !self.toggle_timer(now) {
+                    return Err("no active timer".into());
+                }
+            }
+            "cancel" | "stop" => self.timer = None,
+            "status" => {
+                return Ok(self.timer.as_ref().map_or_else(
+                    || "stopped".to_string(),
+                    |timer| format!("{:.0} {}", timer.remaining(now).ceil(), if timer.running { "running" } else { "paused" }),
+                ));
+            }
+            "pomodoro" => self.timer = Some(Countdown::new(25.0 * 60.0, now)),
+            duration => {
+                let seconds = activity::parse_duration(duration).ok_or_else(|| format!("bad duration {duration:?}"))?;
+                self.timer = Some(Countdown::new(seconds, now));
+            }
+        }
+        self.sync(now);
+        Ok("ok".into())
+    }
+
+    /// A left click on the compact timer pauses or resumes it.
+    pub fn toggle_timer(&mut self, now: Time) -> bool {
+        let Some(timer) = self.timer.as_mut() else { return false };
+        if timer.running {
+            timer.remaining = timer.remaining(now);
+            timer.running = false;
+        } else if timer.remaining > 0.0 {
+            timer.running = true;
+        }
+        timer.changed_at = now;
+        self.sync(now);
+        true
+    }
+
+    pub fn click_timer_at(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if self.pill_open() || self.launcher.is_some() || self.hidden.any() {
+            return false;
+        }
+        let Some(rect) = self.timer_rect else { return false };
+        if px < rect.x || px > rect.x + rect.w || py < rect.y || py > rect.y + rect.h {
+            return false;
+        }
+        if !self.toggle_timer(now) {
+            self.live_activity(activity::Event::TimerMenu, now);
+        }
+        true
+    }
+
+    /// Right click opens controls; left click on the running chip pauses.
+    pub fn timer_menu_at(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if self.pill_open() || self.launcher.is_some() || self.hidden.any() {
+            return false;
+        }
+        if !self.timer_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+            return false;
+        }
+        self.live_activity(activity::Event::TimerMenu, now);
+        true
+    }
+
+    pub fn click_timer_menu(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if self.auth.is_some() || !self.activity.as_ref().is_some_and(|a| a.event == activity::Event::TimerMenu) {
+            return false;
+        }
+        if let Some(r) = self.timer_menu_rect {
+            if let Some(command) = activity::timer_menu_hit(px - r.x, py - r.y) {
+                if command == "close" {
+                    self.activity_retiring = self.activity.take();
+                } else if self.timer_command(command, now).is_ok() && !matches!(command, "toggle" | "cancel") {
+                    self.activity_retiring = self.activity.take();
+                }
+                self.sync(now);
+            }
+        }
+        true
+    }
+
+    pub fn set_timer_hover(&mut self, px: f64, py: f64) -> bool {
+        let menu_hover = self.timer_menu_rect.and_then(|r| activity::timer_menu_hit(px - r.x, py - r.y));
+        let changed = self.timer_menu_hover != menu_hover;
+        self.timer_menu_hover = menu_hover;
+        let hovered = self.timer_rect.is_some_and(|rect| {
+            px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h
+        });
+        if hovered == self.timer_hovered {
+            return changed;
+        }
+        self.timer_hovered = hovered;
+        true
+    }
+
+    pub fn clear_timer_hover(&mut self) -> bool {
+        let changed = self.timer_hovered || self.timer_menu_hover.is_some();
+        self.timer_menu_hover = None;
+        self.timer_hovered = false;
+        changed
+    }
+
+    fn connections_open(&self) -> bool {
+        self.auth.is_none() && self.activity.as_ref().is_some_and(|a| matches!(a.event,
+            activity::Event::WifiOpen | activity::Event::BluetoothOpen))
+    }
+
+    pub fn open_connections(&mut self, kind: crate::network::Kind,
+        tx: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::network::Message>, now: Time) {
+        if self.auth.is_some() || self.hidden.fullscreen { return; }
+        if self.connections_open() && self.network_panel.as_ref().is_some_and(|p| p.kind == kind) {
+            self.close_activity_panel(now);
+            return;
+        }
+        self.hidden.user = false;
+        self.quick_open = false;
+        self.launcher = None;
+        self.network_session += 1;
+        self.network_panel = Some(crate::connections::Panel::new(kind, self.network_session, tx, now));
+        self.live_activity(if kind == crate::network::Kind::Wifi { activity::Event::WifiOpen } else { activity::Event::BluetoothOpen }, now);
+    }
+
+    pub fn network_message(&mut self, message: crate::network::Message, now: Time) -> bool {
+        if !self.connections_open() { return false; }
+        self.network_panel.as_mut().is_some_and(|p| p.receive(message, now))
+    }
+
+    pub fn set_network_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.connections_open() { return false; }
+        let Some(rect) = self.network_menu_rect else { return false };
+        self.network_panel.as_mut().is_some_and(|p| p.pointer(px - rect.x, py - rect.y, now))
+    }
+
+    pub fn clear_network_hover(&mut self, now: Time) -> bool {
+        self.network_panel.as_mut().is_some_and(|p| p.leave(now))
+    }
+
+    pub fn click_network_panel(&mut self, px: f64, py: f64, activate: bool, now: Time) -> bool {
+        if !self.connections_open() { return false; }
+        if !activate { return true; }
+        if let (Some(rect), Some(panel)) = (self.network_menu_rect, &mut self.network_panel) {
+            if panel.click(px - rect.x, py - rect.y, now) { self.close_activity_panel(now); }
+        }
+        true
+    }
+
+    pub fn network_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, now: Time) -> bool {
+        if !self.connections_open() { return false; }
+        if let Some(panel) = &mut self.network_panel { panel.key(key, text, ctrl, now); }
+        true
+    }
+
+    pub fn scroll_network(&mut self, rows: f64, now: Time) -> bool {
+        if !self.connections_open() { return false; }
+        if let Some(panel) = &mut self.network_panel { panel.scroll_by(rows, now); }
+        true
+    }
+
     /// fprintd started a verification.
     pub fn auth_started(&mut self, now: Time) {
         if self.hidden.any() {
@@ -869,6 +1457,11 @@ impl Island {
         }
         // a password prompt outranks the launcher
         self.launcher = None;
+        self.quick_open = false;
+        if let Some(activity) = self.activity.take() {
+            if !activity::takes_keyboard(&activity.event) { self.activity_queued = Some(activity.event); }
+        }
+        self.activity_retiring = None;
         // a new attempt while the pill is still up (after a miss): back to
         // waiting, no close / reopen
         if self.auth.is_none() {
@@ -949,8 +1542,13 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
+        let pill_radius = if self.quick_open || self.visible_activity().is_some_and(|a| activity::takes_keyboard(&a.event)) {
+            30.0
+        } else {
+            self.pill_h.state(now).x / 2.0
+        };
         let radius = radius
-            + (self.pill_h.state(now).x / 2.0 - radius) * q
+            + (pill_radius - radius) * q
             + (PLAYER_R - radius) * pl
             + (editor::PANEL_R - radius) * ed
             + (launcher::PANEL_R - radius) * p;
@@ -975,15 +1573,33 @@ impl Island {
             self.chip_w = editor::chip_width(cr, renderer, e);
         }
         let chip_len = chip_k * (self.chip_w + editor::GAP);
-        let line_w = chip_len + clock_w + bars_len + 2.0 * pad;
+        let timer_k = self.timer_chip.state(now).x;
+        if self.timer.is_some() { self.timer_last = self.timer.clone(); }
+        if let Some(timer) = self.timer.as_ref().or(self.timer_last.as_ref()) {
+            self.timer_w = activity::timer_width(cr, renderer, timer.remaining(now));
+        }
+        let timer_len = timer_k * (self.timer_w + 10.0);
+        self.timer_rect = None;
+        self.timer_menu_rect = None;
+        self.network_menu_rect = None;
+        self.quick_rect = None;
+        self.eq_rect = None;
+        self.player_rect = None;
+        self.editor_chip_rect = None;
+        let line_w = chip_len + clock_w + timer_len + bars_len + 2.0 * pad;
 
-        // --- the pill: Touch ID, or a notification ---
+        // --- the pill: Touch ID, a live activity, or a notification ---
+        let activity_size = self.quick_open.then_some((quick::WIDTH, quick::HEIGHT)).or_else(|| self.visible_activity().map(|a| {
+            if matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
+                self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
+            } else { a.event.size() }
+        }));
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
         let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
             let view = song.view(&self.eq, None, None, now);
             (player::toast_width(cr, renderer, &view), player::TOAST_H)
         });
-        let (w_target, h_target) = match (self.auth.is_some(), notice_size.or(toast_size)) {
+        let (w_target, h_target) = match (self.auth.is_some(), activity_size.or(notice_size).or(toast_size)) {
             (true, _) => (PILL_MIN_W, PILL_H),
             (false, Some(size)) => size,
             (false, None) => (self.pill_w.state(now).x, self.pill_h.state(now).x),
@@ -1014,7 +1630,7 @@ impl Island {
         let bh = line_h
             + (pill_h - line_h) * q
             + (player::PLAYER_H - line_h) * pl
-            + (editor::PANEL_H - line_h) * ed
+            + (self.editor_height() - line_h) * ed
             + (launcher::PANEL_H - line_h) * p
             + stretch_y
             - stretch_x * 0.15;
@@ -1026,10 +1642,20 @@ impl Island {
             y1 = renderer.snap(y1);
         }
         let r = radius.min((x1 - x0) / 2.0).min((y1 - dy) / 2.0);
+        if pl > 0.05 && self.player.target() > 0.5 && self.song.is_some() {
+            self.player_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
+        }
 
         self.trace_notch(cr, x0, x1, dy, y1, r);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.fill();
+        // Low battery is intentionally an OSD, not a system notification:
+        // the whole pill takes on the warning colour.
+        if self.auth.is_none() && self.visible_activity().is_some_and(|a| a.event.is_low_battery()) {
+            self.trace_notch(cr, x0, x1, dy, y1, r);
+            cr.set_source_rgba(0.42, 0.015, 0.02, 0.82 * pill_alpha_of(q));
+            let _ = cr.fill();
+        }
         // a critical notification puts a breathing rim around the pill
         if let Some(n) = self.notice.as_ref().filter(|n| n.note.critical) {
             let c = icons::accent(n.note.kind);
@@ -1053,9 +1679,12 @@ impl Island {
         let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45)) * (1.0 - smoothstep(ed / 0.45));
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + bars_len;
+            let content_w = chip_len + clock_w + timer_len + bars_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
+                if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
+                    self.editor_chip_rect = Some(Rect { x: content_x, y: dy, w: chip_len, h: line_h });
+                }
                 if let Some(e) = &self.nvim {
                     cr.save().unwrap();
                     cr.rectangle(content_x, dy, chip_len, line_h);
@@ -1069,9 +1698,35 @@ impl Island {
             cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
             cr.move_to(clock_x, ty);
             pangocairo::functions::show_layout(cr, &clock);
+            let mut after_clock = clock_x + clock_ext.x() as f64 + clock_w;
+            if timer_len > 0.5 {
+                if self.timer.is_some() && line_alpha > 0.95 && timer_k > 0.95 && !self.pill_open() {
+                    self.timer_rect = Some(Rect { x: after_clock + 6.0, y: dy, w: self.timer_w + 8.0, h: line_h });
+                }
+                cr.save().unwrap();
+                cr.rectangle(after_clock, dy, timer_len, line_h);
+                cr.clip();
+                if let Some(timer) = self.timer.as_ref().or(self.timer_last.as_ref()) {
+                    activity::draw_timer(
+                        cr,
+                        renderer,
+                        after_clock + 10.0,
+                        dy + line_h / 2.0,
+                        timer.remaining(now),
+                        timer.fraction(now),
+                        timer.running,
+                        line_alpha * timer_k,
+                    );
+                }
+                cr.restore().unwrap();
+                after_clock += timer_len;
+            }
             if reveal > 0.0 {
                 // the bars grow out of the clock's right edge
-                let bx = clock_x + clock_ext.x() as f64 + clock_w + BARS_GAP * reveal;
+                let bx = after_clock + BARS_GAP * reveal;
+                if reveal > 0.95 && line_alpha > 0.95 && pl < 0.05 && self.song.is_some() {
+                    self.eq_rect = Some(Rect { x: bx - 5.0, y: dy, w: BARS_W + 10.0, h: line_h });
+                }
                 cr.save().unwrap();
                 cr.rectangle(bx, dy, BARS_W * reveal, line_h);
                 cr.clip();
@@ -1143,6 +1798,47 @@ impl Island {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.8 * pill_alpha);
                 cr.move_to(cxp, cy);
                 pangocairo::functions::show_layout(cr, &cap_l);
+            } else if self.quick_open {
+                let climb = (1.0 - pill_alpha) * PILL_CLIMB;
+                if pill_alpha > 0.95 {
+                    self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb, w: quick::WIDTH, h: quick::HEIGHT });
+                }
+                quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb, pill_alpha,
+                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now));
+            } else if let Some(activity) = self.visible_activity().cloned() {
+                let climb = (1.0 - pill_alpha) * PILL_CLIMB;
+                if activity.event == activity::Event::TimerMenu {
+                    let mx = cx - 195.0;
+                    if pill_alpha > 0.95 {
+                        self.timer_menu_rect = Some(Rect { x: mx, y: dy + climb, w: 390.0, h: 184.0 });
+                    }
+                    activity::draw_timer_menu(cr, renderer, mx, dy + climb,
+                        self.timer.as_ref().map(|t| (t.remaining(now), t.running)), &std::array::from_fn(|i| self.timer_button_hover[i].value(now).clamp(0.0, 1.0)),
+                        &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), pill_alpha, activity.since, now);
+                }
+                if matches!(activity.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
+                    let (w, _) = activity.event.size();
+                    if pill_alpha > 0.95 {
+                        self.network_menu_rect = Some(Rect { x: cx - w / 2.0, y: dy + climb, w, h: bh });
+                    }
+                    if let Some(panel) = &mut self.network_panel {
+                        panel.draw(cr, renderer, cx - w / 2.0, dy + climb, bh, pill_alpha, now);
+                    }
+                }
+                activity::draw_pill(
+                    cr,
+                    renderer,
+                    &self.activity_art,
+                    &activity.event,
+                    self.activity_value.value(now),
+                    x0,
+                    dy + climb,
+                    x1 - x0,
+                    bh,
+                    pill_alpha,
+                    activity.since,
+                    now,
+                );
             } else if let Some(since) = self.toast {
                 if let Some(song) = &self.song {
                     let view = song.view(&self.eq, None, None, now);
@@ -1175,19 +1871,26 @@ impl Island {
         }
         if ed > 0.0 {
             if let Some(e) = &self.nvim {
-                editor::draw(
+                if self.output_view {
+                    if let Some(output) = &self.editor_output {
+                        output.draw(cr, renderer, x0, dy, x1 - x0, smoothstep((ed - 0.3) / 0.6));
+                    }
+                }
+                if !self.output_view || self.editor_command.is_some() { editor::draw(
                     cr,
                     renderer,
                     e,
                     x0,
-                    dy,
+                    dy + if self.output_view { crate::editor_output::HEIGHT } else { 0.0 },
                     x1 - x0,
                     smoothstep((ed - 0.3) / 0.6),
                     self.editor_hover,
                     self.editor_pressed,
+                    self.editor_diagnostics,
+                    self.editor_command.as_ref(),
                     now,
                     self.editor_opened,
-                );
+                ); }
             }
         }
         if let Some(l) = &self.launcher {
@@ -1259,10 +1962,95 @@ impl Island {
         self.player.state(now).x > 0.5 && self.song.is_some()
     }
 
-    /// Hit test for clicks on the collapsed island: play / pause and
-    /// track skipping, as the old touch target had.
+    /// Music commands are available only over the compact equaliser or the
+    /// visible player panel. The clock and the editor chip belong to the
+    /// island's shortcut menu instead.
     pub fn accepts_player_clicks(&self) -> bool {
         self.song.is_some() && !self.pill_open() && self.launcher.is_none()
+    }
+
+    pub fn music_area_at(&self, px: f64, py: f64) -> bool {
+        if !self.accepts_player_clicks() { return false; }
+        self.eq_rect.or(self.player_rect).is_some_and(|r| {
+            px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h
+        })
+    }
+
+    /// A normal click opens shortcuts unless a modal panel owns the input.
+    pub fn accepts_quick_menu_click(&self) -> bool {
+        !self.hidden.any() && self.auth.is_none() && self.launcher.is_none()
+            && !self.keyboard_panel_open() && !self.is_scrubbing()
+    }
+
+    pub fn quick_menu_open(&self) -> bool { self.quick_open }
+
+    pub fn open_quick_menu(&mut self, now: Time) -> bool {
+        if !self.accepts_quick_menu_click() { return false; }
+        self.quick_open = true;
+        self.quick_hover = None;
+        self.quick_selected = 0;
+        self.eq_hovered = false;
+        self.editor_chip_hovered = false;
+        self.notice = None;
+        self.notice_prev = None;
+        self.activity = None;
+        self.activity_queued = None;
+        self.toast = None;
+        self.sync(now);
+        true
+    }
+
+    pub fn close_quick_menu(&mut self, now: Time) {
+        if self.quick_open {
+            self.quick_open = false;
+            self.quick_rect = None;
+            self.quick_hover = None;
+            self.sync(now);
+        }
+    }
+
+    pub fn quick_action_at(&self, px: f64, py: f64) -> Option<quick::Action> {
+        self.quick_rect.and_then(|r| quick::hit(px - r.x, py - r.y))
+    }
+
+    pub fn quick_key(&mut self, key: &str, now: Time) -> Option<quick::Action> {
+        if !self.quick_open { return None; }
+        match key {
+            "next" => self.quick_selected = (self.quick_selected + 1) % quick::ACTIONS.len(),
+            "prev" => self.quick_selected = (self.quick_selected + quick::ACTIONS.len() - 1) % quick::ACTIONS.len(),
+            "enter" => return Some(quick::ACTIONS[self.quick_selected]),
+            _ => {}
+        }
+        self.quick_hover = Some(quick::ACTIONS[self.quick_selected]);
+        self.sync(now);
+        None
+    }
+
+    pub fn set_quick_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let hovered = self.quick_action_at(px, py);
+        if self.quick_hover == hovered { return false; }
+        self.quick_hover = hovered;
+        if let Some(action) = hovered {
+            if let Some(i) = quick::ACTIONS.iter().position(|a| *a == action) { self.quick_selected = i; }
+        }
+        self.sync(now);
+        true
+    }
+
+    pub fn set_eq_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let hovered = self.eq_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        if self.eq_hovered == hovered { return false; }
+        self.eq_hovered = hovered;
+        self.sync(now);
+        true
+    }
+
+    pub fn set_editor_chip_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let hovered = self.editor_chip_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        if self.editor_chip_hovered == hovered { return false; }
+        self.editor_chip_hovered = hovered;
+        self.sync(now);
+        true
     }
 
     /// Is the editor's panel open (so clicks go to it)?
@@ -1277,7 +2065,12 @@ impl Island {
         }
         let e = self.nvim.as_ref()?;
         let (x0, y0) = self.box_origin(cx, now);
-        editor::hit(e, editor::PANEL_W, px - x0, py - y0)
+        if self.output_view {
+            return (px - x0 > editor::PANEL_W - 52.0 && py - y0 < 36.0)
+                .then_some(editor::Action::CloseOutput);
+        }
+        if self.editor_command.is_some() { return None; }
+        editor::hit(e, editor::PANEL_W, px - x0, py - y0, self.editor_diagnostics)
     }
 
     pub fn set_editor_hover(&mut self, action: Option<editor::Action>) -> bool {
@@ -1290,11 +2083,25 @@ impl Island {
 
     /// A click in the editor's panel: what to ask Neovim to do.
     pub fn press_editor(&mut self, action: editor::Action, now: Time) -> Option<(String, String)> {
+        if action == editor::Action::CloseOutput {
+            self.output_open = false;
+            self.sync(now);
+            return None;
+        }
+        if action == editor::Action::Diagnostics {
+            self.editor_diagnostics = !self.editor_diagnostics;
+            self.editor_hover = None;
+            return None;
+        }
         let e = self.nvim.as_ref()?;
         self.editor_pressed = Some((action, now));
         let expr = match action {
             editor::Action::Buffer(id) => format!("execute('buffer {id}')"),
-            editor::Action::Diagnostics => "luaeval('vim.diagnostic.goto_next({severity = vim.diagnostic.severity.ERROR, wrap = true}) or 1')".to_string(),
+            editor::Action::Diagnostics | editor::Action::CloseOutput => unreachable!(),
+            editor::Action::Diagnostic(index) => {
+                let d = e.diagnostic_items.get(index)?;
+                format!("luaeval('require(\"island\").jump({}, {}, {})')", d.buffer, d.line, d.col)
+            },
             editor::Action::Save => "execute('silent! write')".to_string(),
             editor::Action::Format => "luaeval('(pcall(vim.lsp.buf.format) or true) and 1')".to_string(),
             editor::Action::CloseBuffer => "execute('silent! bdelete')".to_string(),
@@ -1405,7 +2212,7 @@ impl Island {
         };
         take(self.pill.target(), self.pill_w.state(now).x, self.pill_h.state(now).x);
         take(self.player.target(), player::PLAYER_W, player::PLAYER_H);
-        take(self.editor_panel.target(), editor::PANEL_W, editor::PANEL_H);
+        take(self.editor_panel.target(), editor::PANEL_W, self.editor_height());
         take(self.panel.target(), launcher::PANEL_W, launcher::PANEL_H);
         size
     }
@@ -1589,7 +2396,33 @@ pub struct Renderer {
     tiny: pango::FontDescription,
     query: pango::FontDescription,
     ctx: pango::Context,
-    cache: RefCell<HashMap<(Font, String), pango::Layout>>,
+    cache: RefCell<LayoutCache>,
+}
+
+type LayoutKey = (Font, String, i32, i32);
+const LAYOUT_CACHE_LIMIT: usize = 512;
+
+#[derive(Default)]
+struct LayoutCache {
+    entries: HashMap<LayoutKey, (pango::Layout, u64)>,
+    clock: u64,
+}
+
+impl LayoutCache {
+    fn get(&mut self, key: &LayoutKey) -> Option<pango::Layout> {
+        self.clock += 1;
+        let (layout, touched) = self.entries.get_mut(key)?;
+        *touched = self.clock;
+        Some(layout.clone())
+    }
+    fn insert(&mut self, key: LayoutKey, layout: pango::Layout) {
+        if self.entries.len() >= LAYOUT_CACHE_LIMIT {
+            let oldest = self.entries.iter().min_by_key(|(_, (_, touched))| *touched).map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest { self.entries.remove(&oldest); }
+        }
+        self.clock += 1;
+        self.entries.insert(key, (layout, self.clock));
+    }
 }
 
 impl Renderer {
@@ -1616,7 +2449,13 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        Renderer { scale, text, caption, small, tiny, query, ctx, cache: RefCell::new(HashMap::new()) }
+        let renderer = Renderer { scale, text, caption, small, tiny, query, ctx, cache: RefCell::new(LayoutCache::default()) };
+        // Resolve common font faces at startup/scale changes, not on the
+        // first visible frame of a newly opened panel.
+        for font in [Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query] {
+            renderer.layout(&cr, "Aa Яя 0123456789", font).pixel_extents();
+        }
+        renderer
     }
 
     pub fn scale(&self) -> f64 {
@@ -1670,12 +2509,15 @@ impl Renderer {
     /// A layout wrapped to at most `lines` lines inside `max` logical px,
     /// the last one cut with "…".
     pub fn layout_ellipsized(&self, cr: &Context, text: &str, font: Font, max: f64, lines: i32) -> pango::Layout {
-        let key = (font, format!("{max}\u{1}{lines}\u{1}{text}"));
-        if let Some(l) = self.cache.borrow().get(&key) {
-            return l.clone();
+        // Widths during a morph differ every frame, often by less than one
+        // device pixel. Do not turn floating point noise into cache misses.
+        let width = (self.snap(max.max(0.0)) * pango::SCALE as f64).round() as i32;
+        let key = (font, text.to_string(), width, lines);
+        if let Some(l) = self.cache.borrow_mut().get(&key) {
+            return l;
         }
         let layout = self.layout(cr, text, font).copy();
-        layout.set_width((max * pango::SCALE as f64) as i32);
+        layout.set_width(width);
         layout.set_wrap(pango::WrapMode::WordChar);
         // a negative height means "this many lines" when ellipsizing
         layout.set_height(-lines);
@@ -1684,18 +2526,26 @@ impl Renderer {
         layout
     }
 
+    pub fn output_layout(&self, text: &str) -> pango::Layout {
+        let layout = pango::Layout::new(&self.ctx);
+        let mut font = pango::FontDescription::from_string("monospace");
+        font.set_absolute_size(13.0 * pango::SCALE as f64);
+        layout.set_font_description(Some(&font));
+        layout.set_width(((editor::PANEL_W - 48.0) * pango::SCALE as f64) as i32);
+        layout.set_wrap(pango::WrapMode::WordChar);
+        layout.set_text(text);
+        layout
+    }
+
     /// A layout for `text`, glyph positions rounded to output pixels. (Not
     /// switched to fractional positions while moving: unhinted metrics give
     /// a text about 1 px narrower and shorter, and the swap at the end of a
     /// move read as the text changing size.)
     pub fn layout(&self, _cr: &Context, text: &str, font: Font) -> pango::Layout {
-        let key = (font, text.to_string());
+        let key = (font, text.to_string(), -1, 0);
         let mut cache = self.cache.borrow_mut();
         if let Some(l) = cache.get(&key) {
-            return l.clone();
-        }
-        if cache.len() > 64 {
-            cache.clear();
+            return l;
         }
         let layout = pango::Layout::new(&self.ctx);
         layout.set_font_description(Some(match font {
@@ -1708,5 +2558,397 @@ impl Renderer {
         layout.set_text(text);
         cache.insert(key, layout.clone());
         layout
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_cache_is_bounded_and_does_not_flush_frequently_used_labels() {
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2, 2).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        let clock = renderer.layout(&cr, "Clock", Font::Text);
+        for n in 0..800 {
+            assert_eq!(renderer.layout(&cr, "Clock", Font::Text), clock);
+            renderer.layout(&cr, &format!("Other {n}"), Font::Text);
+        }
+        assert!(renderer.cache.borrow().entries.len() <= LAYOUT_CACHE_LIMIT);
+        assert_eq!(renderer.layout_ellipsized(&cr, "Stable", Font::Text, 200.0, 1),
+            renderer.layout_ellipsized(&cr, "Stable", Font::Text, 200.00001, 1));
+    }
+
+    #[test]
+    fn steady_countdown_uses_deadlines_instead_of_continuous_frame_callbacks() {
+        let mut island = Island::new(Config::default());
+        island.timer_command("25m", 10.0).unwrap();
+        island.advance(12.0);
+        assert!(!island.is_animating(12.0));
+        let next = island.deadline(12.25).unwrap();
+        assert!(next > 12.5 && next <= 13.01);
+    }
+
+    #[test]
+    #[ignore = "Read-only offscreen performance benchmark against installed desktop entries"]
+    fn animation_benchmark() {
+        use std::time::Instant;
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let mut island = Island::new(Config::default());
+        island.update_clock();
+        let ready = Instant::now();
+        while island.catalog.apps.is_empty() && ready.elapsed().as_secs() < 5 {
+            island.drain_assets(9.0, 1.5);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!island.catalog.apps.is_empty(), "benchmark needs real desktop entries");
+        for cycle in 0..3 {
+            let now = 10.0 + cycle as f64 * 3.0;
+            let start = Instant::now();
+            island.toggle_launcher(now);
+            let open_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let mut frames = Vec::new();
+            for n in 0..90 {
+                let t = now + n as f64 / 60.0;
+                let start = Instant::now();
+                island.drain_assets(t, 1.5);
+                cr.set_operator(cairo::Operator::Clear);
+                cr.paint().unwrap();
+                cr.set_operator(cairo::Operator::Over);
+                island.advance(t);
+                island.draw(&cr, &renderer, 490.0, t);
+                frames.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            frames.sort_by(f64::total_cmp);
+            eprintln!("launcher cycle={cycle} open={open_ms:.3}ms median={:.3}ms p95={:.3}ms max={:.3}ms >16ms={}",
+                frames[45], frames[85], frames[89], frames.iter().filter(|v| **v > 16.667).count());
+            island.close_launcher(now + 2.0);
+            island.advance(now + 2.9);
+        }
+        for (label, event) in [
+            ("timer", activity::Event::TimerMenu),
+            ("volume", activity::Event::Slider { kind: activity::SliderKind::Volume, value: 0.65, muted: false }),
+        ] {
+            island.live_activity(event, 30.0);
+            let start = Instant::now();
+            for n in 0..60 {
+                let t = 30.0 + n as f64 / 60.0;
+                island.advance(t);
+                island.draw(&cr, &renderer, 490.0, t);
+            }
+            eprintln!("{label} average={:.3}ms", start.elapsed().as_secs_f64() * 1000.0 / 60.0);
+            island.close_activity_panel(31.0);
+            island.advance(32.0);
+        }
+    }
+
+    #[test]
+    fn quick_menu_unfolds_and_routes_each_shortcut_without_launching_on_release() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        assert!(island.open_quick_menu(10.0));
+        assert!(island.keyboard_panel_open());
+        island.draw(&cr, &renderer, 490.0, 10.7);
+        let r = island.quick_rect.expect("menu should accept pointer input after unfolding");
+        for (i, action) in quick::ACTIONS.iter().enumerate() {
+            let x = r.x + 38.0 + (i % 2) as f64 * 207.0;
+            let y = r.y + 84.0 + (i / 2) as f64 * 80.0;
+            assert_eq!(island.quick_action_at(x, y), Some(*action));
+        }
+        island.set_quick_hover(r.x + 38.0, r.y + 84.0, 10.7);
+        assert!(island.quick_hover_springs[0].value(10.8) > 0.0);
+        island.close_quick_menu(10.8);
+        assert!(!island.keyboard_panel_open());
+        assert_eq!(island.quick_action_at(r.x + 38.0, r.y + 84.0), None);
+    }
+
+    #[test]
+    fn music_and_editor_open_only_from_their_compact_hit_targets() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        island.song = Some(Song { now: crate::dbus::NowPlaying {
+            bus_name: "test".into(), app: "Player".into(), playing: true, artist: "A".into(),
+            title: "T".into(), art_url: String::new(), track_id: "test".into(), length: 120.0,
+        }, position: 0.0, position_at: 10.0 });
+        island.reveal.set_at(1.0, 10.0);
+        island.sync(10.0);
+        island.draw(&cr, &renderer, 490.0, 10.5);
+        let eq = island.eq_rect.unwrap();
+        assert!(island.music_area_at(eq.x + eq.w / 2.0, eq.y + 10.0));
+        assert!(!island.music_area_at(eq.x - 25.0, eq.y + 10.0));
+        island.hovered = true;
+        island.sync(10.5);
+        assert_eq!(island.player.target(), 0.0);
+        assert_eq!(island.hover_pad.target(), 1.0);
+        let width_before_panel = island.hover_pad.value(10.6);
+        assert!(width_before_panel > 0.0 && width_before_panel < 1.0);
+        island.set_eq_hover(eq.x + eq.w / 2.0, eq.y + 10.0, 10.6);
+        assert_eq!(island.player.target(), 1.0);
+        assert_eq!(island.hover_pad.target(), 0.0);
+        assert!((island.hover_pad.value(10.6) - width_before_panel).abs() < 1e-9);
+        island.set_eq_hover(-1.0, -1.0, 10.7);
+        assert_eq!(island.player.target(), 1.0, "moving into the panel keeps it open");
+        island.draw(&cr, &renderer, 490.0, 10.75);
+        let player = island.player_rect.expect("opening player has its own input region");
+        assert!(island.music_area_at(player.x + player.w / 2.0, player.y + player.h / 2.0));
+        assert!(!island.music_area_at(player.x - 20.0, player.y + 10.0));
+        island.hovered = false;
+        island.sync(10.8);
+        assert_eq!(island.player.target(), 0.0);
+
+        island.song = None;
+        island.player.set_at(0.0, 11.0);
+        island.set_editor(Editor { server: "test".into(), focused: true, file: "main.rs".into(), ..Editor::default() }, 11.0);
+        island.draw(&cr, &renderer, 490.0, 11.5);
+        let chip = island.editor_chip_rect.unwrap();
+        island.hovered = true;
+        island.sync(11.5);
+        assert_eq!(island.editor_panel.target(), 0.0);
+        assert_eq!(island.hover_pad.target(), 1.0);
+        let width_before_editor = island.hover_pad.value(11.6);
+        island.set_editor_chip_hover(chip.x + chip.w / 2.0, chip.y + 10.0, 11.6);
+        assert_eq!(island.editor_panel.target(), 1.0);
+        assert_eq!(island.hover_pad.target(), 0.0);
+        assert!((island.hover_pad.value(11.6) - width_before_editor).abs() < 1e-9);
+        island.set_editor_chip_hover(-1.0, -1.0, 11.7);
+        assert_eq!(island.editor_panel.target(), 1.0);
+        island.hovered = false;
+        island.sync(11.8);
+        assert_eq!(island.editor_panel.target(), 0.0);
+    }
+
+    #[test]
+    fn rapid_osd_updates_keep_the_entrance_and_extend_the_hold() {
+        let mut island = Island::new(Config::default());
+        for i in 0..60 {
+            let time = 10.0 + i as f64 * 0.05;
+            island.live_activity(activity::Event::Slider {
+                kind: if i % 2 == 0 { activity::SliderKind::Volume } else { activity::SliderKind::Brightness },
+                value: i as f64 / 60.0,
+                muted: false,
+            }, time);
+            island.advance(time);
+            let current = island.activity.as_ref().unwrap();
+            assert_eq!(current.since, 10.0, "key repeat restarted the entrance");
+            assert_eq!(current.updated_at, time);
+            assert_eq!(island.pill.target(), 1.0);
+        }
+        island.advance(14.0);
+        assert!(island.activity.is_some());
+        island.advance(14.5);
+        assert!(island.activity.is_none());
+        assert!(island.activity_retiring.is_some(), "keep content during the closing animation");
+    }
+
+    #[test]
+    fn timer_completion_waits_for_touch_id_and_invalid_durations_are_rejected() {
+        let mut island = Island::new(Config::default());
+        for duration in ["inf", "NaN", "-1", "1e100"] {
+            assert!(island.timer_command(duration, 10.0).is_err());
+        }
+        island.timer_command("1s", 10.0).unwrap();
+        island.auth_started(10.1);
+        island.advance(11.1);
+        assert!(island.activity.is_none());
+        assert_eq!(island.activity_queued, Some(activity::Event::TimerDone));
+    }
+
+    #[test]
+    fn timer_menu_can_start_pause_and_cancel_with_the_pointer() {
+        let mut island = Island::new(Config::default());
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 980, 240).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let renderer = Renderer::new(1.0);
+        island.timer_command("menu", 10.0).unwrap();
+        for i in 0..60 { island.draw(&cr, &renderer, 490.0, 10.0 + i as f64 / 60.0); }
+        let rect = island.timer_menu_rect.unwrap();
+        assert!(island.click_timer_menu(rect.x + 235.0, rect.y + 88.0, 11.0));
+        assert_eq!(island.timer_command("status", 11.0).unwrap(), "1500 running");
+        assert!(!island.pill_open());
+        island.draw(&cr, &renderer, 490.0, 11.5);
+        let rect = island.timer_rect.unwrap();
+        assert!(island.click_timer_at(rect.x + 5.0, rect.y + 16.0, 11.5));
+        assert!(!island.timer.as_ref().unwrap().running);
+        island.timer_command("menu", 12.0).unwrap();
+        island.draw(&cr, &renderer, 490.0, 13.0);
+        let rect = island.timer_menu_rect.unwrap();
+        island.click_timer_menu(rect.x + 245.0, rect.y + 138.0, 13.0);
+        assert!(island.timer.is_none());
+    }
+
+    #[test]
+    fn polished_activities_render_at_fractional_scale() {
+        let scale = 1.5;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 780, 1170).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(scale, scale);
+        cr.set_source_rgb(0.12, 0.13, 0.15);
+        cr.paint().unwrap();
+        let renderer = Renderer::new(scale);
+        let cases = [
+            (Some(activity::Event::Slider { kind: activity::SliderKind::Volume, value: 0.65, muted: false }), None, 0.0),
+            (Some(activity::Event::Slider { kind: activity::SliderKind::Brightness, value: 0.8, muted: false }), None, 110.0),
+            (Some(activity::Event::Slider { kind: activity::SliderKind::Volume, value: 0.4, muted: true }), None, 220.0),
+            (None, Some("menu"), 330.0),
+            (None, None, 550.0),
+            (None, Some("25m"), 620.0),
+            (None, Some("pause"), 690.0),
+        ];
+        for (event, command, y) in cases {
+            let mut island = Island::new(Config::default());
+            island.clock = "Thu Sep 17  12:30 AM".into();
+            island.sync(10.0);
+            if let Some(event) = event { island.live_activity(event, 10.0); }
+            if let Some(command) = command {
+                if command == "pause" { island.timer_command("25m", 10.0).unwrap(); }
+                island.timer_command(command, 10.0).unwrap();
+            }
+            // Resolve geometry on a scratch surface, then paint a settled
+            // frame onto the contact sheet with the real notch renderer.
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 780, 360).unwrap();
+            let ctx = Context::new(&scratch).unwrap();
+            ctx.scale(scale, scale);
+            for i in 0..60 { island.draw(&ctx, &renderer, 260.0, 10.0 + i as f64 / 60.0); }
+            cr.save().unwrap();
+            cr.translate(0.0, y);
+            island.draw(&cr, &renderer, 260.0, 11.0);
+            cr.restore().unwrap();
+        }
+        if std::env::var_os("ISLAND_ACTIVITY_PREVIEW").is_some() {
+            let mut file = std::fs::File::create("target/activity-polish.png").unwrap();
+            surface.write_to_png(&mut file).unwrap();
+        }
+    }
+
+    #[test]
+    fn countdown_pauses_and_resumes_without_losing_time() {
+        let mut island = Island::new(Config::default());
+        assert_eq!(island.timer_command("10s", 100.0).unwrap(), "ok");
+        assert_eq!(island.timer_command("status", 104.0).unwrap(), "6 running");
+        island.timer_command("pause", 104.0).unwrap();
+        assert_eq!(island.timer_command("status", 109.0).unwrap(), "6 paused");
+        island.timer_command("resume", 109.0).unwrap();
+        assert_eq!(island.timer_command("status", 111.0).unwrap(), "4 running");
+        island.timer_command("cancel", 111.0).unwrap();
+        assert_eq!(island.timer_command("status", 111.0).unwrap(), "stopped");
+    }
+
+    #[test]
+    fn escape_closes_timer_menu_without_stopping_countdown() {
+        let mut island = Island::new(Config::default());
+        island.timer_command("10m", 100.0).unwrap();
+        island.live_activity(activity::Event::TimerMenu, 100.0);
+        assert!(island.keyboard_panel_open());
+        assert!(island.close_activity_panel(101.0));
+        assert!(!island.keyboard_panel_open());
+        assert_eq!(island.timer_command("status", 101.0).unwrap(), "599 running");
+    }
+
+    #[test]
+    fn timer_hover_eases_in_and_out_without_restarting_the_panel() {
+        let mut island = Island::new(Config::default());
+        island.timer_command("menu", 10.0).unwrap();
+        island.timer_menu_rect = Some(Rect { x: 0.0, y: 0.0, w: 390.0, h: 184.0 });
+        island.set_timer_hover(50.0, 80.0);
+        island.sync(11.0);
+        assert_eq!(island.timer_button_hover[0].value(11.0), 0.0);
+        let value = island.timer_button_hover[0].value(11.05);
+        assert!(value > 0.0 && value < 1.0);
+        island.clear_timer_hover();
+        island.sync(11.05);
+        assert!((island.timer_button_hover[0].value(11.05) - value).abs() < 1e-9);
+        assert!(island.timer_button_hover[0].value(12.0) < 0.001);
+        assert_eq!(island.activity.as_ref().unwrap().since, 10.0);
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    fn editor(server: &str, focused: bool) -> Editor {
+        Editor { server: server.into(), focused, file: "main.c".into(), mode: "c".into(), ..Editor::default() }
+    }
+    fn command() -> Option<nvim::Cmdline> {
+        Some(nvim::Cmdline { prefix: ":".into(), text: "write".into(), pos: 5 })
+    }
+    #[test]
+    fn command_is_scoped_to_focused_instance_and_expires() {
+        let mut island = Island::new(Config::default());
+        island.set_editor(editor("one", true), 1.0);
+        assert!(!island.set_cmdline("two", command(), 1.1));
+        assert!(island.set_cmdline("one", command(), 1.1));
+        assert!(island.want_editor_panel(1.2));
+        island.set_editor(editor("two", false), 1.2);
+        assert_eq!(island.nvim.as_ref().unwrap().server, "one");
+        island.set_editor(editor("one", true), 1.3);
+        assert!(island.nvim.as_ref().unwrap().cmdline.is_some());
+        island.advance(2.0);
+        assert!(island.nvim.as_ref().unwrap().cmdline.is_none());
+    }
+    #[test]
+    fn completed_command_folds_without_revealing_buffer_panel() {
+        let mut island = Island::new(Config::default());
+        island.set_editor(editor("one", true), 1.0);
+        island.set_cmdline("one", command(), 1.1);
+        assert_eq!(island.editor_height(), 84.0);
+        let open = 1.1 + PLAYER_DUR;
+        assert_eq!(island.editor_panel.state(open).x, 1.0);
+        island.set_cmdline("one", None, open);
+        assert_eq!(island.editor_panel.target(), 0.0);
+        assert_eq!(island.editor_height(), 84.0);
+        assert!(island.editor_command.is_some());
+        let mut previous = 84.0;
+        for step in 0..=20 {
+            let now = open + PLAYER_DUR * step as f64 / 20.0;
+            let height = BOX_H + (island.editor_height() - BOX_H) * island.editor_panel.state(now).x;
+            assert!(height <= previous + 1e-8);
+            previous = height;
+        }
+        assert!((previous - BOX_H).abs() < 1e-8);
+        let finished = open + PLAYER_DUR;
+        island.notify(crate::notify::fabricate("Neovim", ":echo", "done"), finished);
+        island.dismiss_notice(finished + 1.0);
+        assert!(!island.want_editor_panel(finished + 1.0));
+        assert_eq!(island.editor_panel.target(), 0.0);
+        island.hovered = true;
+        island.sync(finished + 1.1);
+        assert_eq!(island.editor_panel.target(), 0.0);
+        island.editor_chip_hovered = true;
+        island.sync(finished + 1.2);
+        assert_eq!(island.editor_panel.target(), 1.0);
+        assert_eq!(island.editor_height(), editor::PANEL_H);
+        assert!(island.editor_command.is_none());
+    }
+    #[test]
+    fn results_require_a_visible_focused_editor() {
+        let mut island = Island::new(Config::default());
+        island.set_editor(editor("one", true), 1.0);
+        assert!(island.accepts_result("one", 1.1));
+        assert!(!island.accepts_result("two", 1.1));
+        island.hidden.user = true;
+        assert!(!island.accepts_result("one", 1.1));
+        island.hidden.user = false;
+        island.auth_started(1.2);
+        assert!(!island.accepts_result("one", 1.3));
+    }
+    #[test]
+    fn hidden_island_and_authentication_return_command_to_terminal() {
+        let mut island = Island::new(Config::default());
+        island.set_editor(editor("one", true), 1.0);
+        island.hidden.user = true;
+        assert!(!island.set_cmdline("one", command(), 1.1));
+        island.hidden.user = false;
+        island.auth_started(1.2);
+        assert!(!island.set_cmdline("one", command(), 1.3));
     }
 }

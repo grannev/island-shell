@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region, SurfaceData},
     delegate_registry,
     output::{OutputHandler, OutputState},
     presentation_time::{PresentTime, PresentationTimeHandler, PresentationTimeState},
@@ -57,6 +57,7 @@ use smithay_client_toolkit::{
 };
 
 use crate::anim::Time;
+use crate::activity;
 use crate::ctl::{Command, Server};
 use crate::dbus::{self, PlayerCommand};
 use crate::eq::{self, Cava};
@@ -75,6 +76,24 @@ const SURFACE_H: u32 = 560;
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyClick { Menu, PlayPause, Next, Previous, None }
+
+fn body_click(button: u32, over_music: bool, can_open_menu: bool) -> BodyClick {
+    if over_music {
+        match button {
+            BTN_LEFT => BodyClick::PlayPause,
+            BTN_RIGHT => BodyClick::Next,
+            BTN_MIDDLE => BodyClick::Previous,
+            _ => BodyClick::None,
+        }
+    } else if button == BTN_LEFT && can_open_menu {
+        BodyClick::Menu
+    } else {
+        BodyClick::None
+    }
+}
 /// How often the sink's mute state is checked while something plays.
 const VOLUME_POLL: Duration = Duration::from_secs(2);
 /// how often the open player asks where the track is
@@ -180,6 +199,48 @@ impl FrameClock {
     }
 }
 
+/// A single transparent pixel stretched over the output. Its input region
+/// excludes the island; it exists only while a modal menu is open.
+struct DismissSurface {
+    layer: LayerSurface,
+    viewport: WpViewport,
+    buffer: Buffer,
+    size: (u32, u32),
+    input_hole: std::cell::Cell<Option<Option<(i32, i32, i32, i32)>>>,
+}
+
+#[derive(Default)]
+struct FrameStats {
+    count: u64,
+    slow: u64,
+    total: f64,
+    worst: f64,
+}
+
+impl FrameStats {
+    fn record(&mut self, seconds: f64, refresh: f64) {
+        self.count += 1;
+        self.slow += u64::from(seconds > refresh);
+        self.total += seconds;
+        self.worst = self.worst.max(seconds);
+    }
+    fn describe(&self) -> String {
+        format!(" frame_cpu_ms={:.2}/{:.2} slow_frames={}/{}",
+            self.total * 1000.0 / self.count.max(1) as f64, self.worst * 1000.0, self.slow, self.count)
+    }
+}
+
+impl Drop for DismissSurface {
+    fn drop(&mut self) {
+        self.viewport.destroy();
+    }
+}
+
+fn dismiss_hole(input: Rect, output_width: u32, surface_width: u32) -> (i32, i32, i32, i32) {
+    let x = (output_width as f64 - surface_width as f64) / 2.0 + input.x;
+    (x.floor() as i32, input.y.floor() as i32, input.w.ceil() as i32 + 1, input.h.ceil() as i32 + 1)
+}
+
 pub struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -189,6 +250,9 @@ pub struct App {
     presentation: PresentationTimeState,
     pool: SlotPool,
     layer: LayerSurface,
+    layer_shell: LayerShell,
+    viewporter: WpViewporter,
+    dismiss: Option<DismissSurface>,
     viewport: WpViewport,
     _fractional: Option<WpFractionalScaleV1>,
     qh: QueueHandle<App>,
@@ -200,10 +264,11 @@ pub struct App {
     height: u32,
     configured: bool,
     frame_pending: bool,
+    frame_stats: FrameStats,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
-    kbd_focus: bool,
+    kbd_interactivity: KeyboardInteractivity,
     /// where the pointer is, in logical px inside the surface
     pointer_at: (f64, f64),
     last_frame: Option<Frame>,
@@ -223,13 +288,18 @@ pub struct App {
     sway_query: Option<sway::Query>,
     /// the equaliser feed, alive only while a player is playing
     cava: Option<Cava>,
-    eq_tx: channel::Sender<[f32; eq::BANDS]>,
+    cava_start: crate::background::Worker<(), Result<Cava, String>>,
+    cava_pending: bool,
+    cava_retry: std::time::Instant,
+    volume_read: crate::background::Worker<(), bool>,
+    volume_pending: bool,
     /// the timer for the island's next time-driven change
     deadline: Option<(Time, RegistrationToken)>,
     volume_poll: Option<RegistrationToken>,
     /// while the player is open its position is asked for every second
     position_poll: Option<RegistrationToken>,
     dbus_tx: channel::Sender<dbus::Event>,
+    network_tx: channel::Sender<crate::network::Message>,
     pub exit: bool,
 }
 
@@ -274,9 +344,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
     let (note_tx, note_rx) = channel::channel::<notify::Notification>();
     notify::spawn_watch(note_tx);
+    let (activity_tx, activity_rx) = channel::channel::<activity::Event>();
+    activity::spawn_watchers(activity_tx.clone());
+    let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
 
     let mut island = Island::new(load_config());
     island.update_clock();
+    let (asset_tx, asset_rx) = channel::channel::<()>();
+    island.set_asset_waker(asset_tx.clone());
+    let eq_sender = eq_tx.clone();
+    let cava_start = crate::background::Worker::new("audio-start", move |_| Cava::start(eq_sender.clone()).map_err(|e| e.to_string()));
+    cava_start.set_waker(asset_tx.clone());
+    let volume_read = crate::background::Worker::new("audio-state", |_| read_muted());
+    volume_read.set_waker(asset_tx);
 
     let sway_query = match sway::Query::connect() {
         Ok(q) => Some(q),
@@ -295,6 +375,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         presentation,
         pool,
         layer,
+        layer_shell,
+        viewporter,
+        dismiss: None,
         viewport,
         _fractional: fractional,
         qh: qh.clone(),
@@ -304,10 +387,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         height: SURFACE_H,
         configured: false,
         frame_pending: false,
+        frame_stats: FrameStats::default(),
         pointer: None,
         keyboard: None,
         modifiers: Modifiers::default(),
-        kbd_focus: false,
+        kbd_interactivity: KeyboardInteractivity::None,
         pointer_at: (0.0, 0.0),
         last_frame: None,
         canvas: None,
@@ -319,11 +403,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         renderer: Renderer::new(1.0),
         sway_query,
         cava: None,
-        eq_tx,
+        cava_start,
+        cava_pending: false,
+        cava_retry: std::time::Instant::now(),
+        volume_read,
+        volume_pending: false,
         deadline: None,
         volume_poll: None,
         position_poll: None,
         dbus_tx,
+        network_tx,
         exit: false,
     };
 
@@ -338,6 +427,34 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         app.after_change();
     })?;
+    loop_handle.insert_source(asset_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(()) = event {
+            let now = app.frame_time();
+            let mut changed = app.island.drain_assets(now, app.scale);
+            for (_, result) in app.cava_start.drain() {
+                app.cava_pending = false;
+                match result {
+                    Ok(cava) if app.island.song().is_some() => app.cava = Some(cava),
+                    Ok(_) => {},
+                    Err(error) => {
+                        eprintln!("island-shell: cava: {error}");
+                        app.cava_retry = std::time::Instant::now() + Duration::from_secs(5);
+                    }
+                }
+                changed = true;
+            }
+            for (_, muted) in app.volume_read.drain() {
+                app.volume_pending = false;
+                if app.island.song().is_some() && muted != app.island.muted {
+                    app.island.set_muted(muted, now);
+                    changed = true;
+                }
+            }
+            if changed { app.after_change(); }
+        }
+    })?;
+    // A very fast worker may finish before its waker was attached.
+    app.island.drain_assets(app.frame_time(), app.scale);
     loop_handle.insert_source(eq_rx, |event, _, app: &mut App| {
         if let channel::Event::Msg(levels) = event {
             let now = app.frame_time();
@@ -351,6 +468,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let now = app.frame_time();
             app.island.notify(note, now);
             app.after_change();
+        }
+    })?;
+    loop_handle.insert_source(activity_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(event) = event {
+            let now = app.frame_time();
+            if let activity::Event::Slider { kind: activity::SliderKind::Volume, muted, .. } = &event {
+                app.island.set_muted(*muted, now);
+            }
+            app.island.live_activity(event, now);
+            app.after_change();
+        }
+    })?;
+
+    loop_handle.insert_source(network_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(message) = event {
+            let now = app.frame_time();
+            if app.island.network_message(message, now) { app.after_change(); }
         }
     })?;
 
@@ -505,6 +639,7 @@ impl App {
     fn handle_command(&mut self, cmd: Command) -> String {
         let now = self.frame_time();
         match cmd {
+            Command::Dismiss => self.dismiss_menus(),
             Command::Toggle => self.island.hidden.user = !self.island.hidden.user,
             Command::Show => self.island.hidden.user = false,
             Command::Hide => self.island.hidden.user = true,
@@ -516,7 +651,7 @@ impl App {
             }
             Command::Status => {
                 return format!(
-                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} buffers={} {} {}",
+                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} buffers={} dismiss={:?} {} {}",
                     if self.island.is_hidden() { "hidden" } else { "shown" },
                     if self.island.dodged { "dodged" } else { "centred" },
                     self.scale,
@@ -525,8 +660,9 @@ impl App {
                     self.clock.refresh * 1e3,
                     self.clock.pipeline,
                     self.buffers.len(),
+                    self.dismiss.as_ref().map(|d| d.size),
                     self.island.config.describe(),
-                    self.island.describe(now)
+                    self.island.describe(now) + &self.frame_stats.describe()
                 );
             }
             Command::Set(key, value) => {
@@ -539,6 +675,15 @@ impl App {
                 self.set_keyboard_focus(open);
                 self.after_change();
                 return if open { "open".into() } else { "closed".into() };
+            }
+            Command::Quick => {
+                if self.island.quick_menu_open() {
+                    self.island.close_quick_menu(now);
+                } else {
+                    self.island.open_quick_menu(now);
+                }
+                self.after_change();
+                return "ok".into();
             }
             Command::LauncherClose => {
                 self.island.close_launcher(now);
@@ -573,6 +718,17 @@ impl App {
                             self.after_change();
                         }
                     }
+                    Some(crate::nvim::Message::Result { server, kind, title, body, id, append }) => {
+                        if !self.island.accepts_result(&server, now) { return "fallback".into(); }
+                        self.island.set_result(id, title, body, kind == crate::nvim::ToastKind::Error, append, &self.renderer, now);
+                        self.after_change();
+                        return "ok: result".into();
+                    }
+                    Some(crate::nvim::Message::Cmdline { server, command }) => {
+                        let visible = self.island.set_cmdline(&server, command, now);
+                        self.after_change();
+                        return if visible { "ok: cmdline" } else { "fallback" }.into();
+                    }
                     Some(crate::nvim::Message::Gone(server)) => {
                         self.island.editor_gone(&server, now);
                         self.after_change();
@@ -586,6 +742,26 @@ impl App {
                     None => return "error: not an island.nvim message".into(),
                 }
                 return "ok".into();
+            }
+            Command::Activity(event) => {
+                if let activity::Event::Slider { kind: activity::SliderKind::Volume, muted, .. } = &event {
+                    self.island.set_muted(*muted, now);
+                }
+                match event {
+                    activity::Event::WifiOpen => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
+                    activity::Event::BluetoothOpen => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
+                    _ => self.island.live_activity(event, now),
+                }
+                self.after_change();
+                return "ok".into();
+            }
+            Command::Timer(command) => {
+                let reply = match self.island.timer_command(&command, now) {
+                    Ok(reply) => reply,
+                    Err(error) => return format!("error: {error}"),
+                };
+                self.after_change();
+                return reply;
             }
             Command::Scrub(value) => {
                 let sent = if value == "end" {
@@ -666,17 +842,22 @@ impl App {
         Ok(())
     }
 
-    /// The launcher needs the keyboard; nothing else does.
+    /// Modal menus own the keyboard until dismissed.
     fn set_keyboard_focus(&mut self, want: bool) {
-        if want == self.kbd_focus {
-            return;
-        }
-        self.kbd_focus = want;
-        self.layer.set_keyboard_interactivity(if want {
+        let next = if !want {
+            KeyboardInteractivity::None
+        } else if self.island.launcher.is_some() {
+            KeyboardInteractivity::Exclusive
+        } else if self.island.keyboard_panel_open() {
             KeyboardInteractivity::Exclusive
         } else {
-            KeyboardInteractivity::None
-        });
+            KeyboardInteractivity::OnDemand
+        };
+        if next == self.kbd_interactivity {
+            return;
+        }
+        self.kbd_interactivity = next;
+        self.layer.set_keyboard_interactivity(next);
         self.layer.commit();
     }
 
@@ -684,6 +865,32 @@ impl App {
     fn launcher_key(&mut self, event: &KeyEvent) {
         let now = self.frame_time();
         let ctrl = self.modifiers.ctrl;
+        if self.island.launcher.is_none() {
+            if event.keysym == Keysym::Escape {
+                if self.island.close_activity_panel(now) { self.after_change(); }
+            } else if self.island.quick_menu_open() {
+                let key = match event.keysym {
+                    Keysym::Return | Keysym::KP_Enter => "enter",
+                    Keysym::Down | Keysym::Right | Keysym::Tab => "next",
+                    Keysym::Up | Keysym::Left | Keysym::ISO_Left_Tab => "prev",
+                    _ => "",
+                };
+                if let Some(action) = self.island.quick_key(key, now) {
+                    self.activate_quick_action(action, now);
+                }
+                self.after_change();
+            } else {
+                let key = match event.keysym {
+                    Keysym::Return | Keysym::KP_Enter => "Return",
+                    Keysym::BackSpace => "BackSpace",
+                    Keysym::Up => "Up",
+                    Keysym::Down => "Down",
+                    _ => "",
+                };
+                if self.island.network_key(key, event.utf8.as_deref(), ctrl, now) { self.after_change(); }
+            }
+            return;
+        }
         let Some(l) = self.island.launcher.as_mut() else { return };
         match event.keysym {
             Keysym::Escape => {
@@ -722,14 +929,13 @@ impl App {
     fn after_change(&mut self) {
         // whoever closed the launcher (a key, Touch ID, the compositor),
         // the keyboard goes back when it is gone
-        let wants_keyboard = self.island.launcher.is_some();
+        let wants_keyboard = self.island.launcher.is_some()
+            || (!self.island.is_hidden() && self.island.keyboard_panel_open());
         self.set_keyboard_focus(wants_keyboard);
+        self.sync_dismiss_surface(wants_keyboard);
         let has_song = self.island.song().is_some();
-        if has_song && self.cava.is_none() {
-            match Cava::start(self.eq_tx.clone()) {
-                Ok(c) => self.cava = Some(c),
-                Err(e) => eprintln!("island-shell: cava: {e}"),
-            }
+        if has_song && self.cava.is_none() && !self.cava_pending && std::time::Instant::now() >= self.cava_retry {
+            self.cava_pending = self.cava_start.request(());
         } else if !has_song && self.cava.is_some() {
             self.cava = None;
         }
@@ -812,13 +1018,7 @@ impl App {
     /// Is the sink muted or at 0 %? The bar's volume script keeps a state
     /// file; pactl is the fallback.
     fn poll_volume(&mut self) {
-        let muted = read_muted();
-        if muted != self.island.muted {
-            let now = self.frame_time();
-            self.island.set_muted(muted, now);
-            self.arm_deadline();
-            self.redraw();
-        }
+        if !self.volume_pending { self.volume_pending = self.volume_read.request(()); }
     }
 
     /// Present a new frame now unless one is already on its way.
@@ -971,6 +1171,7 @@ impl App {
             surface.damage_buffer(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32);
         }
         self.last_frame = Some(frame);
+        self.update_dismiss_region();
 
         self.viewport.set_source(0.0, 0.0, bw as f64, bh as f64);
         self.viewport.set_destination(self.width as i32, self.height as i32);
@@ -983,6 +1184,7 @@ impl App {
         }
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
+        self.frame_stats.record(started.elapsed().as_secs_f64(), self.clock.refresh);
         if self.clock.debug {
             eprintln!("draw: {:.0} us steady={}", started.elapsed().as_secs_f64() * 1e6, steady as u8);
         }
@@ -996,6 +1198,57 @@ impl App {
         self.renderer = Renderer::new(scale);
         self.last_frame = None;
         self.redraw();
+    }
+
+    fn sync_dismiss_surface(&mut self, want: bool) {
+        if !want {
+            // Destruction immediately returns input to the desktop; the
+            // island itself can still play its normal closing animation.
+            self.dismiss = None;
+            return;
+        }
+        if self.dismiss.is_some() { return; }
+        let output = self.layer.wl_surface().data::<SurfaceData<()>>()
+            .and_then(|data| data.outputs().next());
+        let surface = self.compositor.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh, surface, Layer::Overlay, Some("island-dismiss"), output.as_ref(),
+        );
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer.set_size(0, 0);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let viewport = self.viewporter.get_viewport(layer.wl_surface(), &self.qh, ());
+        let (buffer, pixels) = match self.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) {
+            Ok(buffer) => buffer,
+            Err(e) => { eprintln!("island-shell: outside-click surface: {e}"); return; }
+        };
+        pixels.fill(0);
+        layer.commit(); // Wait for the initial configure before attaching.
+        self.dismiss = Some(DismissSurface { layer, viewport, buffer, size: (0, 0), input_hole: std::cell::Cell::new(None) });
+    }
+
+    fn update_dismiss_region(&self) {
+        let Some(dismiss) = &self.dismiss else { return };
+        let (w, h) = dismiss.size;
+        if w == 0 || h == 0 { return; }
+        let hole = self.last_frame.and_then(|frame| frame.input).map(|rect| dismiss_hole(rect, w, self.width));
+        if dismiss.input_hole.get() == Some(hole) { return; }
+        dismiss.input_hole.set(Some(hole));
+        let region = Region::new(&self.compositor).expect("wl_region");
+        region.add(0, 0, w as i32, h as i32);
+        if let Some((x, y, width, height)) = hole {
+            region.subtract(x, y, width, height);
+        }
+        dismiss.layer.set_input_region(Some(region.wl_region()));
+        dismiss.layer.commit();
+    }
+
+    fn dismiss_menus(&mut self) {
+        let now = self.frame_time();
+        self.island.close_launcher(now);
+        self.island.close_activity_panel(now);
+        self.after_change();
     }
 }
 
@@ -1050,11 +1303,31 @@ impl OutputHandler for App {
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        self.exit = true;
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        if layer.wl_surface() == self.layer.wl_surface() {
+            self.exit = true;
+        } else if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
+            self.dismiss_menus();
+        }
     }
 
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
+        if layer.wl_surface() != self.layer.wl_surface() {
+            if let Some(dismiss) = self.dismiss.as_mut().filter(|d| d.layer.wl_surface() == layer.wl_surface()) {
+                let (w, h) = configure.new_size;
+                if w == 0 || h == 0 { return; }
+                let first = dismiss.size == (0, 0);
+                dismiss.size = (w, h);
+                dismiss.input_hole.set(None);
+                dismiss.viewport.set_destination(w as i32, h as i32);
+                if first {
+                    dismiss.buffer.attach_to(dismiss.layer.wl_surface()).expect("unused dismiss buffer");
+                    dismiss.layer.wl_surface().damage_buffer(0, 0, 1, 1);
+                }
+                self.update_dismiss_region();
+            }
+            return;
+        }
         let (w, h) = configure.new_size;
         if w != 0 {
             self.width = w;
@@ -1107,6 +1380,13 @@ impl PointerHandler for App {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         let mut changed = false;
         for event in events {
+            if self.dismiss.as_ref().is_some_and(|d| &event.surface == d.layer.wl_surface()) {
+                if matches!(event.kind, PointerEventKind::Press { .. }) {
+                    self.dismiss_menus();
+                    changed = true;
+                }
+                continue;
+            }
             if &event.surface != self.layer.wl_surface() {
                 continue;
             }
@@ -1114,10 +1394,20 @@ impl PointerHandler for App {
                 PointerEventKind::Enter { .. } => {
                     self.island.hovered = true;
                     self.pointer_at = event.position;
+                    self.island.set_timer_hover(event.position.0, event.position.1);
+                    self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false));
                     changed = true;
                 }
                 PointerEventKind::Leave { .. } => {
                     self.island.hovered = false;
+                    self.island.clear_timer_hover();
+                    self.island.clear_network_hover(self.clock.predict(false));
+                    self.island.set_quick_hover(-1.0, -1.0, self.clock.predict(false));
+                    self.island.set_eq_hover(-1.0, -1.0, self.clock.predict(false));
+                    self.island.set_editor_chip_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_editor_hover(None);
                     if !self.island.is_scrubbing() {
                         self.island.set_hovered_control(None);
@@ -1126,6 +1416,21 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_at = event.position;
+                    if self.island.set_timer_hover(event.position.0, event.position.1) {
+                        changed = true;
+                    }
+                    if self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
                     if self.hover_launcher_row() {
                         changed = true;
                     }
@@ -1164,14 +1469,42 @@ impl PointerHandler for App {
                     // the pointer
                     if self.island.launcher.is_some() {
                         self.pointer_at = event.position;
-                        self.hover_launcher_row();
-                        if button == BTN_LEFT {
+                        let over_row = self.hover_launcher_row();
+                        if button == BTN_LEFT && over_row {
                             if let Some(l) = self.island.launcher.as_ref() {
                                 l.launch();
                             }
                             self.island.close_launcher(now);
                             self.set_keyboard_focus(false);
                         }
+                        changed = true;
+                        continue;
+                    }
+                    if self.island.quick_menu_open() {
+                        if button == BTN_LEFT {
+                            if let Some(action) = self.island.quick_action_at(event.position.0, event.position.1) {
+                                self.activate_quick_action(action, now);
+                            }
+                        }
+                        changed = true;
+                        continue;
+                    }
+                    // The compact countdown keeps its own small hit target,
+                    // even when music or an editor can open from the rest
+                    // of the island.
+                    if button == BTN_LEFT && self.island.click_timer_menu(event.position.0, event.position.1, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if button == BTN_RIGHT && self.island.timer_menu_at(event.position.0, event.position.1, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if self.island.click_network_panel(event.position.0, event.position.1, button == BTN_LEFT, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if button == BTN_LEFT && self.island.click_timer_at(event.position.0, event.position.1, now) {
                         changed = true;
                         continue;
                     }
@@ -1187,8 +1520,8 @@ impl PointerHandler for App {
                     }
                     // inside the open player the buttons and the progress
                     // line take the click
-                    if let Some(control) = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
-                        if button == BTN_LEFT {
+                    if button == BTN_LEFT {
+                        if let Some(control) = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
                             if let Some((bus, track, command)) = self.island.press_control(control, now) {
                                 dbus::control(&bus, &track, command);
                             }
@@ -1196,24 +1529,38 @@ impl PointerHandler for App {
                             continue;
                         }
                     }
+                    if self.island.editor_panel_open(now) {
+                        changed = true;
+                        continue;
+                    }
                     // a click on a notification dismisses it
                     if self.island.dismiss_notice(now) {
                         changed = true;
                         continue;
                     }
-                    let cmd = match button {
-                        BTN_LEFT => Some(PlayerCommand::PlayPause),
-                        BTN_RIGHT => Some(PlayerCommand::Next),
-                        BTN_MIDDLE => Some(PlayerCommand::Previous),
-                        _ => None,
-                    };
-                    if let Some(cmd) = cmd {
-                        self.player_control(cmd);
+                    let music = self.island.music_area_at(event.position.0, event.position.1);
+                    let menu = self.island.accepts_quick_menu_click() && self.pointer_inside_island(event.position);
+                    match body_click(button, music, menu) {
+                        BodyClick::Menu => self.open_quick_menu(now),
+                        BodyClick::PlayPause => self.player_control(PlayerCommand::PlayPause),
+                        BodyClick::Next => self.player_control(PlayerCommand::Next),
+                        BodyClick::Previous => self.player_control(PlayerCommand::Previous),
+                        BodyClick::None => {}
                     }
+                    changed = true;
                 }
                 PointerEventKind::Axis { vertical, .. } => {
+                    changed = true;
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
                     let now = self.clock.predict(false);
+                    if self.island.scroll_network(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if self.island.scroll_output(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
+                        continue;
+                    }
+                    let music = self.island.music_area_at(event.position.0, event.position.1);
                     match self.island.launcher.as_mut() {
                         // inside the launcher the wheel scrolls the list
                         Some(l) => {
@@ -1223,8 +1570,8 @@ impl PointerHandler for App {
                             }
                         }
                         // on the line it skips tracks (as on the old touch target)
-                        None if v < 0.0 => self.player_control(PlayerCommand::Next),
-                        None if v > 0.0 => self.player_control(PlayerCommand::Previous),
+                        None if v < 0.0 && music => self.player_control(PlayerCommand::Next),
+                        None if v > 0.0 && music => self.player_control(PlayerCommand::Previous),
                         None => {}
                     }
                 }
@@ -1233,12 +1580,41 @@ impl PointerHandler for App {
         if changed {
             let now = self.frame_time();
             self.island.sync(now);
-            self.redraw();
+            self.after_change();
         }
     }
 }
 
 impl App {
+    fn pointer_inside_island(&self, position: (f64, f64)) -> bool {
+        self.last_frame.and_then(|frame| frame.bounds).is_some_and(|r| {
+            position.0 >= r.x && position.0 <= r.x + r.w
+                && position.1 >= r.y && position.1 <= r.y + r.h
+        })
+    }
+
+    fn open_quick_menu(&mut self, now: Time) {
+        if self.island.dodged {
+            // Close Waybar's details drawer before opening the island menu.
+            self.island.set_dodged(false, now);
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("pkill").args(["-RTMIN+9", "-x", "waybar"]).status();
+            });
+        }
+        self.island.open_quick_menu(now);
+    }
+
+    fn activate_quick_action(&mut self, action: crate::quick::Action, now: Time) {
+        self.island.close_quick_menu(now);
+        match action {
+            crate::quick::Action::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
+            crate::quick::Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
+            crate::quick::Action::Timer => { let _ = self.island.timer_command("menu", now); }
+            crate::quick::Action::Launcher => { self.island.toggle_launcher(now); }
+            crate::quick::Action::Close => {}
+        }
+    }
+
     /// Point the launcher's selection at the row under the pointer.
     fn hover_launcher_row(&mut self) -> bool {
         let now = self.clock.predict(false);
@@ -1330,3 +1706,41 @@ impl ProvidesRegistryState for App {
 }
 
 smithay_client_toolkit::delegate_dispatch2!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn music_buttons_are_scoped_to_the_music_area() {
+        assert_eq!(body_click(BTN_LEFT, false, true), BodyClick::Menu);
+        assert_eq!(body_click(BTN_RIGHT, false, true), BodyClick::None);
+        assert_eq!(body_click(BTN_MIDDLE, false, true), BodyClick::None);
+        assert_eq!(body_click(BTN_LEFT, true, true), BodyClick::PlayPause);
+        assert_eq!(body_click(BTN_RIGHT, true, true), BodyClick::Next);
+        assert_eq!(body_click(BTN_MIDDLE, true, true), BodyClick::Previous);
+        assert_eq!(body_click(BTN_LEFT, false, false), BodyClick::None);
+    }
+
+    #[test]
+    fn ordinary_clicks_do_not_interrupt_modal_panels_or_toggle_an_open_launcher() {
+        let mut island = Island::new(Config::default());
+        assert!(island.accepts_quick_menu_click());
+        island.timer_command("menu", 10.0).unwrap();
+        assert!(!island.accepts_quick_menu_click());
+        island.close_activity_panel(11.0);
+        assert!(island.accepts_quick_menu_click());
+        assert!(island.toggle_launcher(12.0));
+        assert!(!island.accepts_quick_menu_click());
+    }
+
+    #[test]
+    fn outside_click_region_keeps_animated_island_interactive() {
+        // Match the island's input rounding, translated from its centred
+        // 980px surface to the full 1504px logical output, not pixel scale.
+        let hole = dismiss_hole(Rect { x: 249.4, y: 0.0, w: 480.2, h: 377.1 }, 1504, 980);
+        assert_eq!(hole, (511, 0, 482, 379));
+        let compact = dismiss_hole(Rect { x: 390.0, y: 0.0, w: 200.0, h: 32.0 }, 1504, 980);
+        assert_eq!(compact, (652, 0, 201, 33));
+    }
+}

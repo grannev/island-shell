@@ -9,6 +9,91 @@ and the walker launcher; see `CLAUDE.md` for the brief and the plan.
 
 ## Status
 
+Live activities: volume changes from PipeWire/PulseAudio and backlight
+changes replace the desktop OSD with a native island slider. Plugging in
+power shows the battery percentage and bolt; crossing 20, 10 or 5 percent
+while discharging produces a red low-battery pill. Wi-Fi network changes
+and newly connected Bluetooth devices (including their reported battery)
+appear briefly as well. The readers run outside the Wayland event loop and
+only push state changes into it, so drawing and animation remain
+single-threaded.
+
+Screenshots can fly into the island as a thumbnail. Use
+`island-screenshot [output.png] [grim options...]`, installed by
+`scripts/install.sh`, in the sway binding instead of calling `grim`
+directly. Existing screenshot scripts can keep their capture logic and run
+`island-shell screenshot "$file"` after `grim` succeeds.
+
+The watchers use the desktop's existing tools: `pactl subscribe` plus
+`wpctl` for audio, the kernel backlight and power-supply interfaces,
+`nmcli monitor`, and BlueZ through `dbus-monitor` / `bluetoothctl`. Missing
+optional tools only disable that source. The commands below can be used to
+preview the activities without changing hardware state:
+
+    island-shell volume 0.65
+    island-shell brightness 0.8
+    island-shell battery 72 charging
+    island-shell battery 10 low
+    island-shell bluetooth 84 Headphones
+    island-shell wifi My network
+
+Click the ordinary compact island to open a four-button menu for Wi-Fi, Bluetooth,
+Timer and Launcher. Click a button or select it with the arrow keys and Enter;
+Escape, × or a click outside closes the menu. `island-shell quick` opens the
+same menu from a script. The Waybar's ⋯ drawer now contains only disk, CPU
+and memory information, with no separate network or timer buttons.
+`mod+d` still opens the launcher directly.
+
+The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
+Pomodoro shortcut); click a preset to start. While running, a compact ring
+and remaining time sit beside the clock. Click that indicator to pause or
+resume, or right-click to reopen the controls. Escape or × closes the panel
+without stopping the countdown. Completion expands into a short “Time is up”
+activity. The timer is kept in memory and resets when the service restarts.
+
+`island-shell wifi` / `island-shell bluetooth` open the same
+native sheets; ×, Escape or a click outside closes them. The closing click is
+consumed, not forwarded to an application underneath. This also works for
+the timer and launcher; `island-shell dismiss` provides the same action.
+The transparent input surface exists only while a modal menu is open.
+Waybar module highlights have a 3 px vertical inset and ease in/out over 180 ms.
+
+Wi-Fi has All networks / Saved tabs, a radio switch, search, connection and
+disconnection. Click a protected network to enter its password; Enter submits.
+Saved profiles connect directly, and a failed attempt can retry with a new
+password. WPA/WPA2/WPA3 personal and open networks are supported; enterprise
+networks requiring an identity or certificate need an existing NetworkManager
+profile. Secrets go directly to NetworkManager over D-Bus, never in argv or
+temporary files.
+
+Bluetooth has My devices / Discover tabs. Click a paired device to connect
+or disconnect; discovery finds new devices and offers pairing. PIN entry,
+passkey display and confirmation are handled in the island by an app-scoped
+[BlueZ agent](https://bluez.readthedocs.io/en/latest/agent-api/). Discovery runs
+for 30 seconds and can be stopped; closing the panel releases its scan session
+and cancels pending pairing. Battery levels appear when supported.
+Friendly aliases and remote names are preferred over address placeholders;
+named devices sort first. Names update during discovery. Devices that do not
+advertise a name are explicitly labelled as unnamed with their address below,
+not assigned a guessed product name.
+
+Both sheets show operation progress and errors, scroll through the complete
+list, and refresh state while open. Worker replies are scoped to a panel and
+request so late results cannot reopen a closed sheet. Buttons, tabs, list
+positions, scroll and panel size animate; interactive sheets keep focus and
+queue transient OSDs until they close. Timer hover fades both in and out, and
+Pause / Resume / Cancel leave the controls open.
+
+`island-shell timer` opens the same panel. CLI controls also remain:
+`island-shell timer 25m` (or `1h30m`), `timer pause`, `timer resume`,
+`timer toggle`, `timer status`, `timer cancel`, and `timer pomodoro`.
+
+Volume and brightness key repeats extend the OSD's hold without restarting
+its entrance. The slider follows on a spring while the percentage shows the
+latest value. The volume symbol uses SF Pro's SF Symbols when available,
+with a vector fallback; brightness uses a rounded vector sun. Backlight
+changes are sampled every 80 ms independently of the slower battery reader.
+
 Neovim: with the companion plugin (`nvim/island.lua`) the island is the
 editor's status line. The mode rides beside the clock as a coloured chip
 with the unsaved dot, the diagnostics counts, the search count and a
@@ -35,11 +120,57 @@ Typing re-ranks the list and the rows *glide* to their new places on
 springs while the selection follows; rows entering and leaving fade.
 The list holds every match and scrolls — the wheel, or the selection
 walking past the edge — with no scrollbar: the rows simply fade into the
-top and bottom of the viewport. Keyboard: text, Backspace, Ctrl+U,
-Up/Down/Tab, Enter to launch, Escape to fold; the pointer picks rows and
+top and bottom of the viewport.
+
+A left click on the ordinary compact body opens the four-button menu immediately.
+Left, right and middle clicks over the compact equaliser or the open music panel
+pause/resume, skip forward and skip back respectively. The wheel changes tracks
+only over that music area. Timer controls, seek dragging, authentication,
+notifications and other modal sheets keep their own interactions.
+The music panel opens only from the equaliser on the right of the compact
+island; Neovim's details open only from its chip on the left. Once a panel
+opens, moving the pointer across it keeps it open until the pointer leaves.
+Hovering the clock or another ordinary part gently widens the compact island,
+including when music or Neovim is active; the transition into either detailed
+panel continues from the current animated size.
+
+Keyboard: text, Backspace, Ctrl+U, Up/Down/Tab, Enter to launch, Escape to fold; the pointer picks rows and
 the wheel scrolls. The launcher takes the keyboard
 (layer-shell exclusive) only while it is open, gives way to Touch ID, and
 notifications wait behind it.
+
+The same search field also finds files and folders by name in your home
+directory, starting at two characters. For example, type `report`, `README`,
+or `file:отчёт` (`файл:` also works) to show only filesystem results. Paths
+inside home, such as `~/Documents/report`, can narrow the search. Results show
+their parent folder; Enter or a click opens the selected item without passing
+filenames to a shell. Folders open in Alacritty with that working directory;
+text files open in Neovim inside Alacritty, with their parent as the working
+directory. PDFs open in Evince; Word/OpenDocument/RTF documents, spreadsheets
+and presentations open in LibreOffice. Other formats use the system association
+(`xdg-open`). Extensions are case-insensitive; text is detected with `file`,
+including extensionless files. Detection and startup run off the UI thread.
+If a preferred opener is not installed, the system association is used instead.
+Install LibreOffice if needed with `sudo sh scripts/01-install-office-opener.sh`.
+This is filename/path search, not content search; no persistent filename
+database is written. Only opening a selected file may probe its contents.
+
+Apps and file openers run in independent systemd user scopes (`launch.rs`),
+so restarting or crashing the island does not close terminals, editors or
+document windows. Merely using `setsid` would not escape the service's cgroup.
+The scopes inherit the session environment and preserve literal filename
+arguments. If scope creation fails, the error is logged; there is no unsafe
+direct-spawn fallback. The service retains its default `KillMode=control-group`
+so its own background readers are still cleaned up correctly.
+
+File search requires `fdfind` (Debian package `fd-find`) or `fd`. It runs on a
+worker after a 180 ms debounce, uses at most two search threads and returns up
+to 80 results with a three-second search limit. A new query or closing the
+launcher cancels the old process; late replies are discarded. Hidden files,
+ignore-file exclusions, `node_modules`, `target` and `__pycache__` are skipped;
+symlinked directories are not traversed. Partial results are labelled so the
+query can be narrowed. The best five app matches precede file results, with
+remaining app matches still accessible below them.
 
 Step 3: notifications. The island watches the `Notify` calls going to
 `org.freedesktop.Notifications` as a D-Bus monitor — dunst keeps the
@@ -60,13 +191,12 @@ while the island is hidden.
 Step 2: now playing (MPRIS over D-Bus, zbus). A track that starts
 announces itself with a "now playing" toast — album art, the app, the
 title, the bars — which then collapses to four cava-fed equaliser bars
-beating beside the clock; resting the pointer on the island opens it into
+beating beside the clock; hovering those bars opens it into
 a player with the art, the title and artist, a live equaliser, a progress
 line you can click or drag to scrub — it swells under the pointer and
 again in the hand, on springs — and vector transport controls that light
 up as the pointer reaches them. Silent playback
-(paused / muted) folds the bars away after 15 s; click / right / middle /
-scroll on the collapsed island still are play-pause / next / previous; Touch ID (fprintd on the system bus) — the box morphs into the
+(paused / muted) folds the bars away after 15 s. Touch ID (fprintd on the system bus) — the box morphs into the
 92 px pill with a vector fingerprint whose ridges breathe in a ripple; on
 a result the ridges converge into a ring that fills green or red and the
 checkmark / cross draws itself on it (checkmark.circle.fill /
@@ -97,6 +227,33 @@ Motion quality:
   pill and the panel) and a velocity-dependent stretch (`liquid`);
 - damage and opaque regions are reported per frame.
 
+## Performance
+
+Desktop entries are scanned on a worker and retained between launcher
+openings (refreshed on opening, at most once per five seconds). Theme lookup,
+SVG rendering, icon decoding, cover art and screenshot thumbnails also run on
+bounded background queues. Only pixel bytes cross threads; Cairo surfaces
+remain thread-local. Visible launcher icons are prefetched, and their scaled
+cache survives closing the panel. Stale cover-art replies cannot replace a
+new track's image. Failed/missing resources use the existing placeholders.
+
+Text shaping uses a bounded 512-entry LRU cache with device-pixel width keys,
+not floating-point animation values or whole-cache resets. Audio setup and
+mute checks no longer wait for subprocesses on the Wayland thread. A steady
+countdown uses timed updates (30 Hz in its final minute) rather than both a
+60 Hz frame callback and a second timer. Unchanged outside-click regions are
+not recommitted; fully opaque connection sheets avoid intermediate groups.
+
+Reproduce the read-only, offscreen 1.5× launcher/OSD benchmark with:
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --release --locked --bin island-shell animation_benchmark -- --ignored --nocapture
+```
+
+It reports constructor time and median/p95/max paint time, not end-to-end
+compositor latency. Live `status` includes launcher result count and frame CPU
+timings; `ISLAND_DEBUG=1` additionally logs presentation prediction errors.
+
 ## Build and install
 
     scripts/install.sh        # cargo build --release → ~/.local/bin/island-shell
@@ -117,6 +274,8 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell launcher                       # mod+d: unfold / fold the panel
     island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
+    island-shell timer 25m | timer pause        # compact countdown
+    island-shell screenshot <file.png>          # animate a finished grim image
     island-shell status | quit
 
 ### Configuration

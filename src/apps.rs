@@ -4,10 +4,49 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Desktop-entry inventory survives closing the launcher. Refreshes never
+/// block input and newly installed apps appear on the next refresh.
+pub struct Catalog {
+    worker: crate::background::Worker<(), Vec<App>>,
+    pub apps: Arc<Vec<App>>,
+    requested: Instant,
+    pending: bool,
+}
+
+impl Catalog {
+    pub fn new() -> Self {
+        let worker = crate::background::Worker::new("desktop-entries", |_| scan());
+        worker.request(());
+        Self { worker, apps: Arc::new(Vec::new()), requested: Instant::now(), pending: true }
+    }
+    pub fn set_waker(&self, tx: smithay_client_toolkit::reexports::calloop::channel::Sender<()>) {
+        self.worker.set_waker(tx);
+    }
+    pub fn refresh(&mut self) {
+        if !self.pending && self.requested.elapsed() >= Duration::from_secs(5) {
+            self.pending = self.worker.request(());
+            self.requested = Instant::now();
+        }
+    }
+    pub fn drain(&mut self) -> bool {
+        let mut changed = false;
+        for (_, apps) in self.worker.drain() {
+            self.pending = false;
+            if *self.apps != apps {
+                self.apps = Arc::new(apps);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
 
 /// One launchable application.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App {
     pub name: String,
     /// GenericName or Comment, shown under the name
@@ -235,20 +274,23 @@ pub fn launch(app: &App) {
     } else {
         exec
     };
-    let spawned = Command::new("sh")
-        .arg("-c")
-        .arg(format!("exec setsid -f {command}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(mut child) => {
-            let _ = child.wait();
-            Usage::load().bump(&app.id);
+    let id = app.id.clone();
+    let name = app.name.clone();
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("exec {command}"));
+        match crate::launch::spawn(&cmd) {
+            Ok(mut child) => {
+                Usage::load().bump(&id);
+                if let Ok(status) = child.wait() {
+                    if !status.success() {
+                        eprintln!("island-shell: launch {name}: {status}");
+                    }
+                }
+            }
+            Err(e) => eprintln!("island-shell: launch {name}: {e}"),
         }
-        Err(e) => eprintln!("island-shell: launch {}: {e}", app.name),
-    }
+    });
 }
 
 /// `%f`, `%U`, `%i`, `%c`… have no meaning without a file to open.
