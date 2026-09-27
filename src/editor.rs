@@ -7,7 +7,7 @@ use std::f64::consts::PI;
 
 use cairo::Context;
 
-use crate::anim::Time;
+use crate::anim::{Time, min_jerk};
 use crate::island::{Font, Renderer, smoothstep};
 use crate::nvim::{Diagnostics, Editor};
 
@@ -29,6 +29,8 @@ const BUTTON_GAP: f64 = 96.0;
 const CHIP_H: f64 = 19.0;
 const CHIP_PAD: f64 = 8.0;
 const CHIP_GAP: f64 = 6.0;
+/// How long a write lights the chip up, seconds.
+pub const SAVE_FLASH: f64 = 0.8;
 
 pub const ERROR_COLOR: (f64, f64, f64) = (1.0, 0.23, 0.19);
 pub const WARN_COLOR: (f64, f64, f64) = (1.0, 0.70, 0.25);
@@ -95,8 +97,11 @@ pub fn chip_width(cr: &Context, renderer: &Renderer, editor: &Editor) -> f64 {
     w
 }
 
-/// Draw the chip with its left edge at `x`, centred on `cy`.
-pub fn draw_chip(cr: &Context, renderer: &Renderer, editor: &Editor, x: f64, cy: f64, w: f64, alpha: f64, now: Time) {
+/// Draw the chip with its left edge at `x`, centred on `cy`. `saved` is
+/// how long ago the editor wrote its file, while that is still worth a
+/// flash (under `SAVE_FLASH`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_chip(cr: &Context, renderer: &Renderer, editor: &Editor, x: f64, cy: f64, w: f64, alpha: f64, saved: Option<f64>, now: Time) {
     if alpha <= 0.004 || w <= 1.0 {
         return;
     }
@@ -106,6 +111,9 @@ pub fn draw_chip(cr: &Context, renderer: &Renderer, editor: &Editor, x: f64, cy:
     capsule(cr, x, y, w, CHIP_H, CHIP_H / 2.0);
     cr.set_source_rgba(r, g, b, 0.20 * alpha);
     let _ = cr.fill();
+    if let Some(t) = saved {
+        save_flash(cr, x, y, w, t, alpha);
+    }
 
     let mut cx = x + CHIP_PAD;
     // recording a macro: the red dot breathes, like a recording light
@@ -166,6 +174,34 @@ pub fn draw_chip(cr: &Context, renderer: &Renderer, editor: &Editor, x: f64, cy:
             }
         }
     }
+}
+
+/// The write's flash: the capsule fills green for an instant and a soft
+/// band of light sweeps across it, left to right, under the text. Fast
+/// in, slow out — the whole thing is over before it can get in the way.
+fn save_flash(cr: &Context, x: f64, y: f64, w: f64, t: f64, alpha: f64) {
+    let k = (t / SAVE_FLASH).clamp(0.0, 1.0);
+    let glow = smoothstep((t / 0.08).min(1.0)) * (1.0 - smoothstep(k));
+    if glow <= 0.004 {
+        return;
+    }
+    let (gr, gg, gb) = GIT_ADD;
+    cr.save().unwrap();
+    capsule(cr, x, y, w, CHIP_H, CHIP_H / 2.0);
+    cr.clip();
+    cr.set_source_rgba(gr, gg, gb, 0.28 * glow * alpha);
+    let _ = cr.paint();
+    // the band starts off the left edge and leaves through the right
+    let band = 26.0;
+    let sx = x - band + (w + 2.0 * band) * min_jerk(k);
+    let grad = cairo::LinearGradient::new(sx - band, 0.0, sx + band, 0.0);
+    grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0);
+    grad.add_color_stop_rgba(0.5, 1.0, 1.0, 1.0, 0.35 * glow * alpha);
+    grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
+    let _ = cr.set_source(&grad);
+    cr.rectangle(sx - band, y, 2.0 * band, CHIP_H);
+    let _ = cr.fill();
+    cr.restore().unwrap();
 }
 
 /// Where the buttons sit, relative to the panel's top-left corner.

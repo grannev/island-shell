@@ -163,11 +163,13 @@ pub struct HideReasons {
     pub user: bool,
     /// a fullscreen window has the focus (sway IPC)
     pub fullscreen: bool,
+    /// Explicit show while a fullscreen window remains focused.
+    pub fullscreen_override: bool,
 }
 
 impl HideReasons {
     fn any(self) -> bool {
-        self.user || self.fullscreen
+        self.user || (self.fullscreen && !self.fullscreen_override)
     }
 }
 
@@ -368,6 +370,8 @@ pub struct Island {
     /// shows it beside the clock, and the panel it opens into
     nvim: Option<Editor>,
     nvim_seen: Time,
+    /// when the editor last wrote a file: the chip flashes for a moment
+    nvim_saved: Option<Time>,
     chip: Quintic,
     chip_w: f64,
     editor_panel: Quintic,
@@ -510,6 +514,7 @@ impl Island {
             file_search: std::rc::Rc::new(crate::files::Search::new()),
             nvim: None,
             nvim_seen: 0.0,
+            nvim_saved: None,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
             editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
@@ -565,6 +570,8 @@ impl Island {
             || self.launcher.as_ref().is_some_and(|l| l.is_animating(now))
             // a macro being recorded keeps its dot breathing
             || self.nvim.as_ref().is_some_and(|e| !e.recording.is_empty()) && self.chip.state(now).x > 0.0
+            // a write flashes the chip
+            || self.nvim_saved.is_some_and(|t| now - t < editor::SAVE_FLASH) && self.chip.state(now).x > 0.0
             // the pill's content animates the whole time it is up
             || self.pill_open() && self.pill.state(now).x > 0.0
                 && !self.activity.as_ref().is_some_and(|a| activity::takes_keyboard(&a.event) && now - a.since >= 0.5)
@@ -625,17 +632,9 @@ impl Island {
 
     /// Re-aim the movers after a state change.
     pub fn sync(&mut self, now: Time) {
-        if self.hidden.any() {
-            // out of sight: a notification goes with it instead of waiting
-            // to reappear when the island comes back
-            self.notice = None;
-            self.notice_prev = None;
-            self.notice_queued = None;
-            self.activity = None;
-            self.activity_retiring = None;
-            self.activity_queued = None;
-        }
-        self.hide.set(if self.hidden.any() { 1.0 } else { 0.0 }, now);
+        // System events and panels rise on their own even when the compact
+        // island is parked above the edge. Once they finish, it stays hidden.
+        self.hide.set(if self.is_hidden() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
         // The compact island always breathes on ordinary hover, including
         // while music and an editor chip are present. Their own hit targets
@@ -664,9 +663,9 @@ impl Island {
             spring.set(if lit { 1.0 } else { 0.0 }, now);
         }
         // the editor's chip rides beside the clock while Neovim is in front
-        let chip = self.editor_live(now) && !self.dodged && !self.pill_open() && self.launcher.is_none();
+        let chip = self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
-        let timer = self.timer.is_some() && !self.dodged && self.launcher.is_none();
+        let timer = self.timer.is_some() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         for (i, (command, ..)) in activity::TIMER_BUTTONS.iter().enumerate() {
             let enabled = !matches!(*command, "toggle" | "cancel") || self.timer.is_some();
             self.timer_button_hover[i].set(if enabled && self.timer_menu_hover == Some(command) { 1.0 } else { 0.0 }, now);
@@ -848,7 +847,40 @@ impl Island {
     }
 
     pub fn is_hidden(&self) -> bool {
-        self.hidden.any()
+        self.hidden.any() && self.auth.is_none() && self.activity.is_none()
+            && self.notice.is_none() && self.launcher.is_none()
+    }
+
+    pub fn toggle_visibility(&mut self, now: Time) {
+        if self.hidden.any() {
+            self.hidden.user = false;
+            self.hidden.fullscreen_override = self.hidden.fullscreen;
+        } else if self.hidden.fullscreen {
+            self.hidden.fullscreen_override = false;
+        } else {
+            self.hidden.user = true;
+        }
+        self.sync(now);
+    }
+
+    pub fn show(&mut self, now: Time) {
+        self.hidden.user = false;
+        self.hidden.fullscreen_override = self.hidden.fullscreen;
+        self.sync(now);
+    }
+
+    pub fn hide(&mut self, now: Time) {
+        self.hidden.user = true;
+        self.hidden.fullscreen_override = false;
+        self.sync(now);
+    }
+
+    pub fn set_fullscreen(&mut self, fullscreen: bool, now: Time) {
+        if self.hidden.fullscreen != fullscreen {
+            self.hidden.fullscreen = fullscreen;
+            self.hidden.fullscreen_override = false;
+            self.sync(now);
+        }
     }
 
     pub fn song(&self) -> Option<&Song> {
@@ -970,7 +1002,7 @@ impl Island {
     }
 
     /// mod+d: the island unfolds into the launcher, or folds back. A
-    /// hidden island shows itself first and a notification gives way.
+    /// hidden island shows the panel temporarily; a notification gives way.
     pub fn toggle_launcher(&mut self, now: Time) -> bool {
         self.quick_open = false;
         self.quick_hover = None;
@@ -1051,6 +1083,7 @@ impl Island {
             }
             if previous.server != editor.server || previous.file != editor.file {
                 self.editor_diagnostics = false;
+                self.nvim_saved = None;
             }
         }
         let before = self.nvim.as_ref().map(|e| e.chip_state());
@@ -1125,6 +1158,7 @@ impl Island {
             return;
         }
         self.nvim = None;
+        self.nvim_saved = None;
         self.output_open = false;
         self.editor_output = None;
         self.editor_hover = None;
@@ -1137,12 +1171,19 @@ impl Island {
         self.nvim.as_ref().is_some_and(|e| e.focused) && !nvim::stale(self.nvim_seen, now)
     }
 
-    /// A notification arrived. It is skipped while the island is hidden
-    /// and waits behind an active Touch ID.
-    pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
-        if self.hidden.any() {
+    /// The editor wrote its buffer: no pill, the chip beside the clock
+    /// flashes green for a moment instead.
+    pub fn editor_saved(&mut self, server: &str, now: Time) {
+        if !self.nvim.as_ref().is_some_and(|e| e.server == server) || !self.editor_live(now) {
             return;
         }
+        self.nvim_saved = Some(now);
+        self.sync(now);
+    }
+
+    /// A notification rises independently of the compact island and waits
+    /// behind an active Touch ID.
+    pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
         if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() {
@@ -1199,9 +1240,6 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
-        if self.hidden.any() {
-            return;
-        }
         if self.auth.is_some() || self.launcher.is_some() {
             self.activity_queued = Some(event);
             return;
@@ -1401,7 +1439,7 @@ impl Island {
 
     pub fn open_connections(&mut self, kind: crate::network::Kind,
         tx: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::network::Message>, now: Time) {
-        if self.auth.is_some() || self.hidden.fullscreen { return; }
+        if self.auth.is_some() { return; }
         if self.connections_open() && self.network_panel.as_ref().is_some_and(|p| p.kind == kind) {
             self.close_activity_panel(now);
             return;
@@ -1452,9 +1490,6 @@ impl Island {
 
     /// fprintd started a verification.
     pub fn auth_started(&mut self, now: Time) {
-        if self.hidden.any() {
-            return; // never shows while hidden
-        }
         // a password prompt outranks the launcher
         self.launcher = None;
         self.quick_open = false;
@@ -1676,7 +1711,9 @@ impl Island {
         // the line's content rides at the top of the box and dissolves
         // while the pill opens (first third), the pill's content climbs in
         // from below and fades in over the rest
-        let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45)) * (1.0 - smoothstep(ed / 0.45));
+        let line_alpha = (1.0 - smoothstep(q / PILL_SWAP)) * (1.0 - smoothstep(pl / 0.45))
+            * (1.0 - smoothstep(ed / 0.45))
+            * if self.hidden.any() && self.launcher.is_none() { 0.0 } else { 1.0 };
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
             let content_w = chip_len + clock_w + timer_len + bars_len;
@@ -1689,7 +1726,8 @@ impl Island {
                     cr.save().unwrap();
                     cr.rectangle(content_x, dy, chip_len, line_h);
                     cr.clip();
-                    editor::draw_chip(cr, renderer, e, content_x, dy + line_h / 2.0, self.chip_w, line_alpha * chip_k, now);
+                    let saved = self.nvim_saved.map(|t| now - t).filter(|t| *t < editor::SAVE_FLASH);
+                    editor::draw_chip(cr, renderer, e, content_x, dy + line_h / 2.0, self.chip_w, line_alpha * chip_k, saved, now);
                     cr.restore().unwrap();
                 }
             }
@@ -2751,6 +2789,53 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_events_rise_without_restoring_the_compact_island() {
+        let mut island = Island::new(Config::default());
+        island.set_fullscreen(true, 10.0);
+        assert!(island.is_hidden());
+        assert_eq!(island.hide.target(), 1.0);
+
+        island.notify(crate::notify::fabricate("System", "Message", "Body"), 11.0);
+        assert!(island.notice.is_some());
+        assert!(!island.is_hidden());
+        assert_eq!(island.hide.target(), 0.0);
+        island.advance(11.0 + NOTICE_HOLD + 0.01);
+        assert!(island.notice.is_none());
+        assert!(island.is_hidden());
+        assert_eq!(island.hide.target(), 1.0);
+
+        island.live_activity(activity::Event::TimerDone, 20.0);
+        assert!(island.activity.is_some());
+        assert_eq!(island.hide.target(), 0.0);
+        island.advance(20.0 + activity::Event::TimerDone.hold() + 0.01);
+        assert!(island.activity.is_none());
+        assert_eq!(island.hide.target(), 1.0);
+
+        assert!(island.toggle_launcher(30.0));
+        assert_eq!(island.hide.target(), 0.0);
+        island.close_launcher(31.0);
+        assert!(island.is_hidden());
+        assert_eq!(island.hide.target(), 1.0);
+    }
+
+    #[test]
+    fn manual_show_temporarily_overrides_fullscreen_hide() {
+        let mut island = Island::new(Config::default());
+        island.set_fullscreen(true, 10.0);
+        island.toggle_visibility(11.0);
+        assert!(!island.is_hidden());
+        assert_eq!(island.hide.target(), 0.0);
+        island.toggle_visibility(12.0);
+        assert!(island.is_hidden());
+        island.show(13.0);
+        assert!(!island.is_hidden());
+        island.set_fullscreen(false, 14.0);
+        assert!(!island.hidden.fullscreen_override);
+        island.set_fullscreen(true, 15.0);
+        assert!(island.is_hidden());
+    }
+
+    #[test]
     fn timer_completion_waits_for_touch_id_and_invalid_durations_are_rejected() {
         let mut island = Island::new(Config::default());
         for duration in ["inf", "NaN", "-1", "1e100"] {
@@ -2880,6 +2965,20 @@ mod command_tests {
     }
     fn command() -> Option<nvim::Cmdline> {
         Some(nvim::Cmdline { prefix: ":".into(), text: "write".into(), pos: 5 })
+    }
+    #[test]
+    fn save_flash_follows_only_the_visible_editor_and_current_file() {
+        let mut island = Island::new(Config::default());
+        island.set_editor(editor("one", true), 10.0);
+        island.editor_saved("two", 10.1);
+        assert_eq!(island.nvim_saved, None);
+        island.editor_saved("one", 10.2);
+        assert_eq!(island.nvim_saved, Some(10.2));
+        island.set_editor(Editor { file: "other.c".into(), ..editor("one", true) }, 10.3);
+        assert_eq!(island.nvim_saved, None);
+        island.set_editor(editor("one", false), 10.4);
+        island.editor_saved("one", 10.5);
+        assert_eq!(island.nvim_saved, None);
     }
     #[test]
     fn command_is_scoped_to_focused_instance_and_expires() {

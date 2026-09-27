@@ -66,14 +66,15 @@ Semibold 16 px white, padding 16, content-sized width; clock text
   (420 px min, 92 tall) with an app icon + name line and summary — body
   line, ellipsised; a new one while open rolls the old one out through the
   top and the new one in from below (24 frames); 3.5 s timer restarted per
-  notification; waits behind an active Touch ID; skipped while hidden.
+  notification; waits behind an active Touch ID; appears independently while
+  the compact island is hidden, including over fullscreen windows.
   Icons: Telegram (blue paper plane), notify-send → gear "System", Firefox,
   Discord, mail, generic bell; critical = red.
 - Launcher (mod+d): the island grows into a 660x512 panel (r=32, clock
   stays at the top, 24 min-jerk steps ~150 ms) with a search field and an
   app list with icons inside (currently walker, transparent, service mode,
   reveal 340 ms); Escape / launch / mod+d closes and the panel folds. A
-  hidden island is shown and an open drawer closed first.
+  hidden island shows the panel temporarily and an open drawer closes first.
 - Lock screen (hyprlock) is separate and stays as is.
 
 The island's four-shortcut menu (Wi-Fi, Bluetooth, Timer, Launcher) opens from

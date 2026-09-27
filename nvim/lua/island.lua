@@ -14,8 +14,12 @@ local uv = vim.uv or vim.loop
 local config = {
   -- the island is the status line, so Neovim does not need one
   statusline = false,
-  -- toasts: file saved, LSP errors, LSP / task progress, git branch
-  toasts = { saved = true, diagnostics = true, progress = true, git = true },
+  -- what the island shows on its own: a write is a flash of the chip and
+  -- nothing else. Pills for LSP progress and git checkouts are available
+  -- but off — a message belongs in Neovim's command line, where every
+  -- other message is. Errors are never announced: the chip's counters
+  -- already say how many there are.
+  toasts = { saved = true, progress = false, git = false },
   -- how often state may be pushed, milliseconds
   throttle = 60,
   -- an LSP job shorter than this never gets a pill (pyright reports one
@@ -33,8 +37,6 @@ local state = {
   timer = nil,
   last_branch = nil,
   progress = {},
-  error_pending = false,
-  last_error = nil,
   diagnostic_items = {},
 }
 
@@ -243,72 +245,13 @@ function M.toast(kind, title, body, progress)
   send({ event = "toast", kind = kind, title = title or "", body = body or "", progress = progress })
 end
 
-local function human_size(bytes)
-  if bytes < 1024 then
-    return string.format("%d B", bytes)
-  elseif bytes < 1024 * 1024 then
-    return string.format("%.1f kB", bytes / 1024)
-  end
-  return string.format("%.1f MB", bytes / 1024 / 1024)
-end
-
+--- A write: the island flashes the chip beside the clock, nothing more,
+--- so all it needs to know is that it happened.
 local function on_write()
   if not config.toasts.saved then
     return
   end
-  local name = vim.api.nvim_buf_get_name(0)
-  local size = vim.fn.getfsize(name)
-  local added, removed = select(2, git_info()), select(3, git_info())
-  local parts = { string.format("%d lines", vim.fn.line("$")) }
-  if size > 0 then
-    table.insert(parts, human_size(size))
-  end
-  if added + removed > 0 then
-    table.insert(parts, string.format("+%d −%d", added, removed))
-  end
-  M.toast("saved", vim.fn.fnamemodify(name, ":t"), table.concat(parts, "  ·  "))
-end
-
-local function first_error()
-  local list = vim.diagnostic.get(0, { severity = vim.diagnostic.severity.ERROR })
-  if #list == 0 then
-    return nil
-  end
-  local d = list[1]
-  local message = vim.split(d.message or "", "\n")[1]
-  return string.format("%d:%d", (d.lnum or 0) + 1, (d.col or 0) + 1), message
-end
-
---- The first error, as a pill — but only in normal mode: while you type,
---- the server flags every half-written line, and a pill for each would be
---- noise. Insert-mode changes are held until you come back to normal, and
---- the same error is never announced twice.
-local function on_diagnostics()
-  if not config.toasts.diagnostics then
-    return
-  end
-  local mode = vim.api.nvim_get_mode().mode
-  if mode:sub(1, 1) ~= "n" then
-    state.error_pending = true
-    return
-  end
-  state.error_pending = false
-  local counts = diagnostics()
-  if counts.errors == 0 then
-    state.last_error = nil
-    return
-  end
-  local where, message = first_error()
-  if not where then
-    return
-  end
-  local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
-  local signature = name .. "\0" .. where .. "\0" .. message
-  if signature == state.last_error then
-    return
-  end
-  state.last_error = signature
-  M.toast("error", string.format("%s  %s", name, where), message)
+  M.toast("saved", vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t"))
 end
 
 --- Run a shell command and report it in the island: a ring while it runs,
@@ -393,23 +336,7 @@ function M.setup(opts)
   on("VimLeavePre", function()
     send({ event = "gone" })
   end)
-  on("BufWritePost", function()
-    on_write()
-    vim.defer_fn(on_diagnostics, 400)
-  end)
-  on("DiagnosticChanged", function()
-    vim.defer_fn(on_diagnostics, 50)
-  end)
-  -- back in normal mode: say what the typing left behind
-  vim.api.nvim_create_autocmd("ModeChanged", {
-    group = group,
-    pattern = "*:n*",
-    callback = function()
-      if state.error_pending then
-        vim.defer_fn(on_diagnostics, 150)
-      end
-    end,
-  })
+  on("BufWritePost", on_write)
 
   -- gitsigns tells us the branch through a buffer variable; watch for it
   -- changing to announce a checkout
@@ -480,21 +407,6 @@ function M.setup(opts)
         M.toast("progress", name, title, percentage)
       end
     end)
-  end
-
-  -- messages the editor would print in the command line show up in the
-  -- island instead
-  local notify = vim.notify
-  vim.notify = function(message, level, extra)
-    local text = type(message) == "string" and vim.split(message, "\n")[1] or tostring(message)
-    local kind = "info"
-    if level == vim.log.levels.ERROR then
-      kind = "error"
-    elseif level == vim.log.levels.WARN then
-      kind = "warn"
-    end
-    M.toast(kind, (extra and extra.title) or "Neovim", text)
-    return notify(message, level, extra)
   end
 
   vim.api.nvim_create_user_command("IslandTask", function(args)

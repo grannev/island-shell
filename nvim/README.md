@@ -1,9 +1,10 @@
 # island.nvim
 
 The island doubles as Neovim's status line: the mode, the file, the
-position, git and the diagnostics live at the top of the screen, saving and
-LSP progress arrive as pills, and resting the pointer on the island opens a
-panel with the buffer list and Save / Format / Close.
+position, git and the diagnostics live at the top of the screen, a write
+flashes the chip, and hovering the chip opens a panel with
+the buffer list and Save / Format / Close. Messages stay in Neovim's own
+command line.
 
 ## Install
 
@@ -42,10 +43,12 @@ and percentage, encoding and indent, diagnostics counts, git branch and
 diff, the register a macro is recording into, the search count and the
 buffer list — at most every 60 ms, and only over the island's own socket.
 
-Toasts — `saved` on write (lines, size, +n −m), `error` for the first LSP
-error (held while you type, announced when you return to normal mode, and
-never twice for the same error), `progress` for LSP jobs and `:IslandTask`, `git` when the branch
-changes. `vim.notify` goes to the island too.
+Events — `saved` on write (the island answers with a green flash of the
+chip beside the clock) and, for `:IslandTask`, a progress
+pill with the outcome. Pills for LSP progress and git checkouts exist but
+are off by default, and `vim.notify` is left alone: messages belong in
+Neovim's command line. LSP errors are never announced: the chip's
+counters already say how many there are, and the panel lists them.
 
 ## Commands
 
@@ -57,7 +60,7 @@ changes. `vim.notify` goes to the island too.
 ```lua
 require("island").setup({
   statusline = false,                 -- true keeps laststatus alone
-  toasts = { saved = true, diagnostics = true, progress = true, git = true },
+  toasts = { saved = true, progress = false, git = false },
   throttle = 60,                      -- ms between state pushes
   progress_after = 1500,              -- an LSP job shorter than this gets no pill
   buffers = 6,                        -- rows the island's panel may list

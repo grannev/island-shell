@@ -557,7 +557,6 @@ fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progr
     use crate::nvim::ToastKind;
     let critical = kind == ToastKind::Error;
     let app = match kind {
-        ToastKind::Saved => "Saved",
         ToastKind::Done => "Done",
         ToastKind::Error => "Error",
         ToastKind::Warning => "Warning",
@@ -640,9 +639,9 @@ impl App {
         let now = self.frame_time();
         match cmd {
             Command::Dismiss => self.dismiss_menus(),
-            Command::Toggle => self.island.hidden.user = !self.island.hidden.user,
-            Command::Show => self.island.hidden.user = false,
-            Command::Hide => self.island.hidden.user = true,
+            Command::Toggle => self.island.toggle_visibility(now),
+            Command::Show => self.island.show(now),
+            Command::Hide => self.island.hide(now),
             Command::Dodge => self.island.set_dodged(true, now),
             Command::Undodge => self.island.set_dodged(false, now),
             Command::DodgeToggle => {
@@ -733,8 +732,13 @@ impl App {
                         self.island.editor_gone(&server, now);
                         self.after_change();
                     }
-                    Some(crate::nvim::Message::Toast { kind, title, body, progress }) => {
-                        self.island.notify(editor_toast(kind, title, body, progress), now);
+                    Some(crate::nvim::Message::Toast { server, kind, title, body, progress }) => {
+                        // a write is not news worth a pill: the chip flashes
+                        if kind == crate::nvim::ToastKind::Saved {
+                            self.island.editor_saved(&server, now);
+                        } else {
+                            self.island.notify(editor_toast(kind, title, body, progress), now);
+                        }
                         self.after_change();
                     }
                     // not ours: a Neovim without the companion plugin, or
@@ -812,9 +816,8 @@ impl App {
         match q.fullscreen_focused() {
             Ok(fs) => {
                 if fs != self.island.hidden.fullscreen {
-                    self.island.hidden.fullscreen = fs;
                     let now = self.frame_time();
-                    self.island.sync(now);
+                    self.island.set_fullscreen(fs, now);
                     self.redraw();
                 }
             }

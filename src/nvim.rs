@@ -175,8 +175,8 @@ pub enum Message {
     Gone(String),
     Cmdline { server: String, command: Option<Cmdline> },
     Result { server: String, kind: ToastKind, title: String, body: String, id: String, append: bool },
-    /// something to show in a pill: kind, title, body, progress 0..1
-    Toast { kind: ToastKind, title: String, body: String, progress: Option<f64> },
+    /// something to show in a pill: sender, kind, title, body, progress 0..1
+    Toast { server: String, kind: ToastKind, title: String, body: String, progress: Option<f64> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +280,7 @@ pub fn parse(json: &str, token: &str) -> Option<Message> {
         "state" => Some(Message::State(Box::new(editor_from(&value)))),
         "gone" => Some(Message::Gone(value["server"].as_str().unwrap_or_default().to_string())),
         "toast" => Some(Message::Toast {
+            server: value["server"].as_str().unwrap_or_default().to_string(),
             kind: ToastKind::parse(value["kind"].as_str().unwrap_or("info")),
             title: value["title"].as_str().unwrap_or_default().to_string(),
             body: value["body"].as_str().unwrap_or_default().to_string(),
@@ -403,5 +404,14 @@ mod tests {
         let editor = editor_from(&serde_json::json!({"server": "old", "file": "main.c"}));
         assert!(editor.cmdline.is_none());
         assert!(editor.diagnostic_items.is_empty());
+    }
+
+    #[test]
+    fn save_event_keeps_the_sender_identity() {
+        let message = serde_json::json!({"protocol": PROTOCOL, "token": "test", "event": "toast",
+            "server": "editor-one", "kind": "saved", "title": "main.rs"}).to_string();
+        let Some(Message::Toast { server, kind, .. }) = parse(&message, "test") else { panic!() };
+        assert_eq!(server, "editor-one");
+        assert_eq!(kind, ToastKind::Saved);
     }
 }

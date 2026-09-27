@@ -97,8 +97,10 @@ changes are sampled every 80 ms independently of the slower battery reader.
 Neovim: with the companion plugin (`nvim/island.lua`) the island is the
 editor's status line. The mode rides beside the clock as a coloured chip
 with the unsaved dot, the diagnostics counts, the search count and a
-breathing red dot while a macro records; saving, LSP errors, LSP progress
-and `:IslandTask` arrive as pills; and the pointer opens a panel with the
+breathing red dot while a macro records. Saving flashes the chip green;
+`:IslandTask` shows progress and its outcome as a pill. LSP progress and git
+event pills are optional, while diagnostics stay in the chip and panel.
+Hovering the chip opens a panel with the
 file, the position, git, the diagnostics and the buffer list — click a
 buffer to switch to it, or Save / Format / Close. The island writes
 `~/.config/island-shell/nvim-token` (0600) on first run and ignores any
@@ -185,8 +187,9 @@ flap falls shut, Clyde bounces, the alert shakes), and a countdown ring
 around it empties over the 3.5 s the notification is up. A newer one rolls
 the old content out through the top and itself in from below, and the pill
 widens to fit. Critical notifications get a breathing red rim. A click
-dismisses; notifications wait behind an active Touch ID and are skipped
-while the island is hidden.
+dismisses; notifications wait behind an active Touch ID. A notification
+rises on its own even while the compact island is hidden, then retreats
+without leaving the island visible.
 
 Step 2: now playing (MPRIS over D-Bus, zbus). A track that starts
 announces itself with a "now playing" toast — album art, the app, the
@@ -298,7 +301,10 @@ socket answered exits quietly instead of failing. The old waybar island
 is gone: `scripts/island-cmd.sh launcher` is what mod+d runs (it closes
 the ⋯ drawer first), `island-shell toggle` is mod+i, and
 `~/.config/sway/scripts/details-toggle.sh` (mod+o) signals waybar's
-drawer and tells the island to dodge.
+drawer and tells the island to dodge. In a fullscreen window, mod+i can
+temporarily reveal the compact island; mod+d opens the launcher directly.
+Notifications and live activities appear over the fullscreen window even
+while the compact island remains hidden.
 
 ## Layout
 

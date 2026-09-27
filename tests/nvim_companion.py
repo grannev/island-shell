@@ -47,7 +47,7 @@ end
 vim.env.XDG_CONFIG_HOME = vim.fn.fnamemodify(socket, ':h')
 vim.env.XDG_RUNTIME_DIR = vim.env.XDG_CONFIG_HOME
 vim.env.WAYLAND_DISPLAY = 'test'
-require('island').setup({toasts={saved=false,diagnostics=false,progress=false,git=false}})
+require('island').setup({toasts={saved=false,progress=false,git=false}})
 ''', str(ROOT / 'nvim'), path)
 def wait(ms=400): n.exec_lua('vim.wait(...)',ms)
 def event(): return n.exec_lua('return _G.events[#_G.events]')
