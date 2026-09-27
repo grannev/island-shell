@@ -1,10 +1,10 @@
-//! The four native shortcuts shown by holding the compact island.
+//! Native shortcuts reached from the compact island.
 use cairo::Context;
 
 use crate::island::{Font, Renderer};
 
 pub const WIDTH: f64 = 440.0;
-pub const HEIGHT: f64 = 244.0;
+pub const HEIGHT: f64 = 324.0;
 const PAD: f64 = 18.0;
 const GAP: f64 = 10.0;
 const TILE_W: f64 = (WIDTH - PAD * 2.0 - GAP) / 2.0;
@@ -16,13 +16,14 @@ pub enum Action {
     Bluetooth,
     Timer,
     Launcher,
+    Notifications,
     Close,
 }
 
-pub const ACTIONS: [Action; 4] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher];
+pub const ACTIONS: [Action; 5] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications];
 
 fn tile(i: usize) -> (f64, f64) {
-    (PAD + (i % 2) as f64 * (TILE_W + GAP), 64.0 + (i / 2) as f64 * (TILE_H + GAP))
+    if i == 4 { (PAD, 224.0) } else { (PAD + (i % 2) as f64 * (TILE_W + GAP), 64.0 + (i / 2) as f64 * (TILE_H + GAP)) }
 }
 
 pub fn hit(x: f64, y: f64) -> Option<Action> {
@@ -31,7 +32,7 @@ pub fn hit(x: f64, y: f64) -> Option<Action> {
     }
     ACTIONS.iter().enumerate().find_map(|(i, action)| {
         let (tx, ty) = tile(i);
-        (x >= tx && x <= tx + TILE_W && y >= ty && y <= ty + TILE_H).then_some(*action)
+        (x >= tx && x <= tx + if i == 4 { WIDTH - 2.0 * PAD } else { TILE_W } && y >= ty && y <= ty + TILE_H).then_some(*action)
     })
 }
 
@@ -87,12 +88,22 @@ fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64) {
             cr.line_to(11.0, 11.0);
             let _ = cr.stroke();
         }
+        Action::Notifications => {
+            cr.move_to(-8.0, 8.0);
+            cr.curve_to(-6.0, 5.0, -6.0, -1.0, -6.0, -4.0);
+            cr.arc(0.0, -4.0, 6.0, std::f64::consts::PI, 0.0);
+            cr.curve_to(6.0, -1.0, 6.0, 5.0, 8.0, 8.0);
+            cr.close_path();
+            let _ = cr.stroke();
+            cr.arc(0.0, 11.0, 1.5, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
         Action::Close => {}
     }
     cr.restore().unwrap();
 }
 
-pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 4], close_hover: f64) {
+pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 5], close_hover: f64, unread: usize) {
     let title = renderer.layout(cr, "Быстрый доступ", Font::Text);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.97 * alpha);
     cr.move_to(renderer.snap(x + 22.0), renderer.snap(y + 18.0));
@@ -113,7 +124,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
         let (tx, ty) = tile(i);
         let (tx, ty) = (x + tx, y + ty);
         let h = hover[i].clamp(0.0, 1.0);
-        rounded(cr, tx, ty, TILE_W, TILE_H, 17.0);
+        rounded(cr, tx, ty, if i == 4 { WIDTH - 2.0 * PAD } else { TILE_W }, TILE_H, 17.0);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.105 * h) * alpha);
         let _ = cr.fill();
         let accent = match action {
@@ -121,6 +132,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
             Action::Bluetooth => (0.13, 0.48, 0.91),
             Action::Timer => (0.95, 0.57, 0.12),
             Action::Launcher => (0.43, 0.43, 0.49),
+            Action::Notifications => (0.38, 0.71, 0.94),
             Action::Close => unreachable!(),
         };
         rounded(cr, tx + 14.0, ty + 15.0, 40.0, 40.0, 12.0);
@@ -132,12 +144,19 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
             Action::Bluetooth => "Bluetooth",
             Action::Timer => "Таймер",
             Action::Launcher => "Лаунчер",
+            Action::Notifications => "Уведомления",
             Action::Close => unreachable!(),
         };
         let layout = renderer.layout(cr, label, Font::Caption);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.87 + 0.13 * h) * alpha);
         cr.move_to(renderer.snap(tx + 66.0), renderer.snap(ty + 25.0));
         pangocairo::functions::show_layout(cr, &layout);
+        if *action == Action::Notifications && unread > 0 {
+            let count = renderer.layout(cr, &unread.min(99).to_string(), Font::Small);
+            cr.set_source_rgba(0.46, 0.82, 1.0, alpha);
+            cr.move_to(renderer.snap(tx + WIDTH - 2.0 * PAD - 39.0), renderer.snap(ty + 25.0));
+            pangocairo::functions::show_layout(cr, &count);
+        }
     }
     let hint = renderer.layout(cr, "Esc — закрыть", Font::Small);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.4 * alpha);

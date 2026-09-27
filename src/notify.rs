@@ -1,21 +1,11 @@
-//! Notifications: instead of a server of our own (dunst keeps the history,
-//! the sounds and the fallback pop-ups) the island watches the calls going
-//! to `org.freedesktop.Notifications.Notify` on the session bus as a D-Bus
-//! monitor, so every notification reaches it natively — no rule scripts, no
-//! state files.
-
-use std::collections::HashMap;
-use std::thread;
-
-use smithay_client_toolkit::reexports::calloop::channel::Sender;
-use zbus::blocking::{Connection, MessageIterator, fdo::MonitoringProxy};
-use zbus::zvariant::{OwnedValue, Value};
-use zbus::{MatchRule, message::Type};
+//! Notification data shared by the native D-Bus server and the island UI.
 
 pub use crate::notify_kinds::AppKind;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Notification {
+    /// Zero for internal notices; desktop notifications have a live D-Bus ID.
+    pub id: u32,
     pub app: String,
     pub summary: String,
     pub body: String,
@@ -26,6 +16,8 @@ pub struct Notification {
     pub tag: Option<String>,
     /// a ring that fills instead of the countdown that empties
     pub progress: Option<f64>,
+    pub actions: Vec<(String, String)>,
+    pub transient: bool,
 }
 
 impl Notification {
@@ -47,66 +39,12 @@ pub fn fabricate(app: &str, summary: &str, body: &str) -> Notification {
     let critical = app.eq_ignore_ascii_case("critical");
     let app_kind = classify(app, "", false);
     let kind = if critical { AppKind::Critical } else { app_kind };
-    Notification { app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None }
-}
-
-pub fn spawn_watch(tx: Sender<Notification>) {
-    thread::Builder::new()
-        .name("notify".into())
-        .spawn(move || {
-            if let Err(e) = watch(&tx) {
-                eprintln!("island-shell: notification watch: {e}");
-            }
-        })
-        .expect("spawn notify thread");
-}
-
-fn watch(tx: &Sender<Notification>) -> zbus::Result<()> {
-    // a monitor connection can only listen; it is separate from the one the
-    // MPRIS watcher uses
-    let conn = Connection::session()?;
-    let rule = MatchRule::builder()
-        .msg_type(Type::MethodCall)
-        .interface("org.freedesktop.Notifications")?
-        .member("Notify")?
-        .build();
-    MonitoringProxy::new(&conn)?.become_monitor(&[rule], 0)?;
-    for msg in MessageIterator::from(conn) {
-        let Ok(msg) = msg else { continue };
-        if msg.header().member().map(|m| m.as_str()) != Some("Notify") {
-            continue;
-        }
-        // (app_name, replaces_id, app_icon, summary, body, actions, hints, timeout)
-        let Ok((app, _id, icon, summary, body, _actions, hints, _timeout)) =
-            msg.body()
-                .deserialize::<(String, u32, String, String, String, Vec<String>, HashMap<String, OwnedValue>, i32)>()
-        else {
-            continue;
-        };
-        let critical = hints.get("urgency").and_then(|v| u8::from_value(v)).is_some_and(|u| u >= 2);
-        let transient = hints.get("transient").and_then(|v| bool::from_value(v)).unwrap_or(false);
-        if transient {
-            continue; // progress pop-ups and the like: not island material
-        }
-        // the app keeps its own identity even when the alert is critical
-        let app_kind = classify(&app, &icon, false);
-        let kind = if critical { AppKind::Critical } else { app_kind };
-        let _ = tx.send(Notification {
-            app: pretty_app(&app, app_kind),
-            summary: plain(&summary),
-            body: plain(&body),
-            kind,
-            critical,
-            tag: None,
-            progress: None,
-        });
-    }
-    Ok(())
+    Notification { id: 0, app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None, actions: Vec::new(), transient: false }
 }
 
 /// Notification bodies may carry markup (Telegram sends `<b>name</b>`):
 /// the island draws plain text, so drop the tags and unescape the entities.
-fn plain(s: &str) -> String {
+pub(crate) fn plain(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0usize;
     let mut chars = s.chars().peekable();
@@ -132,7 +70,7 @@ fn plain(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn classify(app: &str, icon: &str, critical: bool) -> AppKind {
+pub(crate) fn classify(app: &str, icon: &str, critical: bool) -> AppKind {
     if critical {
         return AppKind::Critical;
     }
@@ -152,7 +90,7 @@ fn classify(app: &str, icon: &str, critical: bool) -> AppKind {
     }
 }
 
-fn pretty_app(app: &str, kind: AppKind) -> String {
+pub(crate) fn pretty_app(app: &str, kind: AppKind) -> String {
     match kind {
         AppKind::Telegram => "Telegram".into(),
         AppKind::System if app.is_empty() || app == "notify-send" => "System".into(),
@@ -160,30 +98,5 @@ fn pretty_app(app: &str, kind: AppKind) -> String {
         AppKind::Discord => "Discord".into(),
         _ if app.is_empty() => "Notification".into(),
         _ => app.into(),
-    }
-}
-
-/// `u8`/`bool` out of a hint that may be wrapped in a variant.
-trait FromHint: Sized {
-    fn from_value(v: &Value<'_>) -> Option<Self>;
-}
-
-impl FromHint for u8 {
-    fn from_value(v: &Value<'_>) -> Option<u8> {
-        match v {
-            Value::U8(b) => Some(*b),
-            Value::Value(inner) => u8::from_value(inner),
-            _ => None,
-        }
-    }
-}
-
-impl FromHint for bool {
-    fn from_value(v: &Value<'_>) -> Option<bool> {
-        match v {
-            Value::Bool(b) => Some(*b),
-            Value::Value(inner) => bool::from_value(inner),
-            _ => None,
-        }
     }
 }

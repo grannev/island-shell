@@ -174,10 +174,16 @@ symlinked directories are not traversed. Partial results are labelled so the
 query can be narrowed. The best five app matches precede file results, with
 remaining app matches still accessible below them.
 
-Step 3: notifications. The island watches the `Notify` calls going to
-`org.freedesktop.Notifications` as a D-Bus monitor — dunst keeps the
-history, the sounds and its own pop-ups, and the island needs no rule
-script or state file. The box morphs into a wide pill with the app's icon
+Step 3: notifications. The island itself owns `org.freedesktop.Notifications`:
+no dunst process, monitor permission or rule script is needed. It implements
+the standard notification methods, replacement IDs, actions, expiry and close
+signals. A bounded history (50 entries) is saved privately under
+`$XDG_STATE_HOME/island-shell/notifications.json`; open its animated sheet
+from the island's shortcut menu or `island-shell notifications`. Active
+notifications offer their application actions, and the sheet supports reading,
+deleting, clearing and scrolling. Optional local sounds use `paplay` and the
+existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
+duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon
 on the left, its name in the app's colour and the message beside it; the
 message wraps to two lines and the pill grows to fit it, with the sender
 kept semibold ahead of a lighter body. The icon is a vector tile that pops
@@ -275,6 +281,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell dump <file.png>                # render the current frame off screen
     island-shell demo <app> <summary>|<body>    # fabricate a notification
     island-shell launcher                       # mod+d: unfold / fold the panel
+    island-shell notifications                  # open the notification history
     island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell timer 25m | timer pause        # compact countdown
@@ -297,8 +304,11 @@ user unit; the sway config starts it with
 `exec_always systemctl --user start island-shell.service` (a no-op on
 reload while it is up), systemd restarts it if it ever falls over, and its
 log is `journalctl --user -u island-shell`. A second instance finding the
-socket answered exits quietly instead of failing. The old waybar island
-is gone: `scripts/island-cmd.sh launcher` is what mod+d runs (it closes
+socket answered exits quietly instead of failing. The `exec dunst` autostart
+should be removed from the sway config: the island now owns the notification
+bus name itself. Restart the island service after installation; other
+notification daemons must not be running. The old waybar island is gone:
+`scripts/island-cmd.sh launcher` is what mod+d runs (it closes
 the ⋯ drawer first), `island-shell toggle` is mod+i, and
 `~/.config/sway/scripts/details-toggle.sh` (mod+o) signals waybar's
 drawer and tells the island to dodge. In a fullscreen window, mod+i can
@@ -317,7 +327,9 @@ while the compact island remains hidden.
     src/dbus.rs     MPRIS players and fprintd (zbus, threads)
     src/touchid.rs  the vector Touch ID icon and its transformations
     src/eq.rs       cava feed
-    src/notify.rs   notifications (a D-Bus monitor on Notify)
+    src/notify.rs   notification model and text sanitization
+    src/notification_server.rs  native desktop notification D-Bus service
+    src/notice_center.rs        animated, persistent history sheet
     src/icons.rs    the vector app icons and the countdown ring
     src/launcher.rs the launcher panel (search field, list, re-ranking)
     src/apps.rs     desktop entries: scanning, matching, launching

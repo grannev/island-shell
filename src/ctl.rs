@@ -26,6 +26,8 @@ pub enum Command {
     Launcher,
     /// Open the four shortcuts normally revealed by holding the island.
     Quick,
+    /// Open the native notification history sheet.
+    Notifications,
     /// close the launcher if it is open (e.g. after launching)
     LauncherClose,
     /// Close modal menus, like a click on the transparent outside region.
@@ -75,6 +77,7 @@ impl Command {
             }
             ["launcher"] => Command::Launcher,
             ["quick"] | ["menu"] => Command::Quick,
+            ["notifications"] => Command::Notifications,
             ["launcher-close"] => Command::LauncherClose,
             ["dismiss"] => Command::Dismiss,
             ["type", rest @ ..] => Command::Type(rest.join(" ")),
@@ -113,7 +116,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|launcher|wifi|bluetooth|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|launcher|wifi|bluetooth|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "status|set <key> <value>|quit]",
 );

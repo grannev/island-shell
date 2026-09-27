@@ -14,6 +14,7 @@ use crate::icons;
 use crate::art::Art;
 use crate::editor;
 use crate::launcher::{self, Launcher};
+use crate::notice_center;
 use crate::nvim::{self, Editor};
 use crate::player;
 use crate::quick;
@@ -323,6 +324,8 @@ pub struct Island {
     notice: Option<Notice>,
     notice_prev: Option<Notice>,
     notice_queued: Option<crate::notify::Notification>,
+    center: notice_center::Center,
+    center_rect: Option<Rect>,
     roll: Quintic,
     /// the pill's size, eased when a new notification needs another (a
     /// long message wraps to two lines and the pill grows to fit)
@@ -353,7 +356,7 @@ pub struct Island {
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
     quick_selected: usize,
-    quick_hover_springs: [Spring; 4],
+    quick_hover_springs: [Spring; 5],
     quick_close_hover: Spring,
     eq_rect: Option<Rect>,
     player_rect: Option<Rect>,
@@ -475,6 +478,8 @@ impl Island {
             notice: None,
             notice_prev: None,
             notice_queued: None,
+            center: notice_center::Center::new(),
+            center_rect: None,
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
@@ -562,6 +567,7 @@ impl Island {
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
             || self.quick_hover_springs.iter().any(|s| s.is_moving(now))
             || self.quick_close_hover.is_moving(now)
+            || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
             || self.panel.is_moving(now)
@@ -601,6 +607,7 @@ impl Island {
             && self.notice.is_none()
             && self.launcher.is_none()
             && !self.quick_open
+            && !self.center.open
             && !self.hidden.any()
             && !self.dodged
     }
@@ -623,7 +630,7 @@ impl Island {
     /// Is anything using the pill (Touch ID owns it; a notification takes
     /// it when Touch ID does not)?
     fn pill_open(&self) -> bool {
-        self.auth.is_some() || self.activity.is_some() || self.notice.is_some() || self.toast.is_some() || self.quick_open
+        self.auth.is_some() || self.activity.is_some() || self.notice.is_some() || self.toast.is_some() || self.quick_open || self.center.open
     }
 
     fn silent_expired(&self, now: Time) -> bool {
@@ -764,7 +771,7 @@ impl Island {
         }
         // An activity that waited for Touch ID or the launcher gets the
         // pill before an ordinary notification.
-        if self.auth.is_none() && self.launcher.is_none() && self.activity.is_none() {
+        if self.auth.is_none() && self.launcher.is_none() && !self.center.open && self.activity.is_none() {
             if let Some(event) = self.activity_queued.take() {
                 self.show_activity(event, now);
                 changed = true;
@@ -772,7 +779,7 @@ impl Island {
         }
         // a notification that waited for Touch ID or the launcher takes
         // the pill now
-        if self.auth.is_none() && self.activity.is_none() && self.launcher.is_none() {
+        if self.auth.is_none() && self.activity.is_none() && self.launcher.is_none() && !self.center.open {
             if let Some(note) = self.notice_queued.take() {
                 self.show_notice(note, now);
                 changed = true;
@@ -848,7 +855,7 @@ impl Island {
 
     pub fn is_hidden(&self) -> bool {
         self.hidden.any() && self.auth.is_none() && self.activity.is_none()
-            && self.notice.is_none() && self.launcher.is_none()
+            && self.notice.is_none() && self.launcher.is_none() && !self.center.open
     }
 
     pub fn toggle_visibility(&mut self, now: Time) {
@@ -1006,6 +1013,7 @@ impl Island {
     pub fn toggle_launcher(&mut self, now: Time) -> bool {
         self.quick_open = false;
         self.quick_hover = None;
+        self.center.close();
         if self.launcher.is_some() {
             self.launcher = None;
         } else {
@@ -1029,6 +1037,7 @@ impl Island {
         self.dodged = dodged;
         self.launcher = None;
         self.quick_open = false;
+        self.center.close();
         self.sync(now);
     }
 
@@ -1184,9 +1193,10 @@ impl Island {
     /// A notification rises independently of the compact island and waits
     /// behind an active Touch ID.
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
+        self.center.upsert(note.clone());
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
-        if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() {
+        if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() || self.center.open {
             self.notice_queued = Some(note);
             return;
         }
@@ -1197,7 +1207,8 @@ impl Island {
         // an update of the same job (LSP progress, say) takes the pill over
         // in place: no roll, the timer simply starts again
         if let Some(current) = self.notice.as_mut() {
-            if note.tag.is_some() && current.note.tag == note.tag {
+            if (note.id != 0 && current.note.id == note.id)
+                || (note.tag.is_some() && current.note.tag == note.tag) {
                 current.note = note;
                 current.since = now;
                 self.notice_prev = None;
@@ -1240,7 +1251,7 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
-        if self.auth.is_some() || self.launcher.is_some() {
+        if self.auth.is_some() || self.launcher.is_some() || self.center.open {
             self.activity_queued = Some(event);
             return;
         }
@@ -1291,10 +1302,16 @@ impl Island {
     }
 
     pub fn keyboard_panel_open(&self) -> bool {
-        self.quick_open || self.activity.as_ref().is_some_and(|current| activity::takes_keyboard(&current.event))
+        self.quick_open || self.center.open || self.activity.as_ref().is_some_and(|current| activity::takes_keyboard(&current.event))
     }
 
     pub fn close_activity_panel(&mut self, now: Time) -> bool {
+        if self.center.open {
+            self.center.close();
+            self.center_rect = None;
+            self.sync(now);
+            return true;
+        }
         if self.quick_open {
             self.close_quick_menu(now);
             return true;
@@ -1493,6 +1510,7 @@ impl Island {
         // a password prompt outranks the launcher
         self.launcher = None;
         self.quick_open = false;
+        self.center.close();
         if let Some(activity) = self.activity.take() {
             if !activity::takes_keyboard(&activity.event) { self.activity_queued = Some(activity.event); }
         }
@@ -1577,7 +1595,7 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let pill_radius = if self.quick_open || self.visible_activity().is_some_and(|a| activity::takes_keyboard(&a.event)) {
+        let pill_radius = if self.quick_open || self.center.open || self.visible_activity().is_some_and(|a| activity::takes_keyboard(&a.event)) {
             30.0
         } else {
             self.pill_h.state(now).x / 2.0
@@ -1618,13 +1636,16 @@ impl Island {
         self.timer_menu_rect = None;
         self.network_menu_rect = None;
         self.quick_rect = None;
+        self.center_rect = None;
         self.eq_rect = None;
         self.player_rect = None;
         self.editor_chip_rect = None;
-        let line_w = chip_len + clock_w + timer_len + bars_len + 2.0 * pad;
+        let unread_len = if self.center.unread() > 0 { 13.0 } else { 0.0 };
+        let line_w = chip_len + clock_w + timer_len + bars_len + unread_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
-        let activity_size = self.quick_open.then_some((quick::WIDTH, quick::HEIGHT)).or_else(|| self.visible_activity().map(|a| {
+        let activity_size = self.center.open.then_some((notice_center::WIDTH, notice_center::HEIGHT))
+            .or_else(|| self.quick_open.then_some((quick::WIDTH, quick::HEIGHT))).or_else(|| self.visible_activity().map(|a| {
             if matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
             } else { a.event.size() }
@@ -1716,7 +1737,7 @@ impl Island {
             * if self.hidden.any() && self.launcher.is_none() { 0.0 } else { 1.0 };
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + bars_len;
+            let content_w = chip_len + clock_w + timer_len + bars_len + unread_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -1770,6 +1791,12 @@ impl Island {
                 cr.clip();
                 player::bars(cr, renderer, &self.eq, bx, dy + (line_h - BARS_H) / 2.0, BARS_W, BARS_H, line_alpha * reveal);
                 cr.restore().unwrap();
+            }
+            if unread_len > 0.0 {
+                let bx = after_clock + bars_len + 8.0;
+                cr.arc(bx, dy + line_h / 2.0, 2.7, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(0.40, 0.82, 1.0, line_alpha);
+                let _ = cr.fill();
             }
         }
 
@@ -1836,13 +1863,20 @@ impl Island {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.8 * pill_alpha);
                 cr.move_to(cxp, cy);
                 pangocairo::functions::show_layout(cr, &cap_l);
+            } else if self.center.open {
+                let climb = (1.0 - pill_alpha) * PILL_CLIMB;
+                let x = cx - notice_center::WIDTH / 2.0;
+                if pill_alpha > 0.95 {
+                    self.center_rect = Some(Rect { x, y: dy + climb, w: notice_center::WIDTH, h: notice_center::HEIGHT });
+                }
+                self.center.draw(cr, renderer, x, dy + climb, pill_alpha, now);
             } else if self.quick_open {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 if pill_alpha > 0.95 {
                     self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb, w: quick::WIDTH, h: quick::HEIGHT });
                 }
                 quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb, pill_alpha,
-                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now));
+                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread());
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 if activity.event == activity::Event::TimerMenu {
@@ -2021,6 +2055,53 @@ impl Island {
     }
 
     pub fn quick_menu_open(&self) -> bool { self.quick_open }
+
+    pub fn notification_id(&self) -> Option<u32> { self.notice.as_ref().map(|n| n.note.id).filter(|id| *id != 0) }
+
+    pub fn notification_closed(&mut self, id: u32, now: Time) {
+        self.center.closed(id);
+        if self.notice.as_ref().is_some_and(|n| n.note.id == id) {
+            self.notice = None;
+            self.notice_prev = None;
+        }
+        if self.notice_queued.as_ref().is_some_and(|n| n.id == id) { self.notice_queued = None; }
+        self.sync(now);
+    }
+
+    pub fn open_notification_center(&mut self, now: Time) -> bool {
+        if self.auth.is_some() { return false; }
+        self.quick_open = false;
+        self.launcher = None;
+        self.notice = None;
+        self.notice_prev = None;
+        self.activity = None;
+        self.center.open(now);
+        self.sync(now);
+        true
+    }
+
+    pub fn set_center_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.center.open { return false; }
+        let Some(rect) = self.center_rect else { return false };
+        self.center.pointer(px - rect.x, py - rect.y, now)
+    }
+
+    pub fn clear_center_hover(&mut self, now: Time) -> bool {
+        self.center.pointer(-1.0, -1.0, now)
+    }
+
+    pub fn click_notification_center(&mut self, px: f64, py: f64, activate: bool, now: Time) -> Option<notice_center::Action> {
+        if !self.center.open { return None; }
+        let action = if activate {
+            self.center_rect.map_or(notice_center::Action::None, |rect| self.center.click(px - rect.x, py - rect.y))
+        } else { notice_center::Action::None };
+        self.sync(now);
+        Some(action)
+    }
+
+    pub fn scroll_notification_center(&mut self, rows: f64) -> bool {
+        self.center.open && self.center.scroll(rows)
+    }
 
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
         if !self.accepts_quick_menu_click() { return false; }

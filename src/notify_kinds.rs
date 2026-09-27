@@ -1,7 +1,7 @@
 //! The part of `notify` the icon preview needs (see examples/icons.rs).
 
 /// Which vector icon stands for the sending app (see `icons`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AppKind {
     Telegram,
     System,

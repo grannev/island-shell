@@ -300,6 +300,7 @@ pub struct App {
     position_poll: Option<RegistrationToken>,
     dbus_tx: channel::Sender<dbus::Event>,
     network_tx: channel::Sender<crate::network::Message>,
+    notification_commands: std::sync::mpsc::Sender<crate::notification_server::Command>,
     pub exit: bool,
 }
 
@@ -342,8 +343,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     dbus::spawn_player_watch(dbus_tx.clone());
     dbus::spawn_auth_watch(dbus_tx.clone());
     let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
-    let (note_tx, note_rx) = channel::channel::<notify::Notification>();
-    notify::spawn_watch(note_tx);
+    let (note_tx, note_rx) = channel::channel::<crate::notification_server::Event>();
+    let notification_commands = crate::notification_server::spawn(note_tx);
     let (activity_tx, activity_rx) = channel::channel::<activity::Event>();
     activity::spawn_watchers(activity_tx.clone());
     let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
@@ -413,6 +414,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         position_poll: None,
         dbus_tx,
         network_tx,
+        notification_commands,
         exit: false,
     };
 
@@ -464,9 +466,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     loop_handle.insert_source(note_rx, |event, _, app: &mut App| {
-        if let channel::Event::Msg(note) = event {
+        if let channel::Event::Msg(event) = event {
             let now = app.frame_time();
-            app.island.notify(note, now);
+            match event {
+                crate::notification_server::Event::Upsert(note) => app.island.notify(note, now),
+                crate::notification_server::Event::Closed(id) => app.island.notification_closed(id, now),
+            }
             app.after_change();
         }
     })?;
@@ -567,6 +572,7 @@ fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progr
     // name: no point saying it twice
     let (summary, body) = if title == app || title.is_empty() { (body, String::new()) } else { (title, body) };
     notify::Notification {
+        id: 0,
         app: app.to_string(),
         summary,
         body,
@@ -577,6 +583,8 @@ fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progr
             _ => "nvim".into(),
         }),
         progress,
+        actions: Vec::new(),
+        transient: false,
     }
 }
 
@@ -683,6 +691,12 @@ impl App {
                 }
                 self.after_change();
                 return "ok".into();
+            }
+            Command::Notifications => {
+                let open = self.island.open_notification_center(now);
+                self.set_keyboard_focus(open);
+                self.after_change();
+                return if open { "open".into() } else { "unavailable".into() };
             }
             Command::LauncherClose => {
                 self.island.close_launcher(now);
@@ -1400,6 +1414,7 @@ impl PointerHandler for App {
                     self.island.set_timer_hover(event.position.0, event.position.1);
                     self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false));
                     changed = true;
@@ -1409,6 +1424,7 @@ impl PointerHandler for App {
                     self.island.clear_timer_hover();
                     self.island.clear_network_hover(self.clock.predict(false));
                     self.island.set_quick_hover(-1.0, -1.0, self.clock.predict(false));
+                    self.island.clear_center_hover(self.clock.predict(false));
                     self.island.set_eq_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_editor_chip_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_editor_hover(None);
@@ -1426,6 +1442,9 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     if self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
                     if self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false)) {
@@ -1483,6 +1502,11 @@ impl PointerHandler for App {
                         changed = true;
                         continue;
                     }
+                    if let Some(action) = self.island.click_notification_center(event.position.0, event.position.1, button == BTN_LEFT, now) {
+                        self.handle_notification_action(action);
+                        changed = true;
+                        continue;
+                    }
                     if self.island.quick_menu_open() {
                         if button == BTN_LEFT {
                             if let Some(action) = self.island.quick_action_at(event.position.0, event.position.1) {
@@ -1537,7 +1561,11 @@ impl PointerHandler for App {
                         continue;
                     }
                     // a click on a notification dismisses it
+                    let dismissed_id = self.island.notification_id();
                     if self.island.dismiss_notice(now) {
+                        if let Some(id) = dismissed_id {
+                            let _ = self.notification_commands.send(crate::notification_server::Command::Dismiss(id));
+                        }
                         changed = true;
                         continue;
                     }
@@ -1556,6 +1584,9 @@ impl PointerHandler for App {
                     changed = true;
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
                     let now = self.clock.predict(false);
+                    if self.island.scroll_notification_center(if vertical.discrete != 0 { v } else { v / 40.0 }) {
+                        continue;
+                    }
                     if self.island.scroll_network(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
                         changed = true;
                         continue;
@@ -1614,7 +1645,21 @@ impl App {
             crate::quick::Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
             crate::quick::Action::Timer => { let _ = self.island.timer_command("menu", now); }
             crate::quick::Action::Launcher => { self.island.toggle_launcher(now); }
+            crate::quick::Action::Notifications => { self.island.open_notification_center(now); }
             crate::quick::Action::Close => {}
+        }
+    }
+
+    fn handle_notification_action(&mut self, action: crate::notice_center::Action) {
+        use crate::notice_center::Action;
+        use crate::notification_server::Command;
+        match action {
+            Action::Invoke(id, key) => { let _ = self.notification_commands.send(Command::Action { id, key }); }
+            Action::Dismiss(id) => { let _ = self.notification_commands.send(Command::Dismiss(id)); }
+            Action::DismissMany(ids) => {
+                for id in ids { let _ = self.notification_commands.send(Command::Dismiss(id)); }
+            }
+            Action::None | Action::Close => {}
         }
     }
 

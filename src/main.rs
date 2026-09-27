@@ -20,6 +20,8 @@ mod island;
 mod launcher;
 mod launch;
 mod notify;
+mod notice_center;
+mod notification_server;
 mod nvim;
 mod network;
 mod connections;
