@@ -1,6 +1,6 @@
 //! Bounded, private notification history and its native island sheet.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -21,6 +21,14 @@ const LIMIT: usize = 50;
 const ROWS: usize = 4;
 const ROW_TOP: f64 = 72.0;
 const ROW_H: f64 = 72.0;
+const ROW_MOTION: Time = 0.42;
+const EXIT_MOTION: Time = 0.32;
+
+struct Leaving {
+    entry: Entry,
+    row: f64,
+    since: Time,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
@@ -53,7 +61,11 @@ pub struct Center {
     detail_scroll: f64,
     hovered: Option<Hit>,
     row_hover: [Spring; ROWS],
-    button_hover: [Spring; 3],
+    button_hover: [Spring; 5],
+    row_from: HashMap<u64, f64>,
+    row_motion_at: Time,
+    born_at: HashMap<u64, Time>,
+    leaving: Vec<Leaving>,
     writer: Option<mpsc::Sender<Vec<Entry>>>,
 }
 
@@ -106,6 +118,8 @@ impl Center {
             detail: None, detail_scroll: 0.0, hovered: None,
             row_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
+            row_from: HashMap::new(), row_motion_at: 0.0,
+            born_at: HashMap::new(), leaving: Vec::new(),
             writer,
         }
     }
@@ -117,13 +131,15 @@ impl Center {
     pub fn unread(&self) -> usize { self.entries.iter().filter(|e| !e.read).count() }
     pub fn len(&self) -> usize { self.entries.len() }
 
-    pub fn upsert(&mut self, mut note: Notification) {
+    pub fn upsert(&mut self, mut note: Notification, now: Time) {
         if note.transient { return; }
         note.app = note.app.chars().take(100).collect();
         note.summary = note.summary.chars().take(240).collect();
         note.body = note.body.chars().take(2000).collect();
         let existing = self.entries.iter().position(|e| e.active && note.id != 0 && e.note.id == note.id)
             .or_else(|| note.tag.as_ref().and_then(|tag| self.entries.iter().position(|e| e.note.tag.as_ref() == Some(tag))));
+        let reorder = existing != Some(0);
+        if self.open && reorder { self.capture_rows(now); }
         if let Some(index) = existing {
             let mut entry = self.entries.remove(index).unwrap();
             entry.note = note;
@@ -132,13 +148,34 @@ impl Center {
             entry.active = entry.note.id != 0;
             self.entries.push_front(entry);
         } else {
+            if self.open { self.born_at.insert(self.next_serial, now); }
             self.entries.push_front(Entry { serial: self.next_serial, active: note.id != 0,
                 note, received: now_secs(), read: false });
             self.next_serial = self.next_serial.saturating_add(1);
         }
         self.entries.truncate(LIMIT);
-        self.offset = self.offset.min(self.entries.len().saturating_sub(ROWS));
+        self.offset = if self.open && reorder { 0 } else { self.offset.min(self.entries.len().saturating_sub(ROWS)) };
         self.persist();
+    }
+
+    fn row_position(&self, serial: u64, target: f64, now: Time) -> f64 {
+        let k = min_jerk(((now - self.row_motion_at) / ROW_MOTION).clamp(0.0, 1.0));
+        self.row_from.get(&serial).map_or(target, |from| from + (target - from) * k)
+    }
+
+    fn capture_rows(&mut self, now: Time) {
+        let positions: HashMap<_, _> = self.entries.iter().enumerate().map(|(i, entry)| {
+            let target = i as f64 - self.offset as f64;
+            (entry.serial, self.row_position(entry.serial, target, now))
+        }).collect();
+        self.row_from = positions;
+        self.row_motion_at = now;
+    }
+
+    pub fn advance(&mut self, now: Time) {
+        self.leaving.retain(|row| now - row.since < EXIT_MOTION);
+        self.born_at.retain(|_, since| now - *since < ROW_MOTION);
+        if now - self.row_motion_at >= ROW_MOTION { self.row_from.clear(); }
     }
 
     pub fn closed(&mut self, id: u32) {
@@ -154,13 +191,21 @@ impl Center {
         self.offset = 0;
         self.detail = None;
         self.hovered = None;
+        self.row_from.clear();
+        self.born_at.clear();
+        self.leaving.clear();
     }
 
-    pub fn close(&mut self) { self.open = false; self.detail = None; self.hovered = None; }
+    pub fn close(&mut self) {
+        self.open = false; self.detail = None; self.hovered = None;
+        self.row_from.clear(); self.born_at.clear(); self.leaving.clear();
+    }
 
     pub fn is_animating(&self, now: Time) -> bool {
         self.open && (now - self.opened_at < 0.5 || self.row_hover.iter().any(|s| s.is_moving(now))
-            || self.button_hover.iter().any(|s| s.is_moving(now)))
+            || self.button_hover.iter().any(|s| s.is_moving(now))
+            || !self.leaving.is_empty() || !self.born_at.is_empty()
+            || !self.row_from.is_empty())
     }
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
@@ -192,7 +237,10 @@ impl Center {
             spring.set(if matches!(hit, Some(Hit::Row(j) | Hit::Remove(j)) if i == j) { 1.0 } else { 0.0 }, now);
         }
         for (i, spring) in self.button_hover.iter_mut().enumerate() {
-            spring.set(if matches!((i, hit), (0, Some(Hit::Close)) | (1, Some(Hit::Clear | Hit::Back)) | (2, Some(Hit::DetailRemove | Hit::Invoke(_)))) { 1.0 } else { 0.0 }, now);
+            spring.set(if matches!((i, hit),
+                (0, Some(Hit::Close)) | (1, Some(Hit::Clear | Hit::Back))
+                | (2, Some(Hit::Invoke(0))) | (3, Some(Hit::Invoke(1)))
+                | (4, Some(Hit::DetailRemove))) { 1.0 } else { 0.0 }, now);
         }
         true
     }
@@ -205,14 +253,20 @@ impl Center {
         }
         let old = self.offset;
         self.offset = (self.offset as f64 + rows).round().clamp(0.0, self.entries.len().saturating_sub(ROWS) as f64) as usize;
+        if old != self.offset { self.row_from.clear(); self.born_at.clear(); self.leaving.clear(); }
         old != self.offset
     }
 
-    pub fn click(&mut self, x: f64, y: f64) -> Action {
+    pub fn click(&mut self, x: f64, y: f64, now: Time) -> Action {
         match self.hit(x, y) {
             Some(Hit::Close) => { self.close(); Action::Close }
             Some(Hit::Clear) => {
                 let ids = self.entries.iter().filter(|e| e.active).map(|e| e.note.id).collect();
+                self.capture_rows(now);
+                self.leaving.extend(self.entries.iter().filter_map(|entry| {
+                    let row = *self.row_from.get(&entry.serial)?;
+                    (0.0..ROWS as f64).contains(&row).then(|| Leaving { entry: entry.clone(), row, since: now })
+                }));
                 self.entries.clear(); self.offset = 0; self.persist(); Action::DismissMany(ids)
             }
             Some(Hit::Back) => { self.detail = None; self.detail_scroll = 0.0; Action::None }
@@ -225,11 +279,11 @@ impl Center {
                 }
                 Action::None
             }
-            Some(Hit::Remove(row)) => self.remove(self.offset + row),
+            Some(Hit::Remove(row)) => self.remove(self.offset + row, now),
             Some(Hit::DetailRemove) => {
                 let index = self.entries.iter().position(|e| Some(e.serial) == self.detail);
                 self.detail = None;
-                index.map_or(Action::None, |i| self.remove(i))
+                index.map_or(Action::None, |i| self.remove(i, now))
             }
             Some(Hit::Invoke(index)) => {
                 let Some(entry) = self.entries.iter().find(|e| Some(e.serial) == self.detail) else { return Action::None };
@@ -241,8 +295,17 @@ impl Center {
         }
     }
 
-    fn remove(&mut self, index: usize) -> Action {
+    fn remove(&mut self, index: usize, now: Time) -> Action {
+        self.capture_rows(now);
         let Some(entry) = self.entries.remove(index) else { return Action::None };
+        if self.open && self.detail.is_none() {
+            if let Some(&row) = self.row_from.get(&entry.serial) {
+                if (0.0..ROWS as f64).contains(&row) {
+                    self.leaving.push(Leaving { entry: entry.clone(), row, since: now });
+                }
+            }
+        }
+        self.born_at.remove(&entry.serial);
         self.offset = self.offset.min(self.entries.len().saturating_sub(ROWS));
         self.persist();
         if entry.active { Action::Dismiss(entry.note.id) } else { Action::None }
@@ -253,7 +316,7 @@ impl Center {
         let title_x = if self.detail.is_some() { x + 121.0 } else { x + 24.0 };
         label(cr, renderer, title, title_x, y + 17.0, WIDTH - (title_x - x) - 62.0, Font::Text, alpha);
         if self.detail.is_some() {
-            button(cr, renderer, "‹ Назад", x + 22.0, y + 8.0, 85.0, 42.0, alpha, self.button_hover[1].value(now));
+            button(cr, renderer, "Назад", x + 22.0, y + 8.0, 85.0, 42.0, alpha, self.button_hover[1].value(now));
         } else {
             let unread = self.unread();
             let count = if unread > 0 { format!("{unread} новых") } else { format!("{} всего", self.len()) };
@@ -272,39 +335,55 @@ impl Center {
 
     fn draw_list(&self, cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, now: Time) {
         if self.entries.is_empty() {
-            label(cr, renderer, "Пока пусто", x + 24.0, y + 162.0, WIDTH - 48.0, Font::Text, alpha * 0.88);
-            label(cr, renderer, "Новые сообщения появятся здесь", x + 24.0, y + 194.0, WIDTH - 48.0, Font::Small, alpha * 0.48);
-            return;
+            let appear = if self.leaving.is_empty() { 1.0 } else {
+                min_jerk(((now - self.row_motion_at - 0.12) / 0.28).clamp(0.0, 1.0))
+            };
+            label(cr, renderer, "Пока пусто", x + 24.0, y + 162.0, WIDTH - 48.0, Font::Text, alpha * appear * 0.88);
+            label(cr, renderer, "Новые сообщения появятся здесь", x + 24.0, y + 194.0, WIDTH - 48.0, Font::Small, alpha * appear * 0.48);
         }
         cr.save().unwrap();
         cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
         cr.clip();
         for (row, entry) in self.entries.iter().skip(self.offset).take(ROWS).enumerate() {
             let delay = row as f64 * 0.04;
-            let k = min_jerk(((now - self.opened_at - delay) / 0.38).clamp(0.0, 1.0));
-            let top = y + ROW_TOP + row as f64 * ROW_H + (1.0 - k) * 15.0;
-            let opacity = alpha * k;
+            let opening = min_jerk(((now - self.opened_at - delay) / 0.38).clamp(0.0, 1.0));
+            let born = self.born_at.get(&entry.serial).copied();
+            let entrance = born.map_or(1.0, |since| min_jerk(((now - since) / ROW_MOTION).clamp(0.0, 1.0)));
+            let fade = born.map_or(1.0, |since| min_jerk(((now - since) / 0.26).clamp(0.0, 1.0)));
+            let position = self.row_position(entry.serial, row as f64, now);
+            let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
+            let opacity = alpha * opening * fade;
             let hover = self.row_hover[row].value(now);
-            rounded(cr, x + 16.0, top + 2.0, WIDTH - 32.0, ROW_H - 5.0, 15.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.085 * hover) * opacity);
-            let _ = cr.fill();
-            icons::draw(cr, entry.note.kind, x + 43.0, top + 35.0, 39.0, (now - self.opened_at - delay).max(0.0), opacity);
-            label(cr, renderer, &entry.note.app, x + 70.0, top + 10.0, 250.0, Font::Caption, opacity * 0.91);
-            label(cr, renderer, &entry.note.message(), x + 70.0, top + 35.0, WIDTH - 145.0, Font::Small, opacity * 0.63);
-            if !entry.read {
-                cr.arc(x + WIDTH - 72.0, top + 23.0, 3.0, 0.0, std::f64::consts::TAU);
-                cr.set_source_rgba(0.40, 0.82, 1.0, opacity);
-                let _ = cr.fill();
-            }
-            label(cr, renderer, "×", x + WIDTH - 47.0, top + 19.0, 24.0, Font::Text, opacity * (0.43 + 0.35 * hover));
+            self.draw_row(cr, renderer, entry, x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
+        }
+        for leaving in &self.leaving {
+            let k = min_jerk(((now - leaving.since) / EXIT_MOTION).clamp(0.0, 1.0));
+            let top = y + ROW_TOP + leaving.row * ROW_H - k * 9.0;
+            self.draw_row(cr, renderer, &leaving.entry, x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
         }
         cr.restore().unwrap();
+        if self.entries.is_empty() { return; }
         if self.entries.len() > ROWS {
             let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(self.entries.len()), self.entries.len());
             label(cr, renderer, &text, x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         } else {
             label(cr, renderer, "Нажмите, чтобы прочитать", x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         }
+    }
+
+    fn draw_row(&self, cr: &Context, renderer: &Renderer, entry: &Entry, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
+        rounded(cr, x + 16.0, top + 2.0, WIDTH - 32.0, ROW_H - 5.0, 15.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.085 * hover) * alpha);
+        let _ = cr.fill();
+        icons::draw(cr, entry.note.kind, x + 43.0, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+        label(cr, renderer, &entry.note.app, x + 70.0, top + 10.0, 250.0, Font::Caption, alpha * 0.91);
+        label(cr, renderer, &entry.note.message(), x + 70.0, top + 35.0, WIDTH - 145.0, Font::Small, alpha * 0.63);
+        if !entry.read {
+            cr.arc(x + WIDTH - 72.0, top + 23.0, 3.0, 0.0, std::f64::consts::TAU);
+            cr.set_source_rgba(0.40, 0.82, 1.0, alpha);
+            let _ = cr.fill();
+        }
+        label(cr, renderer, "×", x + WIDTH - 47.0, top + 19.0, 24.0, Font::Text, alpha * (0.43 + 0.35 * hover));
     }
 
     fn draw_detail(&self, cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, serial: u64, now: Time) {
@@ -323,9 +402,9 @@ impl Center {
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
-            button(cr, renderer, text, x + 24.0 + index as f64 * 154.0, y + HEIGHT - 62.0, 144.0, 42.0, alpha, self.button_hover[2].value(now));
+            button(cr, renderer, text, x + 24.0 + index as f64 * 154.0, y + HEIGHT - 62.0, 144.0, 42.0, alpha, self.button_hover[2 + index].value(now));
         }
-        button(cr, renderer, "Удалить", x + WIDTH - 112.0, y + HEIGHT - 62.0, 88.0, 42.0, alpha, self.button_hover[2].value(now));
+        button(cr, renderer, "Удалить", x + WIDTH - 112.0, y + HEIGHT - 62.0, 88.0, 42.0, alpha, self.button_hover[4].value(now));
     }
 }
 
@@ -357,7 +436,16 @@ fn button(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, w: f64,
     rounded(cr, x, y, w, h, h / 2.0);
     cr.set_source_rgba(1.0, 1.0, 1.0, (0.085 + 0.12 * hover) * alpha);
     let _ = cr.fill();
-    label(cr, renderer, text, x + 12.0, y + 10.0, w - 24.0, Font::Small, alpha * (0.72 + 0.26 * hover));
+    let font = if text == "×" { Font::Text } else { Font::Caption };
+    let layout = renderer.layout_ellipsized(cr, text, font, w - 16.0, 1);
+    let (_, ink) = layout.pixel_extents();
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.72 + 0.26 * hover));
+    cr.move_to(
+        renderer.snap(x + (w - ink.width() as f64) / 2.0 - ink.x() as f64),
+        renderer.snap(y + (h - ink.height() as f64) / 2.0 - ink.y() as f64),
+    );
+    pangocairo::functions::show_layout(cr, &layout);
+    cr.new_path();
 }
 
 #[cfg(test)]
@@ -370,12 +458,12 @@ mod tests {
         for id in 1..=52 {
             let mut note = crate::notify::fabricate("System", &id.to_string(), "body");
             note.id = id;
-            center.upsert(note);
+            center.upsert(note, id as f64);
         }
         assert_eq!(center.len(), LIMIT);
         let mut replacement = crate::notify::fabricate("System", "updated", "body");
         replacement.id = 52;
-        center.upsert(replacement);
+        center.upsert(replacement, 53.0);
         assert_eq!(center.len(), LIMIT);
         assert_eq!(center.entries.front().unwrap().note.summary, "updated");
         center.closed(52);
@@ -388,13 +476,62 @@ mod tests {
         let mut note = crate::notify::fabricate("System", "title", "body");
         note.id = 5;
         note.actions = vec![("default".into(), "Открыть".into())];
-        center.upsert(note);
+        center.upsert(note, 0.0);
         center.open(0.0);
         assert_eq!(center.unread(), 1);
-        assert_eq!(center.click(90.0, ROW_TOP + 12.0), Action::None);
+        assert_eq!(center.click(90.0, ROW_TOP + 12.0, 0.5), Action::None);
         assert_eq!(center.unread(), 0);
-        assert_eq!(center.click(35.0, HEIGHT - 40.0), Action::Invoke(5, "default".into()));
-        assert_eq!(center.click(WIDTH - 40.0, HEIGHT - 40.0), Action::Dismiss(5));
+        assert_eq!(center.click(35.0, HEIGHT - 40.0, 0.6), Action::Invoke(5, "default".into()));
+        assert_eq!(center.click(WIDTH - 40.0, HEIGHT - 40.0, 0.7), Action::Dismiss(5));
         assert_eq!(center.len(), 0);
+    }
+
+    #[test]
+    fn incoming_and_removed_rows_interpolate_without_jumping() {
+        let mut center = center();
+        for id in 1..=2 {
+            let mut note = crate::notify::fabricate("System", &id.to_string(), "body");
+            note.id = id;
+            center.upsert(note, id as f64);
+        }
+        center.open(10.0);
+        let previous_front = center.entries.front().unwrap().serial;
+        let mut incoming = crate::notify::fabricate("System", "incoming", "body");
+        incoming.id = 3;
+        center.upsert(incoming, 11.0);
+        assert!(center.born_at.contains_key(&center.entries.front().unwrap().serial));
+        assert_eq!(center.row_position(previous_front, 1.0, 11.0), 0.0);
+        assert!((center.row_position(previous_front, 1.0, 11.0 + ROW_MOTION) - 1.0).abs() < 1e-9);
+        assert!(center.is_animating(11.1));
+        center.advance(11.5);
+        assert!(center.born_at.is_empty());
+
+        assert_eq!(center.click(WIDTH - 40.0, ROW_TOP + 16.0, 12.0), Action::Dismiss(3));
+        assert_eq!(center.leaving.len(), 1);
+        assert_eq!(center.row_position(previous_front, 0.0, 12.0), 1.0);
+        assert!(center.row_position(previous_front, 0.0, 12.0 + ROW_MOTION).abs() < 1e-9);
+        center.advance(12.0 + EXIT_MOTION);
+        assert!(center.leaving.is_empty());
+    }
+
+    #[test]
+    #[ignore = "set ISLAND_CENTER_DUMP to render the detail sheet for visual inspection"]
+    fn detail_sheet_renders_at_fractional_scale() {
+        let path = std::env::var("ISLAND_CENTER_DUMP").expect("ISLAND_CENTER_DUMP path");
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 720, 645).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        cr.paint().unwrap();
+        cr.scale(1.5, 1.5);
+        let mut center = center();
+        let mut note = crate::notify::fabricate("System", "Проверка центра", "Текст уведомления должен читаться без наложений.");
+        note.id = 1;
+        note.actions = vec![("default".into(), "Открыть".into())];
+        center.upsert(note, 0.0);
+        center.open(0.0);
+        center.click(90.0, ROW_TOP + 12.0, 0.5);
+        center.draw(&cr, &renderer, 0.0, 0.0, 1.0, 1.0);
+        surface.write_to_png(&mut std::fs::File::create(path).unwrap()).unwrap();
     }
 }

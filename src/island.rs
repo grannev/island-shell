@@ -725,6 +725,7 @@ impl Island {
     /// whether anything changed (then redraw).
     pub fn advance(&mut self, now: Time) -> bool {
         let mut changed = false;
+        self.center.advance(now);
         if self.output_open && now >= self.output_until && !self.hovered
             && self.nvim.as_ref().is_none_or(|e| e.cmdline.is_none()) {
             self.output_open = false;
@@ -1193,7 +1194,7 @@ impl Island {
     /// A notification rises independently of the compact island and waits
     /// behind an active Touch ID.
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
-        self.center.upsert(note.clone());
+        self.center.upsert(note.clone(), now);
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
         if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() || self.center.open {
@@ -2093,7 +2094,7 @@ impl Island {
     pub fn click_notification_center(&mut self, px: f64, py: f64, activate: bool, now: Time) -> Option<notice_center::Action> {
         if !self.center.open { return None; }
         let action = if activate {
-            self.center_rect.map_or(notice_center::Action::None, |rect| self.center.click(px - rect.x, py - rect.y))
+            self.center_rect.map_or(notice_center::Action::None, |rect| self.center.click(px - rect.x, py - rect.y, now))
         } else { notice_center::Action::None };
         self.sync(now);
         Some(action)

@@ -181,7 +181,9 @@ signals. A bounded history (50 entries) is saved privately under
 `$XDG_STATE_HOME/island-shell/notifications.json`; open its animated sheet
 from the island's shortcut menu or `island-shell notifications`. Active
 notifications offer their application actions, and the sheet supports reading,
-deleting, clearing and scrolling. Optional local sounds use `paplay` and the
+deleting, clearing and scrolling. Incoming rows ease into place while the
+sheet is open; deleted rows fade and slide away as the list closes the gap.
+Optional local sounds use `paplay` and the
 existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
 duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon
 on the left, its name in the app's colour and the message beside it; the
