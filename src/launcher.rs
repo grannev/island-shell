@@ -361,8 +361,12 @@ impl Launcher {
         };
         let (fa, fo) = intro(0.0);
         rounded(cr, fx, fy + fo, fw, FIELD_H, FIELD_H / 2.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.09 * fa);
+        cr.set_source_rgba(0.15, 0.15, 0.17, fa);
         let _ = cr.fill();
+        rounded(cr, fx + 0.5, fy + fo + 0.5, fw - 1.0, FIELD_H - 1.0, (FIELD_H - 1.0) / 2.0);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.11 * fa);
+        let _ = cr.stroke();
 
         // the magnifying glass (SF Symbols, in the same face as the text)
         let glass = renderer.layout(cr, "\u{1002AB}", Font::Text);
@@ -389,7 +393,7 @@ impl Launcher {
         // the caret, blinking on the macOS cadence
         if Self::caret_on(now) {
             let cx = renderer.snap(text_x + if placeholder { 0.0 } else { q_ext.width() as f64 } + 1.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.85 * fa);
+            cr.set_source_rgba(0.40, 0.80, 1.0, 0.95 * fa);
             cr.rectangle(cx, renderer.snap(fy + fo + 11.0), 2.0, FIELD_H - 22.0);
             let _ = cr.fill();
         }
@@ -408,8 +412,12 @@ impl Launcher {
         if sel_alpha > 0.002 {
             let sy = view_top + (self.sel_slot.state(now).x - scroll) * ROW_H;
             rounded(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0, 13.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * sel_alpha);
+            cr.set_source_rgba(0.16, 0.20, 0.26, sel_alpha);
             let _ = cr.fill();
+            rounded(cr, x + FIELD_PAD - 5.5, sy + 2.5, w - 2.0 * (FIELD_PAD - 6.0) - 1.0, ROW_H - 5.0, 12.5);
+            cr.set_line_width(1.0);
+            cr.set_source_rgba(0.42, 0.77, 1.0, 0.23 * sel_alpha);
+            let _ = cr.stroke();
         }
 
         // the rows

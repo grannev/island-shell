@@ -40,8 +40,9 @@ preview the activities without changing hardware state:
 Click the ordinary compact island to open a four-button menu for Wi-Fi, Bluetooth,
 Timer and Launcher. Click a button or select it with the arrow keys and Enter;
 Escape, × or a click outside closes the menu. `island-shell quick` opens the
-same menu from a script. The Waybar's ⋯ drawer now contains only disk, CPU
-and memory information, with no separate network or timer buttons.
+same menu from a script; `mod+m` opens it directly. The Waybar's ⋯ drawer
+now contains only disk, CPU and memory information, with no separate network
+or timer buttons.
 `mod+d` still opens the launcher directly.
 
 The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
@@ -299,6 +300,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell set <key> <value>              # tune live (see below)
     island-shell dump <file.png>                # render the current frame off screen
     island-shell demo <app> <summary>|<body>    # fabricate a notification
+    island-shell quick                          # mod+m: quick-access menu
     island-shell launcher                       # mod+d: unfold / fold the panel
     island-shell notifications                  # open the notification history
     island-shell dnd on|off|toggle|status       # quiet ordinary notifications
@@ -328,8 +330,9 @@ socket answered exits quietly instead of failing. The `exec dunst` autostart
 should be removed from the sway config: the island now owns the notification
 bus name itself. Restart the island service after installation; other
 notification daemons must not be running. The old waybar island is gone:
-`scripts/island-cmd.sh launcher` is what mod+d runs (it closes
-the ⋯ drawer first), `island-shell toggle` is mod+i, and
+`scripts/island-cmd.sh launcher` is what mod+d runs and
+`scripts/island-cmd.sh quick` is bound to mod+m (both close the ⋯ drawer
+first). `island-shell toggle` is mod+i, and
 `~/.config/sway/scripts/details-toggle.sh` (mod+o) signals waybar's
 drawer and tells the island to dodge. In a fullscreen window, mod+i can
 temporarily reveal the compact island; mod+d opens the launcher directly.

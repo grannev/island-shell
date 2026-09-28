@@ -693,7 +693,7 @@ impl App {
                 if self.island.quick_menu_open() {
                     self.island.close_quick_menu(now);
                 } else {
-                    self.island.open_quick_menu(now);
+                    self.island.open_quick_menu_shortcut(now);
                 }
                 self.after_change();
                 return "ok".into();

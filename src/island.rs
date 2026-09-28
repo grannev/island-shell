@@ -884,7 +884,7 @@ impl Island {
     pub fn is_hidden(&self) -> bool {
         self.hidden.any() && self.auth.is_none() && self.activity.is_none()
             && self.notice.is_none() && (self.toast.is_none() || self.hidden.user)
-            && self.launcher.is_none() && !self.center.open
+            && self.launcher.is_none() && !self.quick_open && !self.center.open
     }
 
     pub fn toggle_visibility(&mut self, now: Time) {
@@ -2248,6 +2248,21 @@ impl Island {
 
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
         if !self.accepts_quick_menu_click() { return false; }
+        self.show_quick_menu(now);
+        true
+    }
+
+    /// A keyboard shortcut may summon the sheet while the compact island is
+    /// parked above a fullscreen window, just like the launcher.
+    pub fn open_quick_menu_shortcut(&mut self, now: Time) -> bool {
+        if self.auth.is_some() { return false; }
+        self.launcher = None;
+        self.center.close();
+        self.show_quick_menu(now);
+        true
+    }
+
+    fn show_quick_menu(&mut self, now: Time) {
         self.quick_open = true;
         self.quick_retiring_at = None;
         self.quick_hover = None;
@@ -2260,7 +2275,6 @@ impl Island {
         self.activity_queued = None;
         self.toast = None;
         self.sync(now);
-        true
     }
 
     pub fn close_quick_menu(&mut self, now: Time) {
@@ -2962,6 +2976,21 @@ mod tests {
         island.close_quick_menu(10.8);
         assert!(!island.keyboard_panel_open());
         assert_eq!(island.quick_action_at(r.x + 38.0, r.y + 84.0), None);
+    }
+
+    #[test]
+    fn quick_shortcut_temporarily_reveals_a_hidden_island() {
+        let mut island = Island::new(Config::default());
+        island.set_fullscreen(true, 1.0);
+        assert!(island.is_hidden());
+        assert!(!island.open_quick_menu(1.1));
+        assert!(island.open_quick_menu_shortcut(1.1));
+        assert!(island.quick_menu_open());
+        assert!(!island.is_hidden());
+        assert_eq!(island.hide.target(), 0.0);
+        island.close_quick_menu(2.0);
+        assert!(island.is_hidden());
+        assert_eq!(island.hide.target(), 1.0);
     }
 
     #[test]

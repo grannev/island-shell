@@ -543,8 +543,36 @@ impl Center {
             let appear = if self.leaving.is_empty() { 1.0 } else {
                 min_jerk(((now - self.row_motion_at - 0.12) / 0.28).clamp(0.0, 1.0))
             };
-            label(cr, renderer, "Пока пусто", x + 24.0, y + 162.0, WIDTH - 48.0, Font::Text, alpha * appear * 0.88);
-            label(cr, renderer, "Новые сообщения появятся здесь", x + 24.0, y + 194.0, WIDTH - 48.0, Font::Small, alpha * appear * 0.48);
+            let a = alpha * appear;
+            rounded(cr, x + 22.0, y + 102.0, WIDTH - 44.0, 188.0, 18.0);
+            cr.set_source_rgba(0.13, 0.13, 0.14, a);
+            let _ = cr.fill();
+            rounded(cr, x + 22.5, y + 102.5, WIDTH - 45.0, 187.0, 17.5);
+            cr.set_line_width(1.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.065 * a);
+            let _ = cr.stroke();
+            cr.new_path();
+            cr.arc(x + WIDTH / 2.0, y + 162.0, 24.0, 0.0, std::f64::consts::TAU);
+            cr.set_source_rgba(0.29, 0.52, 0.69, 0.42 * a);
+            let _ = cr.fill();
+            cr.save().unwrap();
+            cr.translate(x + WIDTH / 2.0, y + 162.0);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            cr.set_line_width(2.0);
+            cr.set_source_rgba(0.72, 0.88, 1.0, a);
+            cr.move_to(-8.0, 8.0);
+            cr.curve_to(-6.0, 5.0, -6.0, -1.0, -6.0, -4.0);
+            cr.arc(0.0, -4.0, 6.0, std::f64::consts::PI, 0.0);
+            cr.curve_to(6.0, -1.0, 6.0, 5.0, 8.0, 8.0);
+            cr.close_path();
+            let _ = cr.stroke();
+            cr.new_path();
+            cr.arc(0.0, 11.0, 1.5, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+            cr.restore().unwrap();
+            centered_label(cr, renderer, "Пока пусто", x, y + 207.0, WIDTH, Font::Text, 0.9 * a);
+            centered_label(cr, renderer, "Новые сообщения появятся здесь", x, y + 239.0, WIDTH, Font::Small, 0.52 * a);
         }
         cr.save().unwrap();
         cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
@@ -652,19 +680,26 @@ impl Center {
         }
         label(cr, renderer, &entry.note.app, x + 83.0, y + 77.0, WIDTH - 108.0, Font::Caption, alpha * 0.65);
         label(cr, renderer, &entry.note.summary, x + 83.0, y + 103.0, WIDTH - 108.0, Font::Text, alpha);
+        rounded(cr, x + 22.0, y + 144.0, WIDTH - 44.0, 208.0, 16.0);
+        cr.set_source_rgba(0.14, 0.14, 0.15, alpha);
+        let _ = cr.fill();
+        rounded(cr, x + 22.5, y + 144.5, WIDTH - 45.0, 207.0, 15.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.07 * alpha);
+        let _ = cr.stroke();
         cr.save().unwrap();
-        cr.rectangle(x + 24.0, y + 149.0, WIDTH - 48.0, 197.0);
+        cr.rectangle(x + 35.0, y + 154.0, WIDTH - 70.0, 187.0);
         cr.clip();
         let body_y = if let Some(image) = &entry.note.image {
             let _ = crate::notify::draw_media(cr, media, image, x + WIDTH / 2.0,
                 y + 211.0, 118.0, renderer.scale(), alpha);
             278.0
-        } else { 150.0 };
+        } else { 161.0 };
         let text = renderer.layout(cr, &entry.note.body, Font::Caption).copy();
-        text.set_width(((WIDTH - 48.0) * pango::SCALE as f64) as i32);
+        text.set_width(((WIDTH - 70.0) * pango::SCALE as f64) as i32);
         text.set_wrap(pango::WrapMode::WordChar);
         cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.78);
-        cr.move_to(renderer.snap(x + 24.0), renderer.snap(y + body_y - self.detail_scroll));
+        cr.move_to(renderer.snap(x + 35.0), renderer.snap(y + body_y - self.detail_scroll));
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
@@ -698,14 +733,36 @@ fn label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, width: f
     pangocairo::functions::show_layout(cr, &layout);
 }
 
+fn centered_label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, width: f64, font: Font, alpha: f64) {
+    let layout = renderer.layout(cr, text, font);
+    let (_, ext) = layout.pixel_extents();
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    cr.move_to(renderer.snap(x + (width - ext.width() as f64) / 2.0 - ext.x() as f64), renderer.snap(y));
+    pangocairo::functions::show_layout(cr, &layout);
+}
+
 fn button(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64, hover: f64) {
     rounded(cr, x, y, w, h, h / 2.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, (0.085 + 0.12 * hover) * alpha);
+    let action = !matches!(text, "×" | "Назад" | "Очистить" | "Удалить");
+    let destructive = text == "Удалить";
+    if action {
+        cr.set_source_rgba(0.13 + 0.07 * hover, 0.39 + 0.09 * hover, 0.72 + 0.08 * hover, alpha);
+    } else {
+        cr.set_source_rgba(0.15 + 0.07 * hover, 0.15 + 0.07 * hover, 0.16 + 0.07 * hover, alpha);
+    }
     let _ = cr.fill();
+    rounded(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, (h - 1.0) / 2.0);
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, (0.07 + 0.11 * hover) * alpha);
+    let _ = cr.stroke();
     let font = if text == "×" { Font::Text } else { Font::Caption };
     let layout = renderer.layout_ellipsized(cr, text, font, w - 16.0, 1);
     let (_, ink) = layout.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.72 + 0.26 * hover));
+    if destructive {
+        cr.set_source_rgba(1.0, 0.46 + 0.16 * hover, 0.44 + 0.16 * hover, alpha * (0.82 + 0.18 * hover));
+    } else {
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.76 + 0.24 * hover));
+    }
     cr.move_to(
         renderer.snap(x + (w - ink.width() as f64) / 2.0 - ink.x() as f64),
         renderer.snap(y + (h - ink.height() as f64) / 2.0 - ink.y() as f64),

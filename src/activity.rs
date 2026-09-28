@@ -360,27 +360,51 @@ pub fn draw_timer_menu(
 ) {
     let heading_k = smoothstep((now - since) / 0.24);
     let heading_y = (1.0 - heading_k) * 5.0;
-    timer_label(cr, renderer, "Таймер", x + 22.0, y + 17.0 + heading_y, Font::Text, alpha * heading_k);
+    round_rect(cr, x + 22.0, y + 18.0 + heading_y, 38.0, 38.0, 12.0);
+    cr.set_source_rgba(0.95, 0.57, 0.12, alpha * heading_k);
+    let _ = cr.fill();
+    cr.save().unwrap();
+    cr.set_line_width(1.8);
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * heading_k);
+    cr.arc(x + 41.0, y + 38.0 + heading_y, 10.0, 0.0, std::f64::consts::TAU);
+    let _ = cr.stroke();
+    cr.move_to(x + 41.0, y + 38.0 + heading_y);
+    cr.line_to(x + 41.0, y + 32.0 + heading_y);
+    cr.move_to(x + 41.0, y + 38.0 + heading_y);
+    cr.line_to(x + 46.0, y + 41.0 + heading_y);
+    let _ = cr.stroke();
+    cr.restore().unwrap();
+    timer_label(cr, renderer, "Таймер", x + 72.0, y + 17.0 + heading_y, Font::Text, alpha * heading_k);
     let subtitle = match timer {
         Some((remaining, running)) => {
             format!("{} · {}", timer_text(remaining), if running { "идёт отсчёт" } else { "на паузе" })
         }
         None => "Выберите время · Помодоро — 25 мин".into(),
     };
-    timer_label(cr, renderer, &subtitle, x + 22.0, y + 43.0 + heading_y, Font::Small, alpha * 0.55 * heading_k);
+    timer_label(cr, renderer, &subtitle, x + 72.0, y + 43.0 + heading_y, Font::Small, alpha * 0.55 * heading_k);
     for (index, (command, label, bx, by, bw)) in TIMER_BUTTONS.into_iter().enumerate() {
         let k = smoothstep((now - since - 0.05 - index as f64 * 0.035) / 0.23);
         let dy = 5.0 * (1.0 - k);
         let enabled = !matches!(command, "toggle" | "cancel") || timer.is_some();
         let opacity = alpha * (0.3 + 0.7 * enabled_alpha[index]);
-        let lit = if enabled { 0.12 * hover[index] } else { 0.0 };
+        let lit = if enabled { hover[index].clamp(0.0, 1.0) } else { 0.0 };
+        let accent = command == "25m" || command == "toggle" && timer.is_some_and(|(_, running)| !running);
         round_rect(cr, x + bx, y + by + dy, bw, 32.0, 10.0);
-        if command == "25m" {
-            cr.set_source_rgba(1.0, 0.60, 0.15, (0.22 + lit) * opacity * k);
+        if accent {
+            cr.set_source_rgba(0.36 + 0.11 * lit, 0.25 + 0.08 * lit, 0.12 + 0.03 * lit, opacity * k);
         } else {
-            cr.set_source_rgba(1.0, 1.0, 1.0, (0.09 + lit) * opacity * k);
+            cr.set_source_rgba(0.14 + 0.07 * lit, 0.14 + 0.07 * lit, 0.16 + 0.07 * lit, opacity * k);
         }
         let _ = cr.fill();
+        round_rect(cr, x + bx + 0.5, y + by + dy + 0.5, bw - 1.0, 31.0, 9.5);
+        cr.set_line_width(1.0);
+        if accent {
+            cr.set_source_rgba(1.0, 0.68, 0.32, (0.17 + 0.14 * lit) * opacity * k);
+        } else {
+            cr.set_source_rgba(1.0, 1.0, 1.0, (0.06 + 0.10 * lit) * opacity * k);
+        }
+        let _ = cr.stroke();
         let label = if command == "toggle" && timer.is_some_and(|(_, running)| !running) {
             "Продолжить"
         } else {

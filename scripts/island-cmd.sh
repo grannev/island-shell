@@ -4,9 +4,10 @@
 #   launcher      mod+d: the island unfolds into the launcher; the ⋯ drawer
 #                 (mod+o, details-toggle.sh) is closed first if it is open,
 #                 since the island cannot be a panel and dodge it at once
+#   quick         mod+m: unfold the island's shortcut menu
 bin="${ISLAND_SHELL:-$HOME/.local/bin/island-shell}"
 [ -x "$bin" ] || bin=island-shell
-if [ "$1" = launcher ]; then
+if [ "$1" = launcher ] || [ "$1" = quick ]; then
 	case "$("$bin" status 2>/dev/null)" in
 		*" dodged "*) "$HOME/.config/sway/scripts/details-toggle.sh" ;;
 	esac

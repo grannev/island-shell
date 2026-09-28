@@ -537,7 +537,7 @@ impl Panel {
         let grouped = alpha < 0.999;
         if grouped { cr.push_group(); }
         rounded(cr, 24.0, 22.0, 36.0, 36.0, 12.0);
-        cr.set_source_rgb(0.10, 0.48, 0.96);
+        cr.set_source_rgb(0.10, 0.52, 0.97);
         let _ = cr.fill();
         symbol(cr, self.kind, 42.0, 40.0, 1.0, 1.0);
         label(
@@ -572,11 +572,15 @@ impl Panel {
             self.draw_prompt(cr, renderer, now);
         } else {
             rounded(cr, 22.0, 86.0, 436.0, 34.0, 11.0);
-            cr.set_source_rgb(0.085, 0.085, 0.095);
+            cr.set_source_rgb(0.11, 0.11, 0.12);
             let _ = cr.fill();
             rounded(cr, 25.0 + self.tab_slide.value(now) * 216.0, 89.0, 214.0, 28.0, 8.0);
-            cr.set_source_rgb(0.22, 0.22, 0.24);
+            cr.set_source_rgb(0.25, 0.25, 0.27);
             let _ = cr.fill();
+            rounded(cr, 25.5 + self.tab_slide.value(now) * 216.0, 89.5, 213.0, 27.0, 7.5);
+            cr.set_line_width(1.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.11);
+            let _ = cr.stroke();
             let tabs = if self.kind == Kind::Wifi {
                 ["Все сети", "Сохранённые"]
             } else {
@@ -620,6 +624,13 @@ impl Panel {
                 } else {
                     ("Сети не найдены", "Нажмите кнопку поиска ниже")
                 };
+                rounded(cr, 22.0, LIST_Y, 436.0, (height - 90.0 - LIST_Y).max(0.0), 16.0);
+                cr.set_source_rgb(0.13, 0.13, 0.14);
+                let _ = cr.fill();
+                rounded(cr, 22.5, LIST_Y + 0.5, 435.0, (height - 91.0 - LIST_Y).max(0.0), 15.5);
+                cr.set_line_width(1.0);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
+                let _ = cr.stroke();
                 let center = LIST_Y + (height - 90.0 - LIST_Y) / 2.0;
                 let appear = if self.old_rows.is_empty() { 1.0 } else { fade };
                 symbol(cr, self.kind, WIDTH / 2.0, center - 24.0, 1.8, 0.3 * appear);
@@ -702,11 +713,16 @@ impl Panel {
         let hover = self.lit(Hit::Row(d.id.clone()), now);
         rounded(cr, 22.0, y, 436.0, ROW_H - 3.0, 12.0);
         if d.connected {
-            cr.set_source_rgba(0.10, 0.48, 0.96, alpha * (0.18 + hover * 0.14));
+            cr.set_source_rgba(0.14 + 0.05 * hover, 0.22 + 0.05 * hover, 0.34 + 0.06 * hover, alpha);
         } else {
-            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.045 + hover * 0.09));
+            cr.set_source_rgba(0.13 + 0.06 * hover, 0.13 + 0.06 * hover, 0.14 + 0.06 * hover, alpha);
         }
         let _ = cr.fill();
+        rounded(cr, 22.5, y + 0.5, 435.0, ROW_H - 4.0, 11.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(if d.connected { 0.32 } else { 1.0 }, if d.connected { 0.66 } else { 1.0 },
+            1.0, alpha * (if d.connected { 0.28 } else { 0.06 } + hover * 0.10));
+        let _ = cr.stroke();
         if self.kind == Kind::Wifi {
             symbol(cr, Kind::Wifi, 43.0, y + 24.0, 0.86, alpha * if d.connected { 1.0 } else { 0.7 });
         } else {
@@ -749,7 +765,14 @@ impl Panel {
         } else {
             "Подключить"
         };
-        label(cr, renderer, action, 344.0, y + 16.0, Font::Tiny, 99.0, alpha * (0.5 + hover * 0.5));
+        rounded(cr, 341.0, y + 10.0, 101.0, 29.0, 9.0);
+        if d.connected {
+            cr.set_source_rgba(0.26, 0.54, 0.89, alpha * (0.25 + hover * 0.20));
+        } else {
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.07 + hover * 0.12));
+        }
+        let _ = cr.fill();
+        centered(cr, renderer, action, 342.0, y + 10.0, 99.0, 29.0, Font::Tiny, alpha * (0.66 + hover * 0.34));
     }
 
     fn draw_prompt(&self, cr: &Context, renderer: &Renderer, now: Time) {
@@ -758,6 +781,13 @@ impl Panel {
         cr.save().unwrap();
         cr.translate(0.0, (1.0 - k) * 7.0);
         if k < 0.999 { cr.push_group(); }
+        rounded(cr, 22.0, 95.0, 436.0, 262.0, 17.0);
+        cr.set_source_rgb(0.13, 0.13, 0.14);
+        let _ = cr.fill();
+        rounded(cr, 22.5, 95.5, 435.0, 261.0, 16.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.07);
+        let _ = cr.stroke();
         let (title, description, code, field) = match prompt {
             Prompt::Wifi(d) => (d.name.as_str(), "Введите пароль сети Wi-Fi", "", true),
             Prompt::Pair(p) => ("Сопряжение", p.text.as_str(), p.code.as_str(), p.input != Input::None),
@@ -875,11 +905,15 @@ fn button(
     let a = if enabled { 1.0 } else { 0.32 };
     rounded(cr, x, y, w, h, 10.0);
     if accent {
-        cr.set_source_rgba(0.1 + hover * 0.10, 0.48 + hover * 0.10, 0.96, a);
+        cr.set_source_rgba(0.12 + hover * 0.07, 0.47 + hover * 0.08, 0.91 + hover * 0.04, a);
     } else {
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.08 + hover * 0.12) * a);
+        cr.set_source_rgba(0.15 + hover * 0.07, 0.15 + hover * 0.07, 0.16 + hover * 0.07, a);
     }
     let _ = cr.fill();
+    rounded(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, 9.5);
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, (0.07 + 0.11 * hover) * a);
+    let _ = cr.stroke();
     centered(cr, renderer, text, x, y, w, h, Font::Small, a);
 }
 fn spinner(cr: &Context, x: f64, y: f64, now: Time) {
