@@ -44,12 +44,14 @@ same menu from a script; `mod+m` opens it directly. The Waybar's ⋯ drawer
 now contains only disk, CPU and memory information, with no separate network
 or timer buttons.
 `mod+d` still opens the launcher directly.
+Inside a shortcut sheet, × returns to the quick menu; Escape and a click
+outside dismiss it entirely.
 
 The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
 Pomodoro shortcut); click a preset to start. While running, a compact ring
 and remaining time sit beside the clock. Click that indicator to pause or
-resume, or right-click to reopen the controls. Escape or × closes the panel
-without stopping the countdown. Completion expands into a short “Time is up”
+resume, or right-click to reopen the controls. Escape closes the panel and ×
+returns to the quick menu, neither stopping the countdown. Completion expands into a short “Time is up”
 activity. The timer is kept in memory and resets when the service restarts.
 
 `island-shell wifi` / `island-shell bluetooth` open the same
@@ -174,6 +176,9 @@ ignore-file exclusions, `node_modules`, `target` and `__pycache__` are skipped;
 symlinked directories are not traversed. Partial results are labelled so the
 query can be narrowed. The best five app matches precede file results, with
 remaining app matches still accessible below them.
+The launcher selection stops at the first and last result, with a small edge
+nudge instead of wrapping. `Ctrl+Backspace` deletes the previous word in its
+search field.
 
 Step 3: notifications. The island itself owns `org.freedesktop.Notifications`:
 no dunst process, monitor permission or rule script is needed. It implements

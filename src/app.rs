@@ -943,6 +943,7 @@ impl App {
             }
             Keysym::Down | Keysym::Tab => l.move_selection(1, now),
             Keysym::Up | Keysym::ISO_Left_Tab => l.move_selection(-1, now),
+            Keysym::BackSpace if ctrl => l.delete_previous_word(now),
             Keysym::BackSpace => l.backspace(now),
             Keysym::u | Keysym::U if ctrl => l.clear(now),
             _ => match event.utf8.as_deref() {
@@ -1516,7 +1517,10 @@ impl PointerHandler for App {
                     if self.island.launcher.is_some() {
                         self.pointer_at = event.position;
                         let over_row = self.hover_launcher_row();
-                        if button == BTN_LEFT && over_row {
+                        if button == BTN_LEFT && self.island.launcher_close_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
+                            self.island.close_launcher(now);
+                            self.island.return_to_quick_menu(now);
+                        } else if button == BTN_LEFT && over_row {
                             if let Some(l) = self.island.launcher.as_ref() {
                                 l.launch();
                             }
@@ -1527,7 +1531,7 @@ impl PointerHandler for App {
                         continue;
                     }
                     if let Some(action) = self.island.click_notification_center(event.position.0, event.position.1, button == BTN_LEFT, now) {
-                        self.handle_notification_action(action);
+                        self.handle_notification_action(action, now);
                         changed = true;
                         continue;
                     }
@@ -1694,7 +1698,7 @@ impl App {
         }
     }
 
-    fn handle_notification_action(&mut self, action: crate::notice_center::Action) {
+    fn handle_notification_action(&mut self, action: crate::notice_center::Action, now: Time) {
         use crate::notice_center::Action;
         use crate::notification_server::Command;
         match action {
@@ -1703,7 +1707,8 @@ impl App {
             Action::DismissMany(ids) => {
                 for id in ids { let _ = self.notification_commands.send(Command::Dismiss(id)); }
             }
-            Action::None | Action::Close => {}
+            Action::Close => self.island.return_to_quick_menu(now),
+            Action::None => {}
         }
     }
 
@@ -1713,15 +1718,16 @@ impl App {
         let (bx, by) = self.island.box_origin(self.width as f64 / 2.0, now);
         let (px, py) = self.pointer_at;
         let Some(l) = self.island.launcher.as_mut() else { return false };
+        let close_changed = l.set_close_hover(px - bx, py - by, now);
         if px < bx || px > bx + crate::launcher::PANEL_W {
-            return false;
+            return close_changed;
         }
         match l.row_at(by, py, now) {
             Some(index) => {
                 l.select_index(index, now);
                 true
             }
-            None => false,
+            None => close_changed,
         }
     }
 

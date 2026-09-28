@@ -371,6 +371,7 @@ pub struct Island {
     quick_hover_springs: [Spring; 6],
     quick_close_hover: Spring,
     quick_retiring_at: Option<Time>,
+    quick_returned_at: Option<Time>,
     eq_rect: Option<Rect>,
     player_rect: Option<Rect>,
     eq_hovered: bool,
@@ -527,6 +528,7 @@ impl Island {
             quick_hover_springs: std::array::from_fn(|_| Spring::new(0.0, 0.24, 0.83)),
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
             quick_retiring_at: None,
+            quick_returned_at: None,
             eq_rect: None,
             player_rect: None,
             eq_hovered: false,
@@ -589,6 +591,7 @@ impl Island {
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
             || self.quick_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
+            || self.quick_returned_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.notice_action_hover.iter().any(|spring| spring.is_moving(now))
             || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
@@ -768,6 +771,10 @@ impl Island {
         }
         if self.quick_retiring_at.is_some_and(|since| now - since >= SHEET_SWAP) {
             self.quick_retiring_at = None;
+            changed = true;
+        }
+        if self.quick_returned_at.is_some_and(|since| now - since >= SHEET_SWAP) {
+            self.quick_returned_at = None;
             changed = true;
         }
         match self.auth {
@@ -1077,6 +1084,12 @@ impl Island {
             self.launcher = None;
             self.sync(now);
         }
+    }
+
+    pub fn launcher_close_at(&self, cx: f64, px: f64, py: f64, now: Time) -> bool {
+        if self.launcher.is_none() || self.panel.state(now).x < 0.95 { return false; }
+        let (x, y) = self.box_origin(cx, now);
+        Launcher::close_hit(px - x, py - y, launcher::PANEL_W)
     }
 
     pub fn set_asset_waker(&self, tx: smithay_client_toolkit::reexports::calloop::channel::Sender<()>) {
@@ -1452,7 +1465,8 @@ impl Island {
         if let Some(r) = self.timer_menu_rect {
             if let Some(command) = activity::timer_menu_hit(px - r.x, py - r.y) {
                 if command == "close" {
-                    self.activity_retiring = self.activity.take();
+                    self.close_activity_panel(now);
+                    self.return_to_quick_menu(now);
                 } else if self.timer_command(command, now).is_ok() && !matches!(command, "toggle" | "cancel") {
                     self.activity_retiring = self.activity.take();
                 }
@@ -1522,7 +1536,10 @@ impl Island {
         if !self.connections_open() { return false; }
         if !activate { return true; }
         if let (Some(rect), Some(panel)) = (self.network_menu_rect, &mut self.network_panel) {
-            if panel.click(px - rect.x, py - rect.y, now) { self.close_activity_panel(now); }
+            if panel.click(px - rect.x, py - rect.y, now) {
+                self.close_activity_panel(now);
+                self.return_to_quick_menu(now);
+            }
         }
         true
     }
@@ -1923,10 +1940,12 @@ impl Island {
                 self.center.draw(cr, renderer, &self.launcher_icons, x, dy + climb + enter, pill_alpha * sheet_k, now);
             } else if self.quick_open {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
-                if pill_alpha > 0.95 {
-                    self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb, w: quick::WIDTH, h: quick::HEIGHT });
+                let arrive = self.quick_returned_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
+                let enter = 8.0 * (1.0 - arrive);
+                if pill_alpha > 0.95 && arrive > 0.9 {
+                    self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb + enter, w: quick::WIDTH, h: quick::HEIGHT });
                 }
-                quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb, pill_alpha,
+                quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb + enter, pill_alpha * arrive,
                     std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread(), self.dnd_glow.value(now));
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
@@ -2277,10 +2296,21 @@ impl Island {
         self.sync(now);
     }
 
+    /// Explicit close buttons in child sheets return to the shortcut grid.
+    /// Escape and an outside click still dismiss the entire island menu.
+    pub fn return_to_quick_menu(&mut self, now: Time) {
+        if self.auth.is_some() { return; }
+        self.activity_retiring = None;
+        self.network_panel = None;
+        self.open_quick_menu_shortcut(now);
+        self.quick_returned_at = Some(now);
+    }
+
     pub fn close_quick_menu(&mut self, now: Time) {
         if self.quick_open {
             self.quick_open = false;
             self.quick_retiring_at = Some(now);
+            self.quick_returned_at = None;
             self.quick_rect = None;
             self.quick_hover = None;
             self.sync(now);
@@ -2991,6 +3021,40 @@ mod tests {
         island.close_quick_menu(2.0);
         assert!(island.is_hidden());
         assert_eq!(island.hide.target(), 1.0);
+    }
+
+    #[test]
+    fn timer_close_returns_to_quick_menu_but_escape_dismisses_it() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        island.live_activity(activity::Event::TimerMenu, 10.0);
+        island.draw(&cr, &renderer, 490.0, 10.8);
+        let rect = island.timer_menu_rect.expect("timer controls should be interactive");
+        assert!(island.click_timer_menu(rect.x + 352.0, rect.y + 34.0, 10.9));
+        assert!(island.quick_menu_open());
+        assert!(island.quick_returned_at.is_some());
+        assert!(island.close_activity_panel(11.2));
+        assert!(!island.quick_menu_open());
+    }
+
+    #[test]
+    fn launcher_close_target_leads_back_to_quick_menu() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        assert!(island.toggle_launcher(20.0));
+        island.draw(&cr, &renderer, 490.0, 20.8);
+        let (x, y) = island.box_origin(490.0, 20.8);
+        assert!(island.launcher_close_at(490.0, x + launcher::PANEL_W - 32.0, y + 27.0, 20.8));
+        island.close_launcher(20.8);
+        island.return_to_quick_menu(20.8);
+        assert!(island.launcher.is_none());
+        assert!(island.quick_menu_open());
     }
 
     #[test]

@@ -87,6 +87,8 @@ pub struct Launcher {
     sel_alpha: Quintic,
     /// how far the list is scrolled, in rows
     scroll: Spring,
+    close_hover: Spring,
+    edge_hit: Option<(i32, Time)>,
     matches: usize,
     opened: Time,
 }
@@ -107,6 +109,8 @@ impl Launcher {
             sel_slot: Spring::new(0.0, SEL_SPRING.0, SEL_SPRING.1),
             sel_alpha: Quintic::at_rest(0.0, FADE),
             scroll: Spring::new(0.0, SCROLL_SPRING.0, SCROLL_SPRING.1),
+            close_hover: Spring::new(0.0, 0.24, 0.85),
+            edge_hit: None,
             matches: 0,
             opened: now,
         };
@@ -125,6 +129,7 @@ impl Launcher {
     pub fn file_count(&self) -> usize { self.files.len() }
 
     fn query_changed(&mut self, now: Time) {
+        self.edge_hit = None;
         self.file_search.cancel();
         self.file_request = None;
         self.files.clear();
@@ -155,6 +160,8 @@ impl Launcher {
             || self.sel_slot.is_moving(now)
             || self.sel_alpha.is_moving(now)
             || self.scroll.is_moving(now)
+            || self.close_hover.is_moving(now)
+            || self.edge_hit.is_some_and(|(_, since)| now - since < 0.33)
             // the icons finish popping in
             || self.rows.iter().any(|r| now - r.born < 0.35)
             || now - self.opened < 0.8
@@ -276,7 +283,7 @@ impl Launcher {
         }
     }
 
-    /// Move the selection by `delta` rows (wrapping).
+    /// Move the selection by `delta` rows without wrapping at either edge.
     pub fn move_selection(&mut self, delta: i32, now: Time) {
         let rows = self.results();
         if rows.is_empty() {
@@ -284,8 +291,14 @@ impl Launcher {
         }
         let current = rows.iter().position(|r| r.id == self.selected).unwrap_or(0) as i32;
         let n = rows.len() as i32;
-        let next = (current + delta).rem_euclid(n) as usize;
-        self.selected = rows[next].id.clone();
+        let wanted = current + delta;
+        if wanted < 0 || wanted >= n {
+            self.edge_hit = Some((delta.signum(), now));
+            return;
+        }
+        let next_id = rows[wanted as usize].id.clone();
+        self.edge_hit = None;
+        self.selected = next_id;
         self.sync_selection(now);
         // a shorter list may leave the scroll past its end
         let clamped = self.scroll.target().clamp(0.0, self.max_scroll());
@@ -299,6 +312,7 @@ impl Launcher {
         if let Some(row) = self.results().get(index) {
             let id = row.id.clone();
             if id != self.selected {
+                self.edge_hit = None;
                 self.selected = id;
                 self.sync_selection(now);
             }
@@ -313,6 +327,32 @@ impl Launcher {
     pub fn backspace(&mut self, now: Time) {
         self.query.pop();
         self.query_changed(now);
+    }
+
+    /// Delete one Unicode word (or a run of punctuation) before the caret.
+    pub fn delete_previous_word(&mut self, now: Time) {
+        let end = self.query.trim_end_matches(char::is_whitespace).len();
+        let Some(last) = self.query[..end].chars().next_back() else {
+            if !self.query.is_empty() { self.query.clear(); self.query_changed(now); }
+            return;
+        };
+        let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+        let start = self.query[..end].char_indices().rev()
+            .take_while(|(_, ch)| !ch.is_whitespace() && word(*ch) == word(last))
+            .last().map_or(end, |(index, _)| index);
+        self.query.truncate(start);
+        self.query_changed(now);
+    }
+
+    pub fn close_hit(x: f64, y: f64, width: f64) -> bool {
+        x >= width - 53.0 && x <= width - 13.0 && (7.0..49.0).contains(&y)
+    }
+
+    pub fn set_close_hover(&mut self, x: f64, y: f64, now: Time) -> bool {
+        let hovered = Self::close_hit(x, y, PANEL_W);
+        if (self.close_hover.target() > 0.5) == hovered { return false; }
+        self.close_hover.set(f64::from(hovered), now);
+        true
     }
 
     /// Ctrl+U: wipe the query.
@@ -360,6 +400,18 @@ impl Launcher {
             (alpha * k, 10.0 * (1.0 - k))
         };
         let (fa, fo) = intro(0.0);
+        let close = self.close_hover.value(now).clamp(0.0, 1.0);
+        rounded(cr, x + w - 49.0, y + 10.0, 34.0, 34.0, 17.0);
+        cr.set_source_rgba(0.16 + 0.08 * close, 0.16 + 0.08 * close, 0.17 + 0.08 * close, alpha);
+        let _ = cr.fill();
+        cr.set_line_width(1.8);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.62 + 0.36 * close) * alpha);
+        cr.move_to(x + w - 39.0, y + 20.0);
+        cr.line_to(x + w - 25.0, y + 34.0);
+        cr.move_to(x + w - 25.0, y + 20.0);
+        cr.line_to(x + w - 39.0, y + 34.0);
+        let _ = cr.stroke();
         rounded(cr, fx, fy + fo, fw, FIELD_H, FIELD_H / 2.0);
         cr.set_source_rgba(0.15, 0.15, 0.17, fa);
         let _ = cr.fill();
@@ -406,6 +458,17 @@ impl Launcher {
         cr.save().unwrap();
         cr.rectangle(x, view_top, w, view_h);
         cr.clip();
+        let edge = self.edge_hit.map_or(0.0, |(direction, since)| {
+            let t = now - since;
+            let amount = if t < 0.11 {
+                crate::anim::min_jerk(t / 0.11)
+            } else if t < 0.33 {
+                1.0 - crate::anim::min_jerk((t - 0.11) / 0.22)
+            } else { 0.0 };
+            direction as f64 * 7.0 * amount
+        });
+        cr.save().unwrap();
+        cr.translate(0.0, edge);
 
         // the selection, gliding between rows
         let sel_alpha = self.sel_alpha.state(now).x * alpha;
@@ -436,6 +499,7 @@ impl Launcher {
             let ry = view_top + place * ROW_H + ro;
             self.draw_row(cr, renderer, row, x, ry, w, row_alpha * (ra / alpha).min(1.0), now);
         }
+        cr.restore().unwrap();
 
         // the fades: black over the panel's own black, so rows dissolve
         // into the edges of the viewport when there is more to scroll to
@@ -575,6 +639,52 @@ mod tests {
         assert_eq!(l.file_count(), 0);
         assert!(!l.receive_files(7, reply("notes.txt"), 1.6));
         assert!(!l.launch(), "a fading-out file must not be opened");
+    }
+
+    #[test]
+    fn selection_stops_at_both_ends_and_nudges_toward_the_pressed_arrow() {
+        let mut l = launcher();
+        l.files = ["one", "two", "three"].into_iter().map(|name| crate::files::FileHit {
+            path: std::path::Path::new("/tmp").join(name), name: name.into(),
+            subtitle: String::new(), directory: false,
+        }).collect();
+        l.refresh(1.0);
+        let first = l.selected.clone();
+        l.move_selection(-1, 1.1);
+        assert_eq!(l.selected, first);
+        assert_eq!(l.edge_hit, Some((-1, 1.1)));
+        l.move_selection(1, 1.5);
+        l.move_selection(1, 1.6);
+        let last = l.selected.clone();
+        assert_ne!(last, first);
+        l.move_selection(1, 1.7);
+        assert_eq!(l.selected, last);
+        assert_eq!(l.edge_hit, Some((1, 1.7)));
+        assert!(l.is_animating(1.8));
+    }
+
+    #[test]
+    fn control_backspace_removes_unicode_words_and_path_segments() {
+        let mut l = launcher();
+        l.push("Привет мир /tmp/файл", 1.0);
+        l.delete_previous_word(1.1);
+        assert_eq!(l.query, "Привет мир /tmp/");
+        l.delete_previous_word(1.2);
+        assert_eq!(l.query, "Привет мир /tmp");
+        l.delete_previous_word(1.3);
+        assert_eq!(l.query, "Привет мир /");
+        l.delete_previous_word(1.4);
+        assert_eq!(l.query, "Привет мир ");
+        l.delete_previous_word(1.5);
+        assert_eq!(l.query, "Привет ");
+        l.delete_previous_word(1.6);
+        assert!(l.query.is_empty());
+    }
+
+    #[test]
+    fn launcher_close_target_stays_in_the_header() {
+        assert!(Launcher::close_hit(PANEL_W - 32.0, 27.0, PANEL_W));
+        assert!(!Launcher::close_hit(PANEL_W - 32.0, FIELD_TOP + 20.0, PANEL_W));
     }
 }
 
