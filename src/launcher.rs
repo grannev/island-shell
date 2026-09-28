@@ -42,6 +42,16 @@ const FADE: f64 = 0.22;
 const CARET_HZ: f64 = 1.6;
 const CARET_DUTY: f64 = 0.55;
 const FILE_DEBOUNCE: f64 = 0.18;
+const EDGE_LIMIT: f64 = 28.0;
+const EDGE_RELEASE: f64 = 0.10;
+const EDGE_SETTLE: f64 = 0.85;
+
+#[derive(Clone, Copy)]
+struct EdgePull {
+    from: f64,
+    peak: f64,
+    since: Time,
+}
 
 #[derive(Clone)]
 enum Entry {
@@ -88,7 +98,7 @@ pub struct Launcher {
     /// how far the list is scrolled, in rows
     scroll: Spring,
     close_hover: Spring,
-    edge_hit: Option<(i32, Time)>,
+    edge_pull: Option<EdgePull>,
     matches: usize,
     opened: Time,
 }
@@ -110,7 +120,7 @@ impl Launcher {
             sel_alpha: Quintic::at_rest(0.0, FADE),
             scroll: Spring::new(0.0, SCROLL_SPRING.0, SCROLL_SPRING.1),
             close_hover: Spring::new(0.0, 0.24, 0.85),
-            edge_hit: None,
+            edge_pull: None,
             matches: 0,
             opened: now,
         };
@@ -129,7 +139,7 @@ impl Launcher {
     pub fn file_count(&self) -> usize { self.files.len() }
 
     fn query_changed(&mut self, now: Time) {
-        self.edge_hit = None;
+        self.edge_pull = None;
         self.file_search.cancel();
         self.file_request = None;
         self.files.clear();
@@ -161,7 +171,7 @@ impl Launcher {
             || self.sel_alpha.is_moving(now)
             || self.scroll.is_moving(now)
             || self.close_hover.is_moving(now)
-            || self.edge_hit.is_some_and(|(_, since)| now - since < 0.33)
+            || self.edge_pull.is_some_and(|pull| now - pull.since < EDGE_SETTLE)
             // the icons finish popping in
             || self.rows.iter().any(|r| now - r.born < 0.35)
             || now - self.opened < 0.8
@@ -247,12 +257,40 @@ impl Launcher {
 
     /// Scroll by `rows` (the wheel).
     pub fn scroll_by(&mut self, rows: f64, now: Time) -> bool {
-        let target = (self.scroll.target() + rows).clamp(0.0, self.max_scroll());
+        if rows.abs() < 1e-6 { return false; }
+        let wanted = self.scroll.target() + rows;
+        let target = wanted.clamp(0.0, self.max_scroll());
+        let excess = wanted - target;
+        if excess.abs() > 1e-6 {
+            self.pull_edge(excess.signum(), excess.abs(), now);
+        }
         if (target - self.scroll.target()).abs() < 1e-6 {
-            return false;
+            return excess.abs() > 1e-6;
         }
         self.scroll.set(target, now);
         true
+    }
+
+    fn edge_offset(&self, now: Time) -> f64 {
+        let Some(pull) = self.edge_pull else { return 0.0 };
+        let elapsed = (now - pull.since).max(0.0);
+        if elapsed < EDGE_RELEASE {
+            let k = crate::anim::min_jerk(elapsed / EDGE_RELEASE);
+            pull.from + (pull.peak - pull.from) * k
+        } else if elapsed < EDGE_SETTLE {
+            let t = (elapsed - EDGE_RELEASE) / 0.10;
+            pull.peak * (1.0 + t) * (-t).exp()
+        } else { 0.0 }
+    }
+
+    /// A resisted pull, shared by keys and the wheel. Keeping the current
+    /// rendered offset as the start makes rapid repeated input continuous.
+    fn pull_edge(&mut self, direction: f64, strength: f64, now: Time) {
+        let from = self.edge_offset(now);
+        let impulse = -direction.signum() * 18.0 * strength.clamp(0.35, 2.5);
+        let wanted = from + impulse;
+        let peak = EDGE_LIMIT * wanted / (EDGE_LIMIT + wanted.abs());
+        self.edge_pull = Some(EdgePull { from, peak, since: now });
     }
 
     /// Bring the selection into view, keeping a row of context where there
@@ -293,11 +331,11 @@ impl Launcher {
         let n = rows.len() as i32;
         let wanted = current + delta;
         if wanted < 0 || wanted >= n {
-            self.edge_hit = Some((delta.signum(), now));
+            self.scroll_to_selection(now);
+            self.pull_edge(delta.signum() as f64, 1.0, now);
             return;
         }
         let next_id = rows[wanted as usize].id.clone();
-        self.edge_hit = None;
         self.selected = next_id;
         self.sync_selection(now);
         // a shorter list may leave the scroll past its end
@@ -312,7 +350,6 @@ impl Launcher {
         if let Some(row) = self.results().get(index) {
             let id = row.id.clone();
             if id != self.selected {
-                self.edge_hit = None;
                 self.selected = id;
                 self.sync_selection(now);
             }
@@ -458,15 +495,7 @@ impl Launcher {
         cr.save().unwrap();
         cr.rectangle(x, view_top, w, view_h);
         cr.clip();
-        let edge = self.edge_hit.map_or(0.0, |(direction, since)| {
-            let t = now - since;
-            let amount = if t < 0.11 {
-                crate::anim::min_jerk(t / 0.11)
-            } else if t < 0.33 {
-                1.0 - crate::anim::min_jerk((t - 0.11) / 0.22)
-            } else { 0.0 };
-            direction as f64 * 7.0 * amount
-        });
+        let edge = self.edge_offset(now);
         cr.save().unwrap();
         cr.translate(0.0, edge);
 
@@ -642,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_stops_at_both_ends_and_nudges_toward_the_pressed_arrow() {
+    fn keyboard_edges_pull_without_wrapping_and_settle_back() {
         let mut l = launcher();
         l.files = ["one", "two", "three"].into_iter().map(|name| crate::files::FileHit {
             path: std::path::Path::new("/tmp").join(name), name: name.into(),
@@ -652,15 +681,43 @@ mod tests {
         let first = l.selected.clone();
         l.move_selection(-1, 1.1);
         assert_eq!(l.selected, first);
-        assert_eq!(l.edge_hit, Some((-1, 1.1)));
+        assert!(l.edge_offset(1.2) > 8.0);
+        let ongoing = l.edge_offset(1.22);
+        l.move_selection(-1, 1.22);
+        assert!((l.edge_offset(1.22) - ongoing).abs() < 1e-6);
+        assert!(l.edge_offset(1.32) > ongoing);
+        assert!(l.edge_offset(2.2).abs() < 0.01);
         l.move_selection(1, 1.5);
         l.move_selection(1, 1.6);
         let last = l.selected.clone();
         assert_ne!(last, first);
         l.move_selection(1, 1.7);
         assert_eq!(l.selected, last);
-        assert_eq!(l.edge_hit, Some((1, 1.7)));
+        assert!(l.edge_offset(1.8) < -8.0);
         assert!(l.is_animating(1.8));
+    }
+
+    #[test]
+    fn wheel_uses_the_same_resisted_pull_at_both_edges() {
+        let mut l = launcher();
+        l.files = (0..12).map(|i| crate::files::FileHit {
+            path: std::path::Path::new("/tmp").join(format!("item-{i}")),
+            name: format!("item-{i}"), subtitle: String::new(), directory: false,
+        }).collect();
+        l.refresh(1.0);
+        assert!(l.scroll_by(-1.0, 1.1));
+        assert_eq!(l.scroll.target(), 0.0);
+        assert!(l.edge_offset(1.2) > 0.0);
+        let first_pull = l.edge_pull.unwrap().peak;
+        assert!(l.scroll_by(-1.0, 1.2));
+        let second_pull = l.edge_pull.unwrap().peak;
+        assert!(second_pull > first_pull && second_pull < EDGE_LIMIT);
+        assert!(l.scroll_by(20.0, 2.0));
+        assert_eq!(l.scroll.target(), l.max_scroll());
+        assert!(l.edge_offset(2.1) < 0.0);
+        assert!(l.scroll_by(1.0, 2.2));
+        assert_eq!(l.scroll.target(), l.max_scroll());
+        assert!(l.edge_offset(2.3) < 0.0);
     }
 
     #[test]

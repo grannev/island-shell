@@ -176,8 +176,9 @@ ignore-file exclusions, `node_modules`, `target` and `__pycache__` are skipped;
 symlinked directories are not traversed. Partial results are labelled so the
 query can be narrowed. The best five app matches precede file results, with
 remaining app matches still accessible below them.
-The launcher selection stops at the first and last result, with a small edge
-nudge instead of wrapping. `Ctrl+Backspace` deletes the previous word in its
+The launcher selection stops at the first and last result. Arrow keys and the
+mouse wheel share a resisted rubber-band pull at the list edges instead of
+wrapping or snapping. `Ctrl+Backspace` deletes the previous word in its
 search field.
 
 Step 3: notifications. The island itself owns `org.freedesktop.Notifications`:
