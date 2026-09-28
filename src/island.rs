@@ -8,7 +8,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use cairo::Context;
 
-use crate::anim::{Quintic, Spring, Time, inv_min_jerk};
+use crate::anim::{Quintic, Spring, Time, inv_min_jerk, min_jerk};
 use crate::activity;
 use crate::icons;
 use crate::art::Art;
@@ -58,6 +58,7 @@ const PILL_DUR: f64 = 0.35;
 /// progress at which the line has dissolved and the pill content starts
 const PILL_SWAP: f64 = 0.37;
 const PILL_CLIMB: f64 = 30.0;
+const SHEET_SWAP: f64 = 0.30;
 const PILL_GAP: f64 = 2.0;
 const PULSE_PERIOD: f64 = 0.96;
 /// the result: ridges → ring (0.45 s), then the mark draws on (0.3 s)
@@ -336,6 +337,7 @@ pub struct Island {
     notice_hovered: Option<usize>,
     notice_action_hover: [Spring; 2],
     pub dnd: bool,
+    dnd_glow: Spring,
     roll: Quintic,
     /// the pill's size, eased when a new notification needs another (a
     /// long message wraps to two lines and the pill grows to fit)
@@ -368,6 +370,7 @@ pub struct Island {
     quick_selected: usize,
     quick_hover_springs: [Spring; 6],
     quick_close_hover: Spring,
+    quick_retiring_at: Option<Time>,
     eq_rect: Option<Rect>,
     player_rect: Option<Rect>,
     eq_hovered: bool,
@@ -461,6 +464,7 @@ pub fn smoothstep(x: f64) -> f64 {
 
 impl Island {
     pub fn new(config: Config) -> Self {
+        let dnd = notice_center::load_dnd();
         Island {
             hide: Quintic::at_rest(0.0, HIDE_DUR),
             dodge: Quintic::at_rest(0.0, DODGE_DUR),
@@ -493,7 +497,8 @@ impl Island {
             notice_rect: None,
             notice_hovered: None,
             notice_action_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
-            dnd: notice_center::load_dnd(),
+            dnd,
+            dnd_glow: Spring::new(f64::from(dnd), 0.32, 0.9),
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
@@ -521,6 +526,7 @@ impl Island {
             quick_selected: 0,
             quick_hover_springs: std::array::from_fn(|_| Spring::new(0.0, 0.24, 0.83)),
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
+            quick_retiring_at: None,
             eq_rect: None,
             player_rect: None,
             eq_hovered: false,
@@ -581,6 +587,8 @@ impl Island {
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
             || self.quick_hover_springs.iter().any(|s| s.is_moving(now))
             || self.quick_close_hover.is_moving(now)
+            || self.dnd_glow.is_moving(now)
+            || self.quick_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.notice_action_hover.iter().any(|spring| spring.is_moving(now))
             || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
@@ -758,6 +766,10 @@ impl Island {
             self.toast = None;
             changed = true;
         }
+        if self.quick_retiring_at.is_some_and(|since| now - since >= SHEET_SWAP) {
+            self.quick_retiring_at = None;
+            changed = true;
+        }
         match self.auth {
             Some(Auth::Ok(since)) if now - since >= AUTH_OK_HOLD => {
                 self.auth = None;
@@ -871,7 +883,8 @@ impl Island {
 
     pub fn is_hidden(&self) -> bool {
         self.hidden.any() && self.auth.is_none() && self.activity.is_none()
-            && self.notice.is_none() && self.launcher.is_none() && !self.center.open
+            && self.notice.is_none() && (self.toast.is_none() || self.hidden.user)
+            && self.launcher.is_none() && !self.center.open
     }
 
     pub fn toggle_visibility(&mut self, now: Time) {
@@ -973,11 +986,13 @@ impl Island {
     /// Show the "now playing" toast, unless the island has something more
     /// important on (or the player is already open under the pointer).
     fn announce(&mut self, now: Time) {
-        if self.hidden.any() || self.auth.is_some() || self.activity.is_some() || self.notice.is_some() || self.launcher.is_some() || self.want_player() {
+        if self.hidden.user || self.auth.is_some() || self.activity.is_some() || self.notice.is_some()
+            || self.launcher.is_some() || self.quick_open || self.center.open || self.want_player() {
             return;
         }
         if self.song.as_ref().is_some_and(|s| s.playing()) {
             self.toast = Some(now);
+            if self.hidden.fullscreen { self.hide.set_at(0.0, now); }
         }
     }
 
@@ -1529,6 +1544,7 @@ impl Island {
         // a password prompt outranks the launcher
         self.launcher = None;
         self.quick_open = false;
+        self.quick_retiring_at = None;
         self.center.close();
         if let Some(activity) = self.activity.take() {
             if !activity::takes_keyboard(&activity.event) { self.activity_queued = Some(activity.event); }
@@ -1665,7 +1681,7 @@ impl Island {
         let line_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
-        let activity_size = self.center.open.then_some((notice_center::WIDTH, notice_center::HEIGHT))
+        let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
             .or_else(|| self.quick_open.then_some((quick::WIDTH, quick::HEIGHT))).or_else(|| self.visible_activity().map(|a| {
             if matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
@@ -1757,6 +1773,7 @@ impl Island {
             * (1.0 - smoothstep(ed / 0.45))
             * if self.hidden.any() && self.launcher.is_none() { 0.0 } else { 1.0 };
         let pill_alpha = pill_alpha_of(q);
+        let sheet_k = self.quick_retiring_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
         if line_alpha > 0.0 {
             let content_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len;
             let content_x = cx - content_w / 2.0;
@@ -1899,35 +1916,38 @@ impl Island {
             } else if self.center.open {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 let x = cx - notice_center::WIDTH / 2.0;
-                if pill_alpha > 0.95 {
-                    self.center_rect = Some(Rect { x, y: dy + climb, w: notice_center::WIDTH, h: notice_center::HEIGHT });
+                let enter = 8.0 * (1.0 - sheet_k);
+                if pill_alpha > 0.95 && sheet_k > 0.9 {
+                    self.center_rect = Some(Rect { x, y: dy + climb + enter, w: notice_center::WIDTH, h: self.center.height() });
                 }
-                self.center.draw(cr, renderer, &self.launcher_icons, x, dy + climb, pill_alpha, now);
+                self.center.draw(cr, renderer, &self.launcher_icons, x, dy + climb + enter, pill_alpha * sheet_k, now);
             } else if self.quick_open {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 if pill_alpha > 0.95 {
                     self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb, w: quick::WIDTH, h: quick::HEIGHT });
                 }
                 quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb, pill_alpha,
-                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread(), self.dnd);
+                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread(), self.dnd_glow.value(now));
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
+                let enter = 8.0 * (1.0 - sheet_k);
+                let content_alpha = pill_alpha * sheet_k;
                 if activity.event == activity::Event::TimerMenu {
                     let mx = cx - 195.0;
-                    if pill_alpha > 0.95 {
-                        self.timer_menu_rect = Some(Rect { x: mx, y: dy + climb, w: 390.0, h: 184.0 });
+                    if content_alpha > 0.9 {
+                        self.timer_menu_rect = Some(Rect { x: mx, y: dy + climb + enter, w: 390.0, h: 184.0 });
                     }
-                    activity::draw_timer_menu(cr, renderer, mx, dy + climb,
+                    activity::draw_timer_menu(cr, renderer, mx, dy + climb + enter,
                         self.timer.as_ref().map(|t| (t.remaining(now), t.running)), &std::array::from_fn(|i| self.timer_button_hover[i].value(now).clamp(0.0, 1.0)),
-                        &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), pill_alpha, activity.since, now);
+                        &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), content_alpha, activity.since, now);
                 }
                 if matches!(activity.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                     let (w, _) = activity.event.size();
-                    if pill_alpha > 0.95 {
-                        self.network_menu_rect = Some(Rect { x: cx - w / 2.0, y: dy + climb, w, h: bh });
+                    if content_alpha > 0.9 {
+                        self.network_menu_rect = Some(Rect { x: cx - w / 2.0, y: dy + climb + enter, w, h: bh });
                     }
                     if let Some(panel) = &mut self.network_panel {
-                        panel.draw(cr, renderer, cx - w / 2.0, dy + climb, bh, pill_alpha, now);
+                        panel.draw(cr, renderer, cx - w / 2.0, dy + climb + enter, bh, content_alpha, now);
                     }
                 }
                 activity::draw_pill(
@@ -1937,10 +1957,10 @@ impl Island {
                     &activity.event,
                     self.activity_value.value(now),
                     x0,
-                    dy + climb,
+                    dy + climb + enter,
                     x1 - x0,
                     bh,
-                    pill_alpha,
+                    content_alpha,
                     activity.since,
                     now,
                 );
@@ -1968,6 +1988,10 @@ impl Island {
                     self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7), climb, now);
                 }
             }
+        }
+        if sheet_k < 1.0 && pill_alpha > 0.0 {
+            quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
+                pill_alpha * (1.0 - sheet_k), [0.0; 6], 0.0, self.center.unread(), self.dnd_glow.value(now));
         }
         if pl > 0.0 {
             if let Some(song) = &self.song {
@@ -2036,6 +2060,10 @@ impl Island {
         if alpha <= 0.001 {
             return;
         }
+        let grouped = alpha < 0.999;
+        if grouped { cr.save().unwrap(); cr.push_group(); }
+        let opacity = alpha;
+        let alpha = 1.0;
         let note = &notice.note;
         let t = now - notice.since;
         let (app, msg, width, _) = renderer.notice_layouts(cr, note);
@@ -2091,6 +2119,11 @@ impl Island {
                 renderer.snap(by + (30.0 - ink.height() as f64) / 2.0 - ink.y() as f64));
             pangocairo::functions::show_layout(cr, &label);
         }
+        if grouped {
+            cr.pop_group_to_source().unwrap();
+            let _ = cr.paint_with_alpha(opacity);
+            cr.restore().unwrap();
+        }
     }
 
     /// Is the player open (so clicks go to its controls)?
@@ -2125,6 +2158,7 @@ impl Island {
     pub fn set_dnd(&mut self, enabled: bool, now: Time) {
         if self.dnd == enabled { return; }
         self.dnd = enabled;
+        self.dnd_glow.set(f64::from(enabled), now);
         notice_center::save_dnd(enabled);
         if enabled && self.notice.as_ref().is_some_and(|notice| !notice.note.critical) {
             self.notice = None;
@@ -2215,6 +2249,7 @@ impl Island {
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
         if !self.accepts_quick_menu_click() { return false; }
         self.quick_open = true;
+        self.quick_retiring_at = None;
         self.quick_hover = None;
         self.quick_selected = 0;
         self.eq_hovered = false;
@@ -2231,6 +2266,7 @@ impl Island {
     pub fn close_quick_menu(&mut self, now: Time) {
         if self.quick_open {
             self.quick_open = false;
+            self.quick_retiring_at = Some(now);
             self.quick_rect = None;
             self.quick_hover = None;
             self.sync(now);
@@ -2929,6 +2965,27 @@ mod tests {
     }
 
     #[test]
+    fn quick_menu_crossfades_into_notification_center() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        assert!(island.open_quick_menu(10.0));
+        island.draw(&cr, &renderer, 490.0, 10.6);
+        island.close_quick_menu(10.7);
+        assert!(island.open_notification_center(10.7));
+        assert!(island.quick_retiring_at.is_some());
+        assert!(island.is_animating(10.8));
+        island.draw(&cr, &renderer, 490.0, 10.8);
+        assert!(island.center_rect.is_none());
+        island.advance(11.1);
+        island.draw(&cr, &renderer, 490.0, 11.1);
+        assert!(island.center_rect.is_some());
+        assert!(island.quick_retiring_at.is_none());
+    }
+
+    #[test]
     fn quiet_mode_changes_without_closing_quick_menu() {
         let mut island = Island::new(Config::default());
         assert!(island.open_quick_menu(1.0));
@@ -3048,6 +3105,36 @@ mod tests {
         island.close_launcher(31.0);
         assert!(island.is_hidden());
         assert_eq!(island.hide.target(), 1.0);
+    }
+
+    #[test]
+    fn now_playing_toast_remains_fully_visible_over_fullscreen() {
+        let mut island = Island::new(Config::default());
+        let track = crate::dbus::NowPlaying {
+            bus_name: "test".into(), app: "Player".into(), playing: true,
+            artist: "Artist".into(), title: "Video".into(), art_url: String::new(),
+            track_id: "video".into(), length: 60.0,
+        };
+        island.set_fullscreen(true, 10.0);
+        island.set_player(Some(&track), 10.1);
+        assert!(island.toast.is_some());
+        assert!(!island.is_hidden());
+        assert_eq!(island.hide.target(), 0.0);
+        assert_eq!(island.hide.state(10.1).x, 0.0);
+        island.advance(10.1 + TOAST_HOLD + 0.01);
+        assert!(island.is_hidden());
+        assert_eq!(island.hide.target(), 1.0);
+
+        let mut entering_fullscreen = Island::new(Config::default());
+        entering_fullscreen.set_player(Some(&track), 20.0);
+        entering_fullscreen.set_fullscreen(true, 20.1);
+        assert!(entering_fullscreen.toast.is_some());
+        assert_eq!(entering_fullscreen.hide.target(), 0.0);
+
+        let mut manually_hidden = Island::new(Config::default());
+        manually_hidden.hide(30.0);
+        manually_hidden.set_player(Some(&track), 30.1);
+        assert!(manually_hidden.toast.is_none());
     }
 
     #[test]

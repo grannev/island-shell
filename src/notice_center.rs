@@ -24,6 +24,7 @@ const ROW_TOP: f64 = 72.0;
 const ROW_H: f64 = 72.0;
 const ROW_MOTION: Time = 0.42;
 const EXIT_MOTION: Time = 0.32;
+const VIEW_MOTION: Time = 0.28;
 
 struct Leaving {
     entry: Entry,
@@ -73,6 +74,7 @@ pub struct Center {
     pub opened_at: Time,
     offset: usize,
     detail: Option<u64>,
+    view_transition: Option<(Option<u64>, Time)>,
     detail_scroll: f64,
     expanded: HashSet<String>,
     hovered: Option<Hit>,
@@ -164,7 +166,7 @@ impl Center {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
             entries, next_serial, open: false, opened_at: 0.0, offset: 0,
-            detail: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
+            detail: None, view_transition: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
             row_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             row_from: HashMap::new(), row_motion_at: 0.0,
@@ -179,6 +181,17 @@ impl Center {
 
     pub fn unread(&self) -> usize { self.entries.iter().filter(|e| !e.read).count() }
     pub fn len(&self) -> usize { self.entries.len() }
+
+    pub fn height(&self) -> f64 {
+        if self.detail.is_some() { HEIGHT } else { self.list_height() }
+    }
+
+    fn list_height(&self) -> f64 {
+        if self.entries.is_empty() { return ROW_TOP + ROW_H * 3.0 + 70.0; }
+        let visible = self.leaving.iter().map(|row| row.row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
+        let moving = self.row_from.values().map(|row| row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
+        ROW_TOP + ROW_H * self.rows().len().max(visible).max(moving).clamp(1, ROWS) as f64 + 70.0
+    }
 
     fn rows(&self) -> Vec<ViewRow<'_>> {
         let mut groups: HashMap<&str, Vec<&Entry>> = HashMap::new();
@@ -257,6 +270,9 @@ impl Center {
         self.leaving.retain(|row| now - row.since < EXIT_MOTION);
         self.born_at.retain(|_, since| now - *since < ROW_MOTION);
         if now - self.row_motion_at >= ROW_MOTION { self.row_from.clear(); }
+        if self.view_transition.is_some_and(|(_, since)| now - since >= VIEW_MOTION) {
+            self.view_transition = None;
+        }
     }
 
     pub fn closed(&mut self, id: u32) {
@@ -271,6 +287,7 @@ impl Center {
         self.opened_at = now;
         self.offset = 0;
         self.detail = None;
+        self.view_transition = None;
         self.expanded.clear();
         self.hovered = None;
         self.row_from.clear();
@@ -279,7 +296,7 @@ impl Center {
     }
 
     pub fn close(&mut self) {
-        self.open = false; self.detail = None; self.hovered = None;
+        self.open = false; self.detail = None; self.view_transition = None; self.hovered = None;
         self.row_from.clear(); self.born_at.clear(); self.leaving.clear();
     }
 
@@ -287,11 +304,12 @@ impl Center {
         self.open && (now - self.opened_at < 0.5 || self.row_hover.iter().any(|s| s.is_moving(now))
             || self.button_hover.iter().any(|s| s.is_moving(now))
             || !self.leaving.is_empty() || !self.born_at.is_empty()
-            || !self.row_from.is_empty())
+            || !self.row_from.is_empty()
+            || self.view_transition.is_some_and(|(_, since)| now - since < VIEW_MOTION))
     }
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
-        if !(0.0..WIDTH).contains(&x) || !(0.0..HEIGHT).contains(&y) { return None; }
+        if !(0.0..WIDTH).contains(&x) || !(0.0..self.height()).contains(&y) { return None; }
         if x >= WIDTH - 52.0 && y < 58.0 { return Some(Hit::Close); }
         if self.detail.is_some() {
             if x < 86.0 && y < 58.0 { return Some(Hit::Back); }
@@ -355,7 +373,12 @@ impl Center {
                 self.leaving.extend(leaving);
                 self.entries.clear(); self.offset = 0; self.persist(); Action::DismissMany(ids)
             }
-            Some(Hit::Back) => { self.detail = None; self.detail_scroll = 0.0; Action::None }
+            Some(Hit::Back) => {
+                self.view_transition = Some((self.detail, now));
+                self.detail = None;
+                self.detail_scroll = 0.0;
+                Action::None
+            }
             Some(Hit::Row(row)) => {
                 if let Some(view) = self.rows().get(self.offset + row) {
                     if view.count > 1 {
@@ -384,6 +407,7 @@ impl Center {
                     let serial = view.entry.serial;
                     if let Some(entry) = self.entries.iter_mut().find(|entry| entry.serial == serial) {
                         entry.read = true;
+                        self.view_transition = Some((None, now));
                         self.detail = Some(serial);
                         self.detail_scroll = 0.0;
                         self.persist();
@@ -458,28 +482,62 @@ impl Center {
     }
 
     pub fn draw(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
-        let title = if self.detail.is_some() { "Уведомление" } else { "Уведомления" };
-        let title_x = if self.detail.is_some() { x + 121.0 } else { x + 24.0 };
-        label(cr, renderer, title, title_x, y + 17.0, WIDTH - (title_x - x) - 62.0, Font::Text, alpha);
-        if self.detail.is_some() {
-            button(cr, renderer, "Назад", x + 22.0, y + 8.0, 85.0, 42.0, alpha, self.button_hover[1].value(now));
-        } else {
-            let unread = self.unread();
-            let count = if unread > 0 { format!("{unread} новых") } else { format!("{} всего", self.len()) };
-            label(cr, renderer, &count, x + 25.0, y + 47.0, 200.0, Font::Small, alpha * 0.55);
-            if !self.entries.is_empty() {
-                button(cr, renderer, "Очистить", x + WIDTH - 145.0, y + 9.0, 91.0, 38.0, alpha, self.button_hover[1].value(now));
+        if let Some((previous, since)) = self.view_transition {
+            let k = min_jerk(((now - since) / VIEW_MOTION).clamp(0.0, 1.0));
+            if k < 1.0 {
+                self.draw_view_composited(cr, renderer, media, x, y - 9.0 * k, alpha * (1.0 - k), previous, now);
+                self.draw_view_composited(cr, renderer, media, x, y + 9.0 * (1.0 - k), alpha * k, self.detail, now);
+                return;
             }
         }
-        button(cr, renderer, "×", x + WIDTH - 49.0, y + 10.0, 32.0, 32.0, alpha, self.button_hover[0].value(now));
-        if let Some(serial) = self.detail {
-            self.draw_detail(cr, renderer, media, x, y, alpha, serial, now);
-        } else {
-            self.draw_list(cr, renderer, media, x, y, alpha, now);
+        self.draw_view_composited(cr, renderer, media, x, y, alpha, self.detail, now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_view_composited(&self, cr: &Context, renderer: &Renderer, media: &Icons,
+        x: f64, y: f64, opacity: f64, detail: Option<u64>, now: Time) {
+        if opacity <= 0.001 { return; }
+        let grouped = opacity < 0.999;
+        if grouped {
+            cr.save().unwrap();
+            cr.rectangle(x, y, WIDTH, if detail.is_some() { HEIGHT } else { self.list_height() });
+            cr.clip();
+            cr.push_group();
+        }
+        self.draw_view(cr, renderer, media, x, y, detail, now);
+        if grouped {
+            cr.pop_group_to_source().unwrap();
+            let _ = cr.paint_with_alpha(opacity);
+            cr.restore().unwrap();
         }
     }
 
-    fn draw_list(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
+    fn draw_view(&self, cr: &Context, renderer: &Renderer, media: &Icons,
+        x: f64, y: f64, detail: Option<u64>, now: Time) {
+        let title = if detail.is_some() { "Уведомление" } else { "Уведомления" };
+        let title_x = if detail.is_some() { x + 121.0 } else { x + 24.0 };
+        label(cr, renderer, title, title_x, y + 17.0, WIDTH - (title_x - x) - 62.0, Font::Text, 1.0);
+        if detail.is_some() {
+            button(cr, renderer, "Назад", x + 22.0, y + 8.0, 85.0, 42.0, 1.0, self.button_hover[1].value(now));
+        } else {
+            let unread = self.unread();
+            let count = if unread > 0 { format!("{unread} новых") } else { format!("{} всего", self.len()) };
+            label(cr, renderer, &count, x + 25.0, y + 47.0, 200.0, Font::Small, 0.55);
+            if !self.entries.is_empty() {
+                button(cr, renderer, "Очистить", x + WIDTH - 145.0, y + 9.0, 91.0, 38.0, 1.0, self.button_hover[1].value(now));
+            }
+        }
+        button(cr, renderer, "×", x + WIDTH - 49.0, y + 10.0, 32.0, 32.0, 1.0, self.button_hover[0].value(now));
+        if let Some(serial) = detail {
+            self.draw_detail(cr, renderer, media, x, y, 1.0, serial, now);
+        } else {
+            self.draw_list(cr, renderer, media, x, y, self.list_height(), 1.0, now);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list(&self, cr: &Context, renderer: &Renderer, media: &Icons,
+        x: f64, y: f64, height: f64, alpha: f64, now: Time) {
         let rows = self.rows();
         if rows.is_empty() {
             let appear = if self.leaving.is_empty() { 1.0 } else {
@@ -514,19 +572,41 @@ impl Center {
         if rows.is_empty() { return; }
         if rows.len() > ROWS {
             let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(rows.len()), rows.len());
-            label(cr, renderer, &text, x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
+            label(cr, renderer, &text, x + 24.0, y + height - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         } else {
-            label(cr, renderer, "Нажмите, чтобы открыть", x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
+            label(cr, renderer, "Нажмите, чтобы открыть", x + 24.0, y + height - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn draw_row(&self, cr: &Context, renderer: &Renderer, media: &Icons, entry: &Entry, count: usize,
         unread: usize, child: bool, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
+        if alpha <= 0.001 { return; }
+        let grouped = alpha < 0.999;
+        if grouped {
+            cr.save().unwrap();
+            cr.rectangle(x + 14.0, top, WIDTH - 28.0, ROW_H);
+            cr.clip();
+            cr.push_group();
+        }
+        let opacity = alpha;
+        let alpha = 1.0;
         let indent = if child { 17.0 } else { 0.0 };
         rounded(cr, x + 16.0 + indent, top + 2.0, WIDTH - 32.0 - indent, ROW_H - 5.0, 15.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.085 * hover) * alpha);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.085 * hover) * alpha);
         let _ = cr.fill();
+        rounded(cr, x + 16.5 + indent, top + 2.5, WIDTH - 33.0 - indent, ROW_H - 6.0, 14.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.08 * hover) * alpha);
+        let _ = cr.stroke();
+        if child {
+            cr.new_path();
+            cr.move_to(x + 24.5, top + 15.0);
+            cr.line_to(x + 24.5, top + ROW_H - 16.0);
+            cr.set_line_width(1.4);
+            cr.set_source_rgba(0.51, 0.78, 1.0, 0.27 * alpha);
+            let _ = cr.stroke();
+        }
         if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
             x + 43.0 + indent, top + 35.0, 39.0, renderer.scale(), alpha)) {
             icons::draw(cr, entry.note.kind, x + 43.0 + indent, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
@@ -551,11 +631,17 @@ impl Center {
             label(cr, renderer, &entry.note.message(), x + 70.0 + indent, top + 35.0, WIDTH - 145.0 - indent, Font::Small, alpha * 0.63);
         }
         if unread > 0 {
+            cr.new_path();
             cr.arc(x + WIDTH - 72.0, top + 23.0, 3.0, 0.0, std::f64::consts::TAU);
             cr.set_source_rgba(0.40, 0.82, 1.0, alpha);
             let _ = cr.fill();
         }
         label(cr, renderer, "×", x + WIDTH - 47.0, top + 19.0, 24.0, Font::Text, alpha * (0.43 + 0.35 * hover));
+        if grouped {
+            cr.pop_group_to_source().unwrap();
+            let _ = cr.paint_with_alpha(opacity);
+            cr.restore().unwrap();
+        }
     }
 
     fn draw_detail(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, serial: u64, now: Time) {
@@ -661,6 +747,8 @@ mod tests {
         assert_eq!(center.unread(), 1);
         assert_eq!(center.click(90.0, ROW_TOP + 12.0, 0.5), Action::None);
         assert_eq!(center.unread(), 0);
+        assert_eq!(center.view_transition, Some((None, 0.5)));
+        assert!(center.is_animating(0.6));
         assert_eq!(center.click(35.0, HEIGHT - 40.0, 0.6), Action::Invoke(5, "default".into()));
         assert_eq!(center.click(WIDTH - 40.0, HEIGHT - 40.0, 0.7), Action::Dismiss(5));
         assert_eq!(center.len(), 0);
@@ -681,8 +769,10 @@ mod tests {
         assert_eq!(rows[0].count, 2);
         assert_eq!(rows[0].unread, 2);
         assert_eq!(rows[1].entry.note.app, "Chat");
+        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + 70.0);
         assert_eq!(center.click(90.0, ROW_TOP + 12.0, 10.5), Action::None);
         assert_eq!(center.rows().len(), 4);
+        assert_eq!(center.height(), HEIGHT);
         assert!(center.rows()[1].child);
         assert!(center.born_at.contains_key(&center.rows()[1].entry.serial));
         assert!(center.detail.is_none());
@@ -693,7 +783,10 @@ mod tests {
         assert_eq!(center.click(40.0, 25.0, 11.2), Action::None);
         assert_eq!(center.click(90.0, ROW_TOP + 12.0, 11.5), Action::None);
         assert_eq!(center.rows().len(), 2);
+        assert_eq!(center.height(), HEIGHT);
         assert_eq!(center.leaving.iter().filter(|row| row.child).count(), 2);
+        center.advance(11.5 + ROW_MOTION + 0.01);
+        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + 70.0);
     }
 
     #[test]
@@ -756,6 +849,26 @@ mod tests {
         center.open(0.0);
         center.click(90.0, ROW_TOP + 12.0, 0.5);
         center.draw(&cr, &renderer, &Icons::new(), 0.0, 0.0, 1.0, 1.0);
+        surface.write_to_png(&mut std::fs::File::create(path).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "set ISLAND_CENTER_DUMP to inspect grouped emoji entrance"]
+    fn grouped_emoji_entrance_renders_at_fractional_scale() {
+        let path = std::env::var("ISLAND_CENTER_DUMP").expect("ISLAND_CENTER_DUMP path");
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 720, 645).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let mut center = center();
+        for (id, summary) in [(1, "Первое 🎁"), (2, "Второе 🎉")] {
+            let mut note = crate::notify::fabricate("Telegram", summary, "Текст 🎁 после раскрытия");
+            note.id = id;
+            center.upsert(note, id as f64);
+        }
+        center.open(0.0);
+        center.click(90.0, ROW_TOP + 12.0, 0.6);
+        center.draw(&cr, &renderer, &Icons::new(), 0.0, 0.0, 1.0, 0.72);
         surface.write_to_png(&mut std::fs::File::create(path).unwrap()).unwrap();
     }
 }

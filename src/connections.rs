@@ -596,6 +596,16 @@ impl Panel {
                 );
             }
             let rows = self.rows();
+            let fade = smoothstep((now - self.changed) / 0.24);
+            if fade < 1.0 && !self.old_rows.is_empty() {
+                cr.save().unwrap();
+                cr.rectangle(20.0, LIST_Y, 440.0, (height - 90.0 - LIST_Y).max(0.0));
+                cr.clip();
+                for (i, d) in self.old_rows.iter().enumerate() {
+                    self.draw_row(cr, renderer, d, LIST_Y + i as f64 * ROW_H - fade * 8.0, 1.0 - fade, now);
+                }
+                cr.restore().unwrap();
+            }
             if rows.is_empty() || !self.snapshot.powered {
                 let (title, hint) = if !self.loaded {
                     ("Загрузка…", "Получаем состояние адаптера")
@@ -611,19 +621,14 @@ impl Panel {
                     ("Сети не найдены", "Нажмите кнопку поиска ниже")
                 };
                 let center = LIST_Y + (height - 90.0 - LIST_Y) / 2.0;
-                symbol(cr, self.kind, WIDTH / 2.0, center - 24.0, 1.8, 0.3);
-                centered(cr, renderer, title, 22.0, center + 10.0, 436.0, 25.0, Font::Text, 0.85);
-                centered(cr, renderer, hint, 22.0, center + 40.0, 436.0, 24.0, Font::Small, 0.45);
+                let appear = if self.old_rows.is_empty() { 1.0 } else { fade };
+                symbol(cr, self.kind, WIDTH / 2.0, center - 24.0, 1.8, 0.3 * appear);
+                centered(cr, renderer, title, 22.0, center + 10.0, 436.0, 25.0, Font::Text, 0.85 * appear);
+                centered(cr, renderer, hint, 22.0, center + 40.0, 436.0, 24.0, Font::Small, 0.45 * appear);
             } else {
                 cr.save().unwrap();
                 cr.rectangle(20.0, LIST_Y, 440.0, (height - 90.0 - LIST_Y).max(0.0));
                 cr.clip();
-                let fade = smoothstep((now - self.changed) / 0.24);
-                for (i, d) in self.old_rows.iter().enumerate() {
-                    if fade < 1.0 {
-                        self.draw_row(cr, renderer, d, LIST_Y + i as f64 * ROW_H - fade * 8.0, 1.0 - fade, now);
-                    }
-                }
                 for (i, d) in rows.iter().enumerate() {
                     let slot = self.slots.get(&d.id).map_or(i as f64, |s| s.value(now));
                     let ry = LIST_Y + (slot - self.scroll.value(now)) * ROW_H + (1.0 - fade) * 8.0;

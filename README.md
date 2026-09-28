@@ -186,13 +186,18 @@ sheet is open; deleted rows fade and slide away as the list closes the gap.
 Notifications from the same application are folded into a single row with a
 count; click the row to expand individual messages, or its × to clear that
 application's group. Single messages open their details directly.
+The center fits its height to the visible rows. Grouped messages and their
+emoji fade together, and switching between the list and a notification's
+details uses a short crossfade and vertical glide. Shortcut sheets also
+crossfade when opened from the quick menu.
 App icons and supplied notification images appear in the pill and history;
 the pill exposes up to two application actions directly, while clicking its
 body invokes the default action when one exists. The shortcut menu has a
 **Do Not Disturb** tile, also controlled by `island-shell dnd on|off|toggle|status`.
 It suppresses ordinary popups and sounds while still saving them to history;
 critical alerts continue to appear. The choice survives restarts, and its
-shortcut tile switches in place without closing the menu.
+shortcut tile switches in place without closing the menu; the label stays
+"Тишина" while the whole tile eases into a purple active appearance.
 Optional local sounds use `paplay` and the
 existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
 duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon
@@ -208,6 +213,8 @@ widens to fit. Critical notifications get a breathing red rim. A click
 dismisses; notifications wait behind an active Touch ID. A notification
 rises on its own even while the compact island is hidden, then retreats
 without leaving the island visible.
+The same temporary reveal applies to a now-playing pill when playback starts
+in fullscreen; it is fully placed on-screen without exposing the compact bar.
 
 Step 2: now playing (MPRIS over D-Bus, zbus). A track that starts
 announces itself with a "now playing" toast — album art, the app, the

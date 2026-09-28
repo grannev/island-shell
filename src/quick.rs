@@ -46,9 +46,10 @@ fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64) {
+fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
     cr.save().unwrap();
     cr.translate(x, y);
+    cr.scale(scale, scale);
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_join(cairo::LineJoin::Round);
     cr.set_line_width(2.1);
@@ -111,7 +112,7 @@ fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64) {
     cr.restore().unwrap();
 }
 
-pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 6], close_hover: f64, unread: usize, dnd: bool) {
+pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 6], close_hover: f64, unread: usize, dnd_level: f64) {
     let title = renderer.layout(cr, "Быстрый доступ", Font::Text);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.97 * alpha);
     cr.move_to(renderer.snap(x + 22.0), renderer.snap(y + 18.0));
@@ -132,29 +133,36 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
         let (tx, ty) = tile(i);
         let (tx, ty) = (x + tx, y + ty);
         let h = hover[i].clamp(0.0, 1.0);
+        let on = if *action == Action::Dnd { dnd_level.clamp(0.0, 1.0) } else { 0.0 };
         rounded(cr, tx, ty, TILE_W, TILE_H, 17.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.105 * h + if *action == Action::Dnd && dnd { 0.08 } else { 0.0 }) * alpha);
+        cr.set_source_rgba(0.13 + 0.15 * on, 0.13 + 0.07 * on, 0.14 + 0.28 * on,
+            (0.98 + 0.02 * h) * alpha);
         let _ = cr.fill();
+        rounded(cr, tx + 0.5, ty + 0.5, TILE_W - 1.0, TILE_H - 1.0, 16.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(0.72 + 0.18 * on, 0.70 + 0.06 * on, 0.80 + 0.18 * on,
+            (0.08 + 0.11 * h + 0.25 * on) * alpha);
+        let _ = cr.stroke();
         let accent = match action {
             Action::Wifi => (0.11, 0.57, 0.97),
             Action::Bluetooth => (0.13, 0.48, 0.91),
             Action::Timer => (0.95, 0.57, 0.12),
             Action::Launcher => (0.43, 0.43, 0.49),
             Action::Notifications => (0.38, 0.71, 0.94),
-            Action::Dnd => (0.55, 0.43, 0.91),
+            Action::Dnd => (0.36 + 0.19 * on, 0.36 + 0.07 * on, 0.40 + 0.51 * on),
             Action::Close => unreachable!(),
         };
         rounded(cr, tx + 14.0, ty + 15.0, 40.0, 40.0, 12.0);
         cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
         let _ = cr.fill();
-        icon(cr, *action, tx + 34.0, ty + 35.0, alpha);
+        icon(cr, *action, tx + 34.0, ty + 35.0, alpha, 1.0 + 0.045 * h);
         let label = match action {
             Action::Wifi => "Wi-Fi",
             Action::Bluetooth => "Bluetooth",
             Action::Timer => "Таймер",
             Action::Launcher => "Лаунчер",
             Action::Notifications => "Уведомления",
-            Action::Dnd => if dnd { "Тишина · вкл" } else { "Тишина" },
+            Action::Dnd => "Тишина",
             Action::Close => unreachable!(),
         };
         let layout = renderer.layout(cr, label, Font::Caption);
