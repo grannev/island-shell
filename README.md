@@ -183,12 +183,16 @@ from the island's shortcut menu or `island-shell notifications`. Active
 notifications offer their application actions, and the sheet supports reading,
 deleting, clearing and scrolling. Incoming rows ease into place while the
 sheet is open; deleted rows fade and slide away as the list closes the gap.
+Notifications from the same application are folded into a single row with a
+count; click the row to expand individual messages, or its × to clear that
+application's group. Single messages open their details directly.
 App icons and supplied notification images appear in the pill and history;
 the pill exposes up to two application actions directly, while clicking its
 body invokes the default action when one exists. The shortcut menu has a
 **Do Not Disturb** tile, also controlled by `island-shell dnd on|off|toggle|status`.
 It suppresses ordinary popups and sounds while still saving them to history;
-critical alerts continue to appear. The choice survives restarts.
+critical alerts continue to appear. The choice survives restarts, and its
+shortcut tile switches in place without closing the menu.
 Optional local sounds use `paplay` and the
 existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
 duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon

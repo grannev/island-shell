@@ -2929,6 +2929,17 @@ mod tests {
     }
 
     #[test]
+    fn quiet_mode_changes_without_closing_quick_menu() {
+        let mut island = Island::new(Config::default());
+        assert!(island.open_quick_menu(1.0));
+        island.set_dnd(true, 1.1);
+        assert!(island.quick_menu_open());
+        assert!(island.dnd);
+        island.set_dnd(false, 1.2);
+        assert!(island.quick_menu_open());
+    }
+
+    #[test]
     fn music_and_editor_open_only_from_their_compact_hit_targets() {
         let mut island = Island::new(Config::default());
         let renderer = Renderer::new(1.5);

@@ -27,8 +27,22 @@ const EXIT_MOTION: Time = 0.32;
 
 struct Leaving {
     entry: Entry,
+    count: usize,
+    unread: usize,
+    child: bool,
     row: f64,
     since: Time,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum RowKey { Entry(u64), Group(String) }
+
+struct ViewRow<'a> {
+    key: RowKey,
+    entry: &'a Entry,
+    count: usize,
+    unread: usize,
+    child: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,10 +74,11 @@ pub struct Center {
     offset: usize,
     detail: Option<u64>,
     detail_scroll: f64,
+    expanded: HashSet<String>,
     hovered: Option<Hit>,
     row_hover: [Spring; ROWS],
     button_hover: [Spring; 5],
-    row_from: HashMap<u64, f64>,
+    row_from: HashMap<RowKey, f64>,
     row_motion_at: Time,
     born_at: HashMap<u64, Time>,
     leaving: Vec<Leaving>,
@@ -149,7 +164,7 @@ impl Center {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
             entries, next_serial, open: false, opened_at: 0.0, offset: 0,
-            detail: None, detail_scroll: 0.0, hovered: None,
+            detail: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
             row_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             row_from: HashMap::new(), row_motion_at: 0.0,
@@ -164,6 +179,38 @@ impl Center {
 
     pub fn unread(&self) -> usize { self.entries.iter().filter(|e| !e.read).count() }
     pub fn len(&self) -> usize { self.entries.len() }
+
+    fn rows(&self) -> Vec<ViewRow<'_>> {
+        let mut groups: HashMap<&str, Vec<&Entry>> = HashMap::new();
+        for entry in &self.entries {
+            groups.entry(&entry.note.app).or_default().push(entry);
+        }
+        let mut seen = HashSet::new();
+        let mut rows = Vec::with_capacity(self.entries.len() + groups.len());
+        for entry in &self.entries {
+            let app = entry.note.app.as_str();
+            if !seen.insert(app) { continue; }
+            let group = &groups[app];
+            if group.len() == 1 {
+                rows.push(ViewRow { key: RowKey::Entry(entry.serial), entry, count: 1,
+                    unread: usize::from(!entry.read), child: false });
+            } else {
+                rows.push(ViewRow { key: RowKey::Group(app.to_string()), entry,
+                    count: group.len(), unread: group.iter().filter(|e| !e.read).count(), child: false });
+                if self.expanded.contains(app) {
+                    rows.extend(group.iter().map(|entry| ViewRow {
+                        key: RowKey::Entry(entry.serial), entry, count: 1,
+                        unread: usize::from(!entry.read), child: true,
+                    }));
+                }
+            }
+        }
+        rows
+    }
+
+    fn clamp_offset(&mut self) {
+        self.offset = self.offset.min(self.rows().len().saturating_sub(ROWS));
+    }
 
     pub fn upsert(&mut self, mut note: Notification, now: Time) {
         if note.transient { return; }
@@ -188,19 +235,19 @@ impl Center {
             self.next_serial = self.next_serial.saturating_add(1);
         }
         self.entries.truncate(LIMIT);
-        self.offset = if self.open && reorder { 0 } else { self.offset.min(self.entries.len().saturating_sub(ROWS)) };
+        if self.open && reorder { self.offset = 0; } else { self.clamp_offset(); }
         self.persist();
     }
 
-    fn row_position(&self, serial: u64, target: f64, now: Time) -> f64 {
+    fn row_position(&self, key: &RowKey, target: f64, now: Time) -> f64 {
         let k = min_jerk(((now - self.row_motion_at) / ROW_MOTION).clamp(0.0, 1.0));
-        self.row_from.get(&serial).map_or(target, |from| from + (target - from) * k)
+        self.row_from.get(key).map_or(target, |from| from + (target - from) * k)
     }
 
     fn capture_rows(&mut self, now: Time) {
-        let positions: HashMap<_, _> = self.entries.iter().enumerate().map(|(i, entry)| {
+        let positions: HashMap<_, _> = self.rows().iter().enumerate().map(|(i, row)| {
             let target = i as f64 - self.offset as f64;
-            (entry.serial, self.row_position(entry.serial, target, now))
+            (row.key.clone(), self.row_position(&row.key, target, now))
         }).collect();
         self.row_from = positions;
         self.row_motion_at = now;
@@ -224,6 +271,7 @@ impl Center {
         self.opened_at = now;
         self.offset = 0;
         self.detail = None;
+        self.expanded.clear();
         self.hovered = None;
         self.row_from.clear();
         self.born_at.clear();
@@ -256,7 +304,7 @@ impl Center {
         if x >= WIDTH - 143.0 && y < 58.0 { return Some(Hit::Clear); }
         if y >= ROW_TOP && y < ROW_TOP + ROW_H * ROWS as f64 {
             let row = ((y - ROW_TOP) / ROW_H) as usize;
-            if self.entries.get(self.offset + row).is_some() {
+            if self.rows().get(self.offset + row).is_some() {
                 return Some(if x >= WIDTH - 55.0 { Hit::Remove(row) } else { Hit::Row(row) });
             }
         }
@@ -286,7 +334,7 @@ impl Center {
             return old != self.detail_scroll;
         }
         let old = self.offset;
-        self.offset = (self.offset as f64 + rows).round().clamp(0.0, self.entries.len().saturating_sub(ROWS) as f64) as usize;
+        self.offset = (self.offset as f64 + rows).round().clamp(0.0, self.rows().len().saturating_sub(ROWS) as f64) as usize;
         if old != self.offset { self.row_from.clear(); self.born_at.clear(); self.leaving.clear(); }
         old != self.offset
     }
@@ -297,23 +345,58 @@ impl Center {
             Some(Hit::Clear) => {
                 let ids = self.entries.iter().filter(|e| e.active).map(|e| e.note.id).collect();
                 self.capture_rows(now);
-                self.leaving.extend(self.entries.iter().filter_map(|entry| {
-                    let row = *self.row_from.get(&entry.serial)?;
-                    (0.0..ROWS as f64).contains(&row).then(|| Leaving { entry: entry.clone(), row, since: now })
-                }));
+                let leaving: Vec<_> = self.rows().iter().filter_map(|view| {
+                    let row = *self.row_from.get(&view.key)?;
+                    (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+                        entry: view.entry.clone(), count: view.count, unread: view.unread,
+                        child: view.child, row, since: now,
+                    })
+                }).collect();
+                self.leaving.extend(leaving);
                 self.entries.clear(); self.offset = 0; self.persist(); Action::DismissMany(ids)
             }
             Some(Hit::Back) => { self.detail = None; self.detail_scroll = 0.0; Action::None }
             Some(Hit::Row(row)) => {
-                if let Some(entry) = self.entries.get_mut(self.offset + row) {
-                    entry.read = true;
-                    self.detail = Some(entry.serial);
-                    self.detail_scroll = 0.0;
-                    self.persist();
+                if let Some(view) = self.rows().get(self.offset + row) {
+                    if view.count > 1 {
+                        let app = view.entry.note.app.clone();
+                        self.capture_rows(now);
+                        if self.expanded.contains(&app) {
+                            let leaving: Vec<_> = self.rows().iter().filter(|view| view.child && view.entry.note.app == app)
+                                .filter_map(|view| {
+                                    let row = *self.row_from.get(&view.key)?;
+                                    (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+                                        entry: view.entry.clone(), count: 1, unread: view.unread,
+                                        child: true, row, since: now,
+                                    })
+                                }).collect();
+                            self.leaving.extend(leaving);
+                            self.expanded.remove(&app);
+                        } else {
+                            self.expanded.insert(app.clone());
+                            for entry in self.entries.iter().filter(|entry| entry.note.app == app) {
+                                self.born_at.insert(entry.serial, now);
+                            }
+                        }
+                        self.clamp_offset();
+                        return Action::None;
+                    }
+                    let serial = view.entry.serial;
+                    if let Some(entry) = self.entries.iter_mut().find(|entry| entry.serial == serial) {
+                        entry.read = true;
+                        self.detail = Some(serial);
+                        self.detail_scroll = 0.0;
+                        self.persist();
+                    }
                 }
                 Action::None
             }
-            Some(Hit::Remove(row)) => self.remove(self.offset + row, now),
+            Some(Hit::Remove(row)) => {
+                let rows = self.rows();
+                let Some(view) = rows.get(self.offset + row) else { return Action::None };
+                if view.count > 1 { self.remove_group(&view.entry.note.app.clone(), now) }
+                else { self.remove_serial(view.entry.serial, now) }
+            }
             Some(Hit::DetailRemove) => {
                 let index = self.entries.iter().position(|e| Some(e.serial) == self.detail);
                 self.detail = None;
@@ -330,19 +413,48 @@ impl Center {
     }
 
     fn remove(&mut self, index: usize, now: Time) -> Action {
+        let serial = match self.entries.get(index) { Some(entry) => entry.serial, None => return Action::None };
         self.capture_rows(now);
+        let view = self.rows().into_iter().find(|row| row.key == RowKey::Entry(serial)).map(|view| {
+            let row = self.row_from.get(&view.key).copied();
+            (view.entry.clone(), view.count, view.unread, view.child, row)
+        });
         let Some(entry) = self.entries.remove(index) else { return Action::None };
         if self.open && self.detail.is_none() {
-            if let Some(&row) = self.row_from.get(&entry.serial) {
+            if let Some((_, count, unread, child, Some(row))) = view {
                 if (0.0..ROWS as f64).contains(&row) {
-                    self.leaving.push(Leaving { entry: entry.clone(), row, since: now });
+                    self.leaving.push(Leaving { entry: entry.clone(), count, unread, child, row, since: now });
                 }
             }
         }
         self.born_at.remove(&entry.serial);
-        self.offset = self.offset.min(self.entries.len().saturating_sub(ROWS));
+        self.clamp_offset();
         self.persist();
         if entry.active { Action::Dismiss(entry.note.id) } else { Action::None }
+    }
+
+    fn remove_serial(&mut self, serial: u64, now: Time) -> Action {
+        self.entries.iter().position(|entry| entry.serial == serial)
+            .map_or(Action::None, |index| self.remove(index, now))
+    }
+
+    fn remove_group(&mut self, app: &str, now: Time) -> Action {
+        self.capture_rows(now);
+        let leaving: Vec<_> = self.rows().iter().filter(|view| view.entry.note.app == app).filter_map(|view| {
+            let row = *self.row_from.get(&view.key)?;
+            (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+                entry: view.entry.clone(), count: view.count, unread: view.unread,
+                child: view.child, row, since: now,
+            })
+        }).collect();
+        self.leaving.extend(leaving);
+        let ids = self.entries.iter().filter(|entry| entry.note.app == app && entry.active)
+            .map(|entry| entry.note.id).collect();
+        self.entries.retain(|entry| entry.note.app != app);
+        self.expanded.remove(app);
+        self.clamp_offset();
+        self.persist();
+        Action::DismissMany(ids)
     }
 
     pub fn draw(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
@@ -368,7 +480,8 @@ impl Center {
     }
 
     fn draw_list(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
-        if self.entries.is_empty() {
+        let rows = self.rows();
+        if rows.is_empty() {
             let appear = if self.leaving.is_empty() { 1.0 } else {
                 min_jerk(((now - self.row_motion_at - 0.12) / 0.28).clamp(0.0, 1.0))
             };
@@ -378,44 +491,66 @@ impl Center {
         cr.save().unwrap();
         cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
         cr.clip();
-        for (row, entry) in self.entries.iter().skip(self.offset).take(ROWS).enumerate() {
+        for (row, view) in rows.iter().skip(self.offset).take(ROWS).enumerate() {
             let delay = row as f64 * 0.04;
             let opening = min_jerk(((now - self.opened_at - delay) / 0.38).clamp(0.0, 1.0));
-            let born = self.born_at.get(&entry.serial).copied();
+            let born = if view.count > 1 { None } else { self.born_at.get(&view.entry.serial).copied() };
             let entrance = born.map_or(1.0, |since| min_jerk(((now - since) / ROW_MOTION).clamp(0.0, 1.0)));
             let fade = born.map_or(1.0, |since| min_jerk(((now - since) / 0.26).clamp(0.0, 1.0)));
-            let position = self.row_position(entry.serial, row as f64, now);
+            let position = self.row_position(&view.key, row as f64, now);
             let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
             let opacity = alpha * opening * fade;
             let hover = self.row_hover[row].value(now);
-            self.draw_row(cr, renderer, media, entry, x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
+            self.draw_row(cr, renderer, media, view.entry, view.count, view.unread, view.child,
+                x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
         }
         for leaving in &self.leaving {
             let k = min_jerk(((now - leaving.since) / EXIT_MOTION).clamp(0.0, 1.0));
             let top = y + ROW_TOP + leaving.row * ROW_H - k * 9.0;
-            self.draw_row(cr, renderer, media, &leaving.entry, x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
+            self.draw_row(cr, renderer, media, &leaving.entry, leaving.count, leaving.unread, leaving.child,
+                x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
         }
         cr.restore().unwrap();
-        if self.entries.is_empty() { return; }
-        if self.entries.len() > ROWS {
-            let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(self.entries.len()), self.entries.len());
+        if rows.is_empty() { return; }
+        if rows.len() > ROWS {
+            let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(rows.len()), rows.len());
             label(cr, renderer, &text, x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         } else {
-            label(cr, renderer, "Нажмите, чтобы прочитать", x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
+            label(cr, renderer, "Нажмите, чтобы открыть", x + 24.0, y + HEIGHT - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
         }
     }
 
-    fn draw_row(&self, cr: &Context, renderer: &Renderer, media: &Icons, entry: &Entry, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
-        rounded(cr, x + 16.0, top + 2.0, WIDTH - 32.0, ROW_H - 5.0, 15.0);
+    #[allow(clippy::too_many_arguments)]
+    fn draw_row(&self, cr: &Context, renderer: &Renderer, media: &Icons, entry: &Entry, count: usize,
+        unread: usize, child: bool, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
+        let indent = if child { 17.0 } else { 0.0 };
+        rounded(cr, x + 16.0 + indent, top + 2.0, WIDTH - 32.0 - indent, ROW_H - 5.0, 15.0);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.085 * hover) * alpha);
         let _ = cr.fill();
         if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
-            x + 43.0, top + 35.0, 39.0, renderer.scale(), alpha)) {
-            icons::draw(cr, entry.note.kind, x + 43.0, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+            x + 43.0 + indent, top + 35.0, 39.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, x + 43.0 + indent, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
         }
-        label(cr, renderer, &entry.note.app, x + 70.0, top + 10.0, 250.0, Font::Caption, alpha * 0.91);
-        label(cr, renderer, &entry.note.message(), x + 70.0, top + 35.0, WIDTH - 145.0, Font::Small, alpha * 0.63);
-        if !entry.read {
+        if count > 1 {
+            let title = format!("{}  ·  {}", entry.note.app, count);
+            label(cr, renderer, &title, x + 70.0, top + 10.0, 270.0, Font::Caption, alpha * 0.94);
+            let description = format!("Последнее: {}", entry.note.message());
+            label(cr, renderer, &description, x + 70.0, top + 35.0, WIDTH - 170.0, Font::Small, alpha * 0.63);
+            let (start, end) = if self.expanded.contains(&entry.note.app) { (4.0, 0.0) } else { (0.0, 4.0) };
+            cr.new_path();
+            cr.move_to(x + WIDTH - 107.0, top + 30.0 + start);
+            cr.line_to(x + WIDTH - 102.0, top + 30.0 + end);
+            cr.line_to(x + WIDTH - 97.0, top + 30.0 + start);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            cr.set_line_width(1.8);
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.5 + 0.4 * hover));
+            let _ = cr.stroke();
+        } else {
+            label(cr, renderer, &entry.note.app, x + 70.0 + indent, top + 10.0, 250.0 - indent, Font::Caption, alpha * 0.91);
+            label(cr, renderer, &entry.note.message(), x + 70.0 + indent, top + 35.0, WIDTH - 145.0 - indent, Font::Small, alpha * 0.63);
+        }
+        if unread > 0 {
             cr.arc(x + WIDTH - 72.0, top + 23.0, 3.0, 0.0, std::f64::consts::TAU);
             cr.set_source_rgba(0.40, 0.82, 1.0, alpha);
             let _ = cr.fill();
@@ -532,29 +667,73 @@ mod tests {
     }
 
     #[test]
+    fn same_app_collapses_and_children_keep_individual_read_state() {
+        let mut center = center();
+        for (id, app) in [(1, "Mail"), (2, "Chat"), (3, "Mail")] {
+            let mut note = crate::notify::fabricate(app, &format!("Message {id}"), "body");
+            note.id = id;
+            center.upsert(note, id as f64);
+        }
+        center.open(10.0);
+        let rows = center.rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].entry.note.app, "Mail");
+        assert_eq!(rows[0].count, 2);
+        assert_eq!(rows[0].unread, 2);
+        assert_eq!(rows[1].entry.note.app, "Chat");
+        assert_eq!(center.click(90.0, ROW_TOP + 12.0, 10.5), Action::None);
+        assert_eq!(center.rows().len(), 4);
+        assert!(center.rows()[1].child);
+        assert!(center.born_at.contains_key(&center.rows()[1].entry.serial));
+        assert!(center.detail.is_none());
+        assert_eq!(center.click(90.0, ROW_TOP + ROW_H + 12.0, 11.0), Action::None);
+        assert!(center.detail.is_some());
+        assert_eq!(center.unread(), 2);
+        assert_eq!(center.rows()[0].unread, 1);
+        assert_eq!(center.click(40.0, 25.0, 11.2), Action::None);
+        assert_eq!(center.click(90.0, ROW_TOP + 12.0, 11.5), Action::None);
+        assert_eq!(center.rows().len(), 2);
+        assert_eq!(center.leaving.iter().filter(|row| row.child).count(), 2);
+    }
+
+    #[test]
+    fn removing_a_group_dismisses_only_that_apps_active_notifications() {
+        let mut center = center();
+        for (id, app) in [(1, "Mail"), (2, "Chat"), (3, "Mail")] {
+            let mut note = crate::notify::fabricate(app, &id.to_string(), "body");
+            note.id = id;
+            center.upsert(note, id as f64);
+        }
+        center.open(10.0);
+        assert_eq!(center.click(WIDTH - 40.0, ROW_TOP + 12.0, 10.5), Action::DismissMany(vec![3, 1]));
+        assert_eq!(center.len(), 1);
+        assert_eq!(center.rows()[0].entry.note.app, "Chat");
+    }
+
+    #[test]
     fn incoming_and_removed_rows_interpolate_without_jumping() {
         let mut center = center();
         for id in 1..=2 {
-            let mut note = crate::notify::fabricate("System", &id.to_string(), "body");
+            let mut note = crate::notify::fabricate(&format!("App{id}"), &id.to_string(), "body");
             note.id = id;
             center.upsert(note, id as f64);
         }
         center.open(10.0);
         let previous_front = center.entries.front().unwrap().serial;
-        let mut incoming = crate::notify::fabricate("System", "incoming", "body");
+        let mut incoming = crate::notify::fabricate("App3", "incoming", "body");
         incoming.id = 3;
         center.upsert(incoming, 11.0);
         assert!(center.born_at.contains_key(&center.entries.front().unwrap().serial));
-        assert_eq!(center.row_position(previous_front, 1.0, 11.0), 0.0);
-        assert!((center.row_position(previous_front, 1.0, 11.0 + ROW_MOTION) - 1.0).abs() < 1e-9);
+        assert_eq!(center.row_position(&RowKey::Entry(previous_front), 1.0, 11.0), 0.0);
+        assert!((center.row_position(&RowKey::Entry(previous_front), 1.0, 11.0 + ROW_MOTION) - 1.0).abs() < 1e-9);
         assert!(center.is_animating(11.1));
         center.advance(11.5);
         assert!(center.born_at.is_empty());
 
         assert_eq!(center.click(WIDTH - 40.0, ROW_TOP + 16.0, 12.0), Action::Dismiss(3));
         assert_eq!(center.leaving.len(), 1);
-        assert_eq!(center.row_position(previous_front, 0.0, 12.0), 1.0);
-        assert!(center.row_position(previous_front, 0.0, 12.0 + ROW_MOTION).abs() < 1e-9);
+        assert_eq!(center.row_position(&RowKey::Entry(previous_front), 0.0, 12.0), 1.0);
+        assert!(center.row_position(&RowKey::Entry(previous_front), 0.0, 12.0 + ROW_MOTION).abs() < 1e-9);
         center.advance(12.0 + EXIT_MOTION);
         assert!(center.leaving.is_empty());
     }

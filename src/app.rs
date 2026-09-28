@@ -1678,7 +1678,7 @@ impl App {
     }
 
     fn activate_quick_action(&mut self, action: crate::quick::Action, now: Time) {
-        self.island.close_quick_menu(now);
+        if action != crate::quick::Action::Dnd { self.island.close_quick_menu(now); }
         match action {
             crate::quick::Action::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
             crate::quick::Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
