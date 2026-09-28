@@ -158,10 +158,12 @@ impl Loader {
             for base in &self.bases {
                 for size in SIZES {
                     let dir = if size.is_empty() { base.join(theme) } else { base.join(theme).join(size) };
-                    for ext in ["png", "svg", "xpm"] {
-                        let path = dir.join("apps").join(format!("{name}.{ext}"));
-                        if path.exists() {
-                            return Some(path);
+                    for category in ["apps", "status", "devices", "mimetypes", "actions"] {
+                        for ext in ["png", "svg", "xpm"] {
+                            let path = dir.join(category).join(format!("{name}.{ext}"));
+                            if path.exists() {
+                                return Some(path);
+                            }
                         }
                     }
                 }

@@ -5,6 +5,7 @@
 //! clock timer).
 
 use std::collections::VecDeque;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 use smithay_client_toolkit::{
@@ -301,6 +302,7 @@ pub struct App {
     dbus_tx: channel::Sender<dbus::Event>,
     network_tx: channel::Sender<crate::network::Message>,
     notification_commands: std::sync::mpsc::Sender<crate::notification_server::Command>,
+    notification_dnd: Arc<AtomicBool>,
     pub exit: bool,
 }
 
@@ -344,7 +346,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     dbus::spawn_auth_watch(dbus_tx.clone());
     let (eq_tx, eq_rx) = channel::channel::<[f32; eq::BANDS]>();
     let (note_tx, note_rx) = channel::channel::<crate::notification_server::Event>();
-    let notification_commands = crate::notification_server::spawn(note_tx);
+    let notification_dnd = Arc::new(AtomicBool::new(crate::notice_center::load_dnd()));
+    let notification_commands = crate::notification_server::spawn(note_tx, notification_dnd.clone());
     let (activity_tx, activity_rx) = channel::channel::<activity::Event>();
     activity::spawn_watchers(activity_tx.clone());
     let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
@@ -415,6 +418,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         dbus_tx,
         network_tx,
         notification_commands,
+        notification_dnd,
         exit: false,
     };
 
@@ -585,6 +589,8 @@ fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progr
         progress,
         actions: Vec::new(),
         transient: false,
+        icon: None,
+        image: None,
     }
 }
 
@@ -697,6 +703,19 @@ impl App {
                 self.set_keyboard_focus(open);
                 self.after_change();
                 return if open { "open".into() } else { "unavailable".into() };
+            }
+            Command::Dnd(action) => {
+                let enabled = match action.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    "toggle" => !self.island.dnd,
+                    "status" => return if self.island.dnd { "on" } else { "off" }.into(),
+                    _ => return "error: expected on, off, toggle or status".into(),
+                };
+                self.island.set_dnd(enabled, now);
+                self.notification_dnd.store(enabled, Ordering::Relaxed);
+                self.after_change();
+                return if enabled { "on" } else { "off" }.into();
             }
             Command::LauncherClose => {
                 self.island.close_launcher(now);
@@ -1415,6 +1434,7 @@ impl PointerHandler for App {
                     self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_notice_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false));
                     changed = true;
@@ -1425,6 +1445,7 @@ impl PointerHandler for App {
                     self.island.clear_network_hover(self.clock.predict(false));
                     self.island.set_quick_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.clear_center_hover(self.clock.predict(false));
+                    self.island.set_notice_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_eq_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_editor_chip_hover(-1.0, -1.0, self.clock.predict(false));
                     self.island.set_editor_hover(None);
@@ -1445,6 +1466,9 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     if self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_notice_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
                     if self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false)) {
@@ -1560,6 +1584,21 @@ impl PointerHandler for App {
                         changed = true;
                         continue;
                     }
+                    if button == BTN_LEFT {
+                        if let Some(action) = self.island.notice_click_at(event.position.0, event.position.1) {
+                            match action {
+                                crate::island::NoticeClick::Invoke(id, key) => {
+                                    let _ = self.notification_commands.send(crate::notification_server::Command::Action { id, key });
+                                }
+                                crate::island::NoticeClick::Dismiss(id) => {
+                                    self.island.dismiss_notice(now);
+                                    let _ = self.notification_commands.send(crate::notification_server::Command::Dismiss(id));
+                                }
+                            }
+                            changed = true;
+                            continue;
+                        }
+                    }
                     // a click on a notification dismisses it
                     let dismissed_id = self.island.notification_id();
                     if self.island.dismiss_notice(now) {
@@ -1646,6 +1685,11 @@ impl App {
             crate::quick::Action::Timer => { let _ = self.island.timer_command("menu", now); }
             crate::quick::Action::Launcher => { self.island.toggle_launcher(now); }
             crate::quick::Action::Notifications => { self.island.open_notification_center(now); }
+            crate::quick::Action::Dnd => {
+                let enabled = !self.island.dnd;
+                self.island.set_dnd(enabled, now);
+                self.notification_dnd.store(enabled, Ordering::Relaxed);
+            }
             crate::quick::Action::Close => {}
         }
     }

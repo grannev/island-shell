@@ -17,13 +17,14 @@ pub enum Action {
     Timer,
     Launcher,
     Notifications,
+    Dnd,
     Close,
 }
 
-pub const ACTIONS: [Action; 5] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications];
+pub const ACTIONS: [Action; 6] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd];
 
 fn tile(i: usize) -> (f64, f64) {
-    if i == 4 { (PAD, 224.0) } else { (PAD + (i % 2) as f64 * (TILE_W + GAP), 64.0 + (i / 2) as f64 * (TILE_H + GAP)) }
+    (PAD + (i % 2) as f64 * (TILE_W + GAP), 64.0 + (i / 2) as f64 * (TILE_H + GAP))
 }
 
 pub fn hit(x: f64, y: f64) -> Option<Action> {
@@ -32,7 +33,7 @@ pub fn hit(x: f64, y: f64) -> Option<Action> {
     }
     ACTIONS.iter().enumerate().find_map(|(i, action)| {
         let (tx, ty) = tile(i);
-        (x >= tx && x <= tx + if i == 4 { WIDTH - 2.0 * PAD } else { TILE_W } && y >= ty && y <= ty + TILE_H).then_some(*action)
+        (x >= tx && x <= tx + TILE_W && y >= ty && y <= ty + TILE_H).then_some(*action)
     })
 }
 
@@ -98,12 +99,19 @@ fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64) {
             cr.arc(0.0, 11.0, 1.5, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
         }
+        Action::Dnd => {
+            cr.set_fill_rule(cairo::FillRule::EvenOdd);
+            cr.arc(0.0, 0.0, 11.0, 0.0, std::f64::consts::TAU);
+            cr.new_sub_path();
+            cr.arc(5.0, -4.0, 10.0, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
         Action::Close => {}
     }
     cr.restore().unwrap();
 }
 
-pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 5], close_hover: f64, unread: usize) {
+pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 6], close_hover: f64, unread: usize, dnd: bool) {
     let title = renderer.layout(cr, "Быстрый доступ", Font::Text);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.97 * alpha);
     cr.move_to(renderer.snap(x + 22.0), renderer.snap(y + 18.0));
@@ -124,8 +132,8 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
         let (tx, ty) = tile(i);
         let (tx, ty) = (x + tx, y + ty);
         let h = hover[i].clamp(0.0, 1.0);
-        rounded(cr, tx, ty, if i == 4 { WIDTH - 2.0 * PAD } else { TILE_W }, TILE_H, 17.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.105 * h) * alpha);
+        rounded(cr, tx, ty, TILE_W, TILE_H, 17.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.105 * h + if *action == Action::Dnd && dnd { 0.08 } else { 0.0 }) * alpha);
         let _ = cr.fill();
         let accent = match action {
             Action::Wifi => (0.11, 0.57, 0.97),
@@ -133,6 +141,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
             Action::Timer => (0.95, 0.57, 0.12),
             Action::Launcher => (0.43, 0.43, 0.49),
             Action::Notifications => (0.38, 0.71, 0.94),
+            Action::Dnd => (0.55, 0.43, 0.91),
             Action::Close => unreachable!(),
         };
         rounded(cr, tx + 14.0, ty + 15.0, 40.0, 40.0, 12.0);
@@ -145,6 +154,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
             Action::Timer => "Таймер",
             Action::Launcher => "Лаунчер",
             Action::Notifications => "Уведомления",
+            Action::Dnd => if dnd { "Тишина · вкл" } else { "Тишина" },
             Action::Close => unreachable!(),
         };
         let layout = renderer.layout(cr, label, Font::Caption);
@@ -154,7 +164,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
         if *action == Action::Notifications && unread > 0 {
             let count = renderer.layout(cr, &unread.min(99).to_string(), Font::Small);
             cr.set_source_rgba(0.46, 0.82, 1.0, alpha);
-            cr.move_to(renderer.snap(tx + WIDTH - 2.0 * PAD - 39.0), renderer.snap(ty + 25.0));
+            cr.move_to(renderer.snap(tx + TILE_W - 22.0), renderer.snap(ty + 5.0));
             pangocairo::functions::show_layout(cr, &count);
         }
     }

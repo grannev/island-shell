@@ -1,6 +1,6 @@
 //! Bounded, private notification history and its native island sheet.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::anim::{Spring, Time, min_jerk};
 use crate::icons;
+use crate::iconload::Icons;
 use crate::island::{Font, Renderer};
 use crate::notify::Notification;
 
@@ -75,6 +76,38 @@ fn state_path() -> Option<PathBuf> {
     Some(base.join("island-shell/notifications.json"))
 }
 
+fn prune_saved_images(entries: &VecDeque<Entry>, state: &PathBuf) {
+    let dir = state.with_file_name("images");
+    let keep: HashSet<_> = entries.iter().filter_map(|entry| entry.note.image.as_ref()).collect();
+    let Ok(files) = std::fs::read_dir(dir) else { return };
+    for file in files.flatten() {
+        let path = file.path();
+        if path.extension().is_some_and(|ext| ext == "png")
+            && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '.') )
+            && file.file_type().is_ok_and(|kind| kind.is_file())
+            && !keep.contains(&path.to_string_lossy().into_owned()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub fn load_dnd() -> bool {
+    if cfg!(test) { return false; }
+    state_path().and_then(|path| std::fs::read_to_string(path.with_file_name("dnd")).ok())
+        .is_some_and(|value| value.trim() == "on")
+}
+
+pub fn save_dnd(enabled: bool) {
+    if cfg!(test) { return; }
+    let Some(path) = state_path().map(|path| path.with_file_name("dnd")) else { return };
+    if let Some(parent) = path.parent() {
+        if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).is_err() { return; }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(path) {
+        let _ = file.write_all(if enabled { b"on\n" } else { b"off\n" });
+    }
+}
+
 fn save(path: &PathBuf, entries: &[Entry]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
@@ -98,6 +131,7 @@ impl Center {
         let entries: VecDeque<Entry> = path.as_ref().and_then(|path| std::fs::read(path).ok())
             .and_then(|data| serde_json::from_slice::<Vec<Entry>>(&data).ok())
             .unwrap_or_default().into_iter().take(LIMIT).map(|mut e| { e.active = false; e }).collect();
+        if let Some(path) = path.as_ref() { prune_saved_images(&entries, path); }
         let writer = path.map(|path| {
             let (tx, rx) = mpsc::channel::<Vec<Entry>>();
             std::thread::Builder::new().name("notification-history".into()).spawn(move || {
@@ -311,7 +345,7 @@ impl Center {
         if entry.active { Action::Dismiss(entry.note.id) } else { Action::None }
     }
 
-    pub fn draw(&self, cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, now: Time) {
+    pub fn draw(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
         let title = if self.detail.is_some() { "Уведомление" } else { "Уведомления" };
         let title_x = if self.detail.is_some() { x + 121.0 } else { x + 24.0 };
         label(cr, renderer, title, title_x, y + 17.0, WIDTH - (title_x - x) - 62.0, Font::Text, alpha);
@@ -327,13 +361,13 @@ impl Center {
         }
         button(cr, renderer, "×", x + WIDTH - 49.0, y + 10.0, 32.0, 32.0, alpha, self.button_hover[0].value(now));
         if let Some(serial) = self.detail {
-            self.draw_detail(cr, renderer, x, y, alpha, serial, now);
+            self.draw_detail(cr, renderer, media, x, y, alpha, serial, now);
         } else {
-            self.draw_list(cr, renderer, x, y, alpha, now);
+            self.draw_list(cr, renderer, media, x, y, alpha, now);
         }
     }
 
-    fn draw_list(&self, cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, now: Time) {
+    fn draw_list(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, now: Time) {
         if self.entries.is_empty() {
             let appear = if self.leaving.is_empty() { 1.0 } else {
                 min_jerk(((now - self.row_motion_at - 0.12) / 0.28).clamp(0.0, 1.0))
@@ -354,12 +388,12 @@ impl Center {
             let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
             let opacity = alpha * opening * fade;
             let hover = self.row_hover[row].value(now);
-            self.draw_row(cr, renderer, entry, x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
+            self.draw_row(cr, renderer, media, entry, x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
         }
         for leaving in &self.leaving {
             let k = min_jerk(((now - leaving.since) / EXIT_MOTION).clamp(0.0, 1.0));
             let top = y + ROW_TOP + leaving.row * ROW_H - k * 9.0;
-            self.draw_row(cr, renderer, &leaving.entry, x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
+            self.draw_row(cr, renderer, media, &leaving.entry, x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
         }
         cr.restore().unwrap();
         if self.entries.is_empty() { return; }
@@ -371,11 +405,14 @@ impl Center {
         }
     }
 
-    fn draw_row(&self, cr: &Context, renderer: &Renderer, entry: &Entry, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
+    fn draw_row(&self, cr: &Context, renderer: &Renderer, media: &Icons, entry: &Entry, x: f64, top: f64, alpha: f64, hover: f64, icon_elapsed: Time) {
         rounded(cr, x + 16.0, top + 2.0, WIDTH - 32.0, ROW_H - 5.0, 15.0);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.085 * hover) * alpha);
         let _ = cr.fill();
-        icons::draw(cr, entry.note.kind, x + 43.0, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+        if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
+            x + 43.0, top + 35.0, 39.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, x + 43.0, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+        }
         label(cr, renderer, &entry.note.app, x + 70.0, top + 10.0, 250.0, Font::Caption, alpha * 0.91);
         label(cr, renderer, &entry.note.message(), x + 70.0, top + 35.0, WIDTH - 145.0, Font::Small, alpha * 0.63);
         if !entry.read {
@@ -386,19 +423,27 @@ impl Center {
         label(cr, renderer, "×", x + WIDTH - 47.0, top + 19.0, 24.0, Font::Text, alpha * (0.43 + 0.35 * hover));
     }
 
-    fn draw_detail(&self, cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, serial: u64, now: Time) {
+    fn draw_detail(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, serial: u64, now: Time) {
         let Some(entry) = self.entries.iter().find(|e| e.serial == serial) else { return };
-        icons::draw(cr, entry.note.kind, x + 49.0, y + 102.0, 48.0, (now - self.opened_at).max(0.0), alpha);
+        if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
+            x + 49.0, y + 102.0, 48.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, x + 49.0, y + 102.0, 48.0, (now - self.opened_at).max(0.0), alpha);
+        }
         label(cr, renderer, &entry.note.app, x + 83.0, y + 77.0, WIDTH - 108.0, Font::Caption, alpha * 0.65);
         label(cr, renderer, &entry.note.summary, x + 83.0, y + 103.0, WIDTH - 108.0, Font::Text, alpha);
         cr.save().unwrap();
         cr.rectangle(x + 24.0, y + 149.0, WIDTH - 48.0, 197.0);
         cr.clip();
+        let body_y = if let Some(image) = &entry.note.image {
+            let _ = crate::notify::draw_media(cr, media, image, x + WIDTH / 2.0,
+                y + 211.0, 118.0, renderer.scale(), alpha);
+            278.0
+        } else { 150.0 };
         let text = renderer.layout(cr, &entry.note.body, Font::Caption).copy();
         text.set_width(((WIDTH - 48.0) * pango::SCALE as f64) as i32);
         text.set_wrap(pango::WrapMode::WordChar);
         cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.78);
-        cr.move_to(renderer.snap(x + 24.0), renderer.snap(y + 150.0 - self.detail_scroll));
+        cr.move_to(renderer.snap(x + 24.0), renderer.snap(y + body_y - self.detail_scroll));
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
@@ -531,7 +576,7 @@ mod tests {
         center.upsert(note, 0.0);
         center.open(0.0);
         center.click(90.0, ROW_TOP + 12.0, 0.5);
-        center.draw(&cr, &renderer, 0.0, 0.0, 1.0, 1.0);
+        center.draw(&cr, &renderer, &Icons::new(), 0.0, 0.0, 1.0, 1.0);
         surface.write_to_png(&mut std::fs::File::create(path).unwrap()).unwrap();
     }
 }

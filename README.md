@@ -183,6 +183,12 @@ from the island's shortcut menu or `island-shell notifications`. Active
 notifications offer their application actions, and the sheet supports reading,
 deleting, clearing and scrolling. Incoming rows ease into place while the
 sheet is open; deleted rows fade and slide away as the list closes the gap.
+App icons and supplied notification images appear in the pill and history;
+the pill exposes up to two application actions directly, while clicking its
+body invokes the default action when one exists. The shortcut menu has a
+**Do Not Disturb** tile, also controlled by `island-shell dnd on|off|toggle|status`.
+It suppresses ordinary popups and sounds while still saving them to history;
+critical alerts continue to appear. The choice survives restarts.
 Optional local sounds use `paplay` and the
 existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
 duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon
@@ -284,6 +290,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell demo <app> <summary>|<body>    # fabricate a notification
     island-shell launcher                       # mod+d: unfold / fold the panel
     island-shell notifications                  # open the notification history
+    island-shell dnd on|off|toggle|status       # quiet ordinary notifications
     island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell timer 25m | timer pause        # compact countdown

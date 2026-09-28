@@ -28,6 +28,8 @@ pub enum Command {
     Quick,
     /// Open the native notification history sheet.
     Notifications,
+    /// `dnd <on|off|toggle|status>` controls quiet notifications.
+    Dnd(String),
     /// close the launcher if it is open (e.g. after launching)
     LauncherClose,
     /// Close modal menus, like a click on the transparent outside region.
@@ -78,6 +80,8 @@ impl Command {
             ["launcher"] => Command::Launcher,
             ["quick"] | ["menu"] => Command::Quick,
             ["notifications"] => Command::Notifications,
+            ["dnd", action] => Command::Dnd(action.to_string()),
+            ["dnd"] => Command::Dnd("toggle".into()),
             ["launcher-close"] => Command::LauncherClose,
             ["dismiss"] => Command::Dismiss,
             ["type", rest @ ..] => Command::Type(rest.join(" ")),
@@ -116,7 +120,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|launcher|wifi|bluetooth|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "status|set <key> <value>|quit]",
 );

@@ -2,8 +2,10 @@
 //! executor; the Wayland thread receives small, ordered events through calloop.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use zbus::blocking::connection::Builder;
@@ -44,6 +46,7 @@ struct State {
 
 struct Service {
     state: Arc<Mutex<State>>,
+    dnd: Arc<AtomicBool>,
     ui: Sender<Event>,
     commands: mpsc::Sender<Command>,
 }
@@ -62,6 +65,76 @@ fn hint_bool(value: &Value<'_>) -> Option<bool> {
         Value::Value(inner) => hint_bool(inner),
         _ => None,
     }
+}
+
+fn inner_value<'a>(value: &'a Value<'a>) -> &'a Value<'a> {
+    match value { Value::Value(inner) => inner_value(inner), other => other }
+}
+
+fn hint_string(value: &Value<'_>) -> Option<String> {
+    match value {
+        Value::Str(value) => Some(value.to_string()),
+        Value::Value(inner) => hint_string(inner),
+        _ => None,
+    }
+}
+
+fn media_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 1024 { return None; }
+    if let Some(path) = value.strip_prefix("file://") {
+        if !path.starts_with('/') { return None; }
+        let mut decoded = Vec::with_capacity(path.len());
+        let mut bytes = path.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                let hi = (bytes.next()? as char).to_digit(16)?;
+                let lo = (bytes.next()? as char).to_digit(16)?;
+                decoded.push((hi * 16 + lo) as u8);
+            } else { decoded.push(byte); }
+        }
+        return String::from_utf8(decoded).ok();
+    }
+    (!value.contains("://")).then(|| value.to_string())
+}
+
+fn image_bytes(value: &Value<'_>) -> Option<image::RgbaImage> {
+    let Value::Structure(data) = inner_value(value) else { return None };
+    let fields = data.fields();
+    if fields.len() != 7 { return None; }
+    let int = |index| match inner_value(&fields[index]) { Value::I32(n) => Some(*n), _ => None };
+    let flag = match inner_value(&fields[3]) { Value::Bool(b) => *b, _ => return None };
+    let (width, height, stride, bits, channels) = (int(0)?, int(1)?, int(2)?, int(4)?, int(5)?);
+    if !(1..=1024).contains(&width) || !(1..=1024).contains(&height) || bits != 8
+        || channels != if flag { 4 } else { 3 } || stride < width * channels
+        || stride > 1024 * 4 + 4096 { return None; }
+    let owned = OwnedValue::try_from(&fields[6]).ok()?;
+    let bytes = Vec::<u8>::try_from(owned).ok()?;
+    let needed = (height as usize - 1).checked_mul(stride as usize)?
+        .checked_add(width as usize * channels as usize)?;
+    if bytes.len() < needed || bytes.len() > 5_000_000 { return None; }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in 0..height as usize {
+        for col in 0..width as usize {
+            let offset = row * stride as usize + col * channels as usize;
+            pixels.extend_from_slice(&bytes[offset..offset + 3]);
+            pixels.push(if flag { bytes[offset + 3] } else { 255 });
+        }
+    }
+    image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+}
+
+fn save_image(image: &image::RgbaImage, id: u32) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home).join(".local/state"));
+    let dir = base.join("island-shell/images");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_nanos();
+    let path = dir.join(format!("{}-{id}-{stamp}.png", std::process::id()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
+    image::DynamicImage::ImageRgba8(image.clone()).write_to(&mut file, image::ImageFormat::Png).ok()?;
+    Some(path.to_string_lossy().into_owned())
 }
 
 fn play_sound(critical: bool) {
@@ -85,7 +158,7 @@ fn play_sound(critical: bool) {
 #[interface(name = "org.freedesktop.Notifications", spawn = false)]
 impl Service {
     fn get_capabilities(&self) -> Vec<&'static str> {
-        vec!["actions", "body", "persistence"]
+        vec!["actions", "body", "icon-static", "persistence"]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -95,13 +168,14 @@ impl Service {
         let transient = hints.get("transient").and_then(|v| hint_bool(v)).unwrap_or(false);
         let resident = hints.get("resident").and_then(|v| hint_bool(v)).unwrap_or(false);
         let silent = hints.get("suppress-sound").and_then(|v| hint_bool(v)).unwrap_or(false)
+            || (self.dnd.load(Ordering::Relaxed) && !critical)
             || ["telegram", "thunderbird"].iter().any(|name| app_name.to_ascii_lowercase().contains(name));
         let base_kind = notify::classify(&app_name, &app_icon, false);
         let parsed_actions: Vec<_> = actions.chunks_exact(2).take(12)
             .map(|pair| (pair[0].clone(), pair[1].clone())).collect();
         let timeout = if expire_timeout == 0 { None } else {
-            let millis = if expire_timeout < 0 { if critical { 8000 } else { 5000 } } else { expire_timeout as u64 };
-            Some(Instant::now() + Duration::from_millis(millis.clamp(100, 86_400_000)))
+            let millis = if expire_timeout < 0 { if critical { 0 } else { 5000 } } else { expire_timeout as u64 };
+            if millis == 0 { None } else { Some(Instant::now() + Duration::from_millis(millis.clamp(100, 86_400_000))) }
         };
         let mut state = self.state.lock().unwrap();
         let id = if replaces_id != 0 && state.active.contains_key(&replaces_id) {
@@ -114,6 +188,12 @@ impl Service {
         };
         state.active.insert(id, Active { actions: parsed_actions.clone(), resident, expires: timeout });
         drop(state);
+        let icon = media_name(&app_icon).or_else(|| hints.get("desktop-entry")
+            .and_then(|value| hint_string(value)).and_then(|name| media_name(name.trim_end_matches(".desktop"))));
+        let image = ["image-data", "image_data", "icon_data"].iter().find_map(|key| hints.get(*key))
+            .and_then(|value| image_bytes(value)).and_then(|image| save_image(&image, id))
+            .or_else(|| ["image-path", "image_path"].iter().find_map(|key| hints.get(*key))
+                .and_then(|value| hint_string(value)).and_then(|name| media_name(&name)));
         let note = Notification {
             id,
             app: notify::pretty_app(&app_name, base_kind),
@@ -125,6 +205,8 @@ impl Service {
             progress: None,
             actions: parsed_actions,
             transient,
+            icon,
+            image,
         };
         let _ = self.ui.send(Event::Upsert(note));
         if !silent { let _ = self.commands.send(Command::PlaySound { critical }); }
@@ -160,13 +242,13 @@ fn emit_closed(conn: &zbus::blocking::Connection, ui: &Sender<Event>, id: u32, r
 
 /// Start owning the notification name. If another daemon still owns it,
 /// retry without weakening the rest of the island.
-pub fn spawn(ui: Sender<Event>) -> mpsc::Sender<Command> {
+pub fn spawn(ui: Sender<Event>, dnd: Arc<AtomicBool>) -> mpsc::Sender<Command> {
     let (commands, rx) = mpsc::channel();
     let tx = commands.clone();
     std::thread::Builder::new().name("notifications".into()).spawn(move || {
         let state = Arc::new(Mutex::new(State::default()));
         let conn = loop {
-            let service = Service { state: state.clone(), ui: ui.clone(), commands: tx.clone() };
+            let service = Service { state: state.clone(), dnd: dnd.clone(), ui: ui.clone(), commands: tx.clone() };
             match Builder::session().and_then(|builder| builder.serve_at(PATH, service))
                 .and_then(|builder| builder.name(NAME)).and_then(Builder::build) {
                 Ok(conn) => break conn,
@@ -225,10 +307,23 @@ mod tests {
     }
 
     #[test]
+    fn image_hint_validates_dimensions_and_preserves_alpha() {
+        let data = Value::from((2i32, 1i32, 8i32, true, 8i32, 4i32,
+            vec![255u8, 0, 0, 128, 0, 0, 255, 255]));
+        let image = image_bytes(&data).unwrap();
+        assert_eq!(image.dimensions(), (2, 1));
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0, 128]);
+        assert_eq!(image.get_pixel(1, 0).0, [0, 0, 255, 255]);
+        let invalid = Value::from((0i32, 1i32, 8i32, true, 8i32, 4i32, vec![0u8; 8]));
+        assert!(image_bytes(&invalid).is_none());
+        assert_eq!(media_name("file:///tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
+    }
+
+    #[test]
     #[ignore = "run inside dbus-run-session to avoid taking over the live notification name"]
     fn owns_name_replaces_and_closes_notifications() {
         let (ui, _events) = smithay_client_toolkit::reexports::calloop::channel::channel();
-        let commands = spawn(ui);
+        let commands = spawn(ui, Arc::new(AtomicBool::new(false)));
         let conn = zbus::blocking::Connection::session().unwrap();
         let proxy = zbus::blocking::Proxy::new(&conn, NAME, PATH, NAME).unwrap();
         let capabilities: Vec<String> = (0..100).find_map(|_| {

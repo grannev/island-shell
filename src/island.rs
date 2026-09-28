@@ -238,6 +238,12 @@ pub struct Notice {
     pub since: Time,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoticeClick {
+    Invoke(u32, String),
+    Dismiss(u32),
+}
+
 #[derive(Clone, Debug)]
 struct LiveActivity {
     event: activity::Event,
@@ -326,6 +332,10 @@ pub struct Island {
     notice_queued: Option<crate::notify::Notification>,
     center: notice_center::Center,
     center_rect: Option<Rect>,
+    notice_rect: Option<Rect>,
+    notice_hovered: Option<usize>,
+    notice_action_hover: [Spring; 2],
+    pub dnd: bool,
     roll: Quintic,
     /// the pill's size, eased when a new notification needs another (a
     /// long message wraps to two lines and the pill grows to fit)
@@ -356,7 +366,7 @@ pub struct Island {
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
     quick_selected: usize,
-    quick_hover_springs: [Spring; 5],
+    quick_hover_springs: [Spring; 6],
     quick_close_hover: Spring,
     eq_rect: Option<Rect>,
     player_rect: Option<Rect>,
@@ -480,6 +490,10 @@ impl Island {
             notice_queued: None,
             center: notice_center::Center::new(),
             center_rect: None,
+            notice_rect: None,
+            notice_hovered: None,
+            notice_action_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
+            dnd: notice_center::load_dnd(),
             roll: Quintic::at_rest(1.0, ROLL_DUR),
             pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
             pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
@@ -567,6 +581,7 @@ impl Island {
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
             || self.quick_hover_springs.iter().any(|s| s.is_moving(now))
             || self.quick_close_hover.is_moving(now)
+            || self.notice_action_hover.iter().any(|spring| spring.is_moving(now))
             || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
@@ -1079,7 +1094,7 @@ impl Island {
                 files |= launcher.receive_files(generation, reply, now);
             }
         }
-        ((catalog || icons) && self.launcher.is_some()) || art || activity || files
+        ((catalog || icons) && (self.launcher.is_some() || self.notice.is_some() || self.center.open)) || art || activity || files
     }
 
     /// The companion Neovim plugin sent its state.
@@ -1195,6 +1210,7 @@ impl Island {
     /// behind an active Touch ID.
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
         self.center.upsert(note.clone(), now);
+        if self.dnd && !note.critical { return; }
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
         if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() || self.center.open {
@@ -1225,6 +1241,8 @@ impl Island {
             self.roll.set(1.0, now);
         }
         self.notice = Some(Notice { note, since: now });
+        self.notice_hovered = None;
+        for spring in &mut self.notice_action_hover { spring.set(0.0, now); }
         self.sync(now);
     }
 
@@ -1638,11 +1656,13 @@ impl Island {
         self.network_menu_rect = None;
         self.quick_rect = None;
         self.center_rect = None;
+        self.notice_rect = None;
         self.eq_rect = None;
         self.player_rect = None;
         self.editor_chip_rect = None;
-        let unread_len = if self.center.unread() > 0 { 13.0 } else { 0.0 };
-        let line_w = chip_len + clock_w + timer_len + bars_len + unread_len + 2.0 * pad;
+        let unread_len = if self.center.unread() > 0 { 18.0 } else { 0.0 };
+        let dnd_len = if self.dnd { 17.0 } else { 0.0 };
+        let line_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, notice_center::HEIGHT))
@@ -1738,7 +1758,7 @@ impl Island {
             * if self.hidden.any() && self.launcher.is_none() { 0.0 } else { 1.0 };
         let pill_alpha = pill_alpha_of(q);
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + bars_len + unread_len;
+            let content_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -1794,10 +1814,22 @@ impl Island {
                 cr.restore().unwrap();
             }
             if unread_len > 0.0 {
-                let bx = after_clock + bars_len + 8.0;
+                let bx = after_clock + bars_len + 13.0;
                 cr.arc(bx, dy + line_h / 2.0, 2.7, 0.0, std::f64::consts::TAU);
                 cr.set_source_rgba(0.40, 0.82, 1.0, line_alpha);
                 let _ = cr.fill();
+            }
+            if self.dnd {
+                let mx = after_clock + bars_len + unread_len + 8.0;
+                let my = dy + line_h / 2.0;
+                cr.save().unwrap();
+                cr.set_fill_rule(cairo::FillRule::EvenOdd);
+                cr.arc(mx, my, 5.5, 0.0, std::f64::consts::TAU);
+                cr.new_sub_path();
+                cr.arc(mx + 3.0, my - 2.0, 5.2, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(0.72, 0.64, 1.0, line_alpha);
+                let _ = cr.fill();
+                cr.restore().unwrap();
             }
         }
 
@@ -1870,14 +1902,14 @@ impl Island {
                 if pill_alpha > 0.95 {
                     self.center_rect = Some(Rect { x, y: dy + climb, w: notice_center::WIDTH, h: notice_center::HEIGHT });
                 }
-                self.center.draw(cr, renderer, x, dy + climb, pill_alpha, now);
+                self.center.draw(cr, renderer, &self.launcher_icons, x, dy + climb, pill_alpha, now);
             } else if self.quick_open {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 if pill_alpha > 0.95 {
                     self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb, w: quick::WIDTH, h: quick::HEIGHT });
                 }
                 quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb, pill_alpha,
-                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread());
+                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread(), self.dnd);
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 if activity.event == activity::Event::TimerMenu {
@@ -1929,6 +1961,10 @@ impl Island {
                 }
                 if let Some(notice) = &self.notice {
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB + ROLL_TRAVEL * (1.0 - roll);
+                    if pill_alpha > 0.95 && roll > 0.95 {
+                        let (_, _, w, _) = renderer.notice_layouts(cr, &notice.note);
+                        self.notice_rect = Some(Rect { x: cx - w / 2.0, y: dy, w, h: bh });
+                    }
                     self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7), climb, now);
                 }
             }
@@ -2005,8 +2041,19 @@ impl Island {
         let (app, msg, width, _) = renderer.notice_layouts(cr, note);
         let x0 = cx - width / 2.0;
         let icon_cx = x0 + NOTICE_PAD_L + NOTICE_ICON / 2.0;
-        let mid = dy + bh / 2.0 + offset;
-        icons::draw(cr, note.kind, icon_cx, mid, NOTICE_ICON, t, alpha);
+        let actions: Vec<_> = note.actions.iter().filter(|(key, _)| key != "default").take(2).collect();
+        let mid = dy + bh / 2.0 + offset - if actions.is_empty() { 0.0 } else { 14.0 };
+        if !note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, &self.launcher_icons, name,
+            icon_cx, mid, NOTICE_ICON, renderer.scale(), alpha)) {
+            icons::draw(cr, note.kind, icon_cx, mid, NOTICE_ICON, t, alpha);
+        }
+        if note.icon.is_some() {
+            if let Some(image) = &note.image {
+                let image_x = x0 + width - NOTICE_PAD_R - 36.0;
+                let _ = crate::notify::draw_media(cr, &self.launcher_icons, image,
+                    image_x, mid, 72.0, renderer.scale(), alpha);
+            }
+        }
         match note.progress {
             // a job reports how far it has got instead of how long the pill
             // still has to live
@@ -2028,6 +2075,22 @@ impl Island {
         cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.95);
         cr.move_to(tx + slide(0.12), renderer.snap(ty + app_ext.height() as f64 + NOTICE_LINE_GAP - msg_ext.y() as f64));
         pangocairo::functions::show_layout(cr, &msg);
+        for (index, (_, title)) in actions.iter().enumerate() {
+            let bx = x0 + NOTICE_PAD_L + 55.0 + index as f64 * 148.0;
+            let by = dy + bh - 39.0 + offset;
+            cr.new_path();
+            cr.arc(bx + 118.0, by + 15.0, 15.0, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+            cr.arc(bx + 15.0, by + 15.0, 15.0, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
+            cr.close_path();
+            cr.set_source_rgba(1.0, 1.0, 1.0, (0.12 + 0.15 * self.notice_action_hover[index].value(now)) * alpha);
+            let _ = cr.fill();
+            let label = renderer.layout_ellipsized(cr, title, Font::Small, 113.0, 1);
+            let (_, ink) = label.pixel_extents();
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.95);
+            cr.move_to(renderer.snap(bx + (133.0 - ink.width() as f64) / 2.0 - ink.x() as f64),
+                renderer.snap(by + (30.0 - ink.height() as f64) / 2.0 - ink.y() as f64));
+            pangocairo::functions::show_layout(cr, &label);
+        }
     }
 
     /// Is the player open (so clicks go to its controls)?
@@ -2058,6 +2121,51 @@ impl Island {
     pub fn quick_menu_open(&self) -> bool { self.quick_open }
 
     pub fn notification_id(&self) -> Option<u32> { self.notice.as_ref().map(|n| n.note.id).filter(|id| *id != 0) }
+
+    pub fn set_dnd(&mut self, enabled: bool, now: Time) {
+        if self.dnd == enabled { return; }
+        self.dnd = enabled;
+        notice_center::save_dnd(enabled);
+        if enabled && self.notice.as_ref().is_some_and(|notice| !notice.note.critical) {
+            self.notice = None;
+            self.notice_prev = None;
+            self.notice_queued = None;
+        }
+        self.sync(now);
+    }
+
+    pub fn notice_click_at(&self, px: f64, py: f64) -> Option<NoticeClick> {
+        let rect = self.notice_rect?;
+        if px < rect.x || px > rect.x + rect.w || py < rect.y || py > rect.y + rect.h { return None; }
+        let note = &self.notice.as_ref()?.note;
+        if note.id == 0 { return None; }
+        if let Some(index) = self.notice_action_index_at(px, py) {
+            let (key, _) = note.actions.iter().filter(|(key, _)| key != "default").nth(index)?;
+            return Some(NoticeClick::Invoke(note.id, key.clone()));
+        }
+        note.actions.iter().find(|(key, _)| key == "default")
+            .map_or(Some(NoticeClick::Dismiss(note.id)), |(key, _)| Some(NoticeClick::Invoke(note.id, key.clone())))
+    }
+
+    fn notice_action_index_at(&self, px: f64, py: f64) -> Option<usize> {
+        let rect = self.notice_rect?;
+        if py < rect.y + rect.h - 39.0 || py > rect.y + rect.h - 9.0 { return None; }
+        let note = &self.notice.as_ref()?.note;
+        note.actions.iter().filter(|(key, _)| key != "default").take(2).enumerate().find_map(|(index, _)| {
+            let bx = rect.x + NOTICE_PAD_L + 55.0 + index as f64 * 148.0;
+            (px >= bx && px <= bx + 133.0).then_some(index)
+        })
+    }
+
+    pub fn set_notice_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let hovered = self.notice_action_index_at(px, py);
+        if self.notice_hovered == hovered { return false; }
+        self.notice_hovered = hovered;
+        for (index, spring) in self.notice_action_hover.iter_mut().enumerate() {
+            spring.set(if hovered == Some(index) { 1.0 } else { 0.0 }, now);
+        }
+        true
+    }
 
     pub fn notification_closed(&mut self, id: u32, now: Time) {
         self.center.closed(id);
@@ -2614,9 +2722,11 @@ impl Renderer {
             msg.set_attributes(Some(&attrs));
         }
         let text_w = (app.pixel_extents().1.width() as f64).max(msg.pixel_extents().1.width() as f64);
-        let w = NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP + text_w + NOTICE_PAD_R;
+        let image_extra = if note.icon.is_some() && note.image.is_some() { 88.0 } else { 0.0 };
+        let w = NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP + text_w + NOTICE_PAD_R + image_extra;
         let text_h = app.pixel_extents().1.height() as f64 + NOTICE_LINE_GAP + msg.pixel_extents().1.height() as f64;
-        let h = (text_h + 2.0 * NOTICE_PAD_V).max(NOTICE_ICON + 2.0 * NOTICE_PAD_V - 6.0);
+        let action_extra = if note.actions.iter().any(|(key, _)| key != "default") { 39.0 } else { 0.0 };
+        let h = (text_h + 2.0 * NOTICE_PAD_V).max(NOTICE_ICON + 2.0 * NOTICE_PAD_V - 6.0) + action_extra;
         (app, msg, w.max(NOTICE_MIN_W), h.max(PILL_H))
     }
 
@@ -2708,6 +2818,35 @@ mod tests {
         assert!(!island.is_animating(12.0));
         let next = island.deadline(12.25).unwrap();
         assert!(next > 12.5 && next <= 13.01);
+    }
+
+    #[test]
+    fn notice_clicks_use_default_action_and_explicit_buttons() {
+        let mut island = Island::new(Config::default());
+        let mut note = crate::notify::fabricate("System", "Message", "Body");
+        note.id = 42;
+        note.actions = vec![("default".into(), "Open".into()), ("reply".into(), "Reply".into())];
+        island.notify(note, 1.0);
+        island.notice_rect = Some(Rect { x: 100.0, y: 0.0, w: 420.0, h: 130.0 });
+        assert_eq!(island.notice_click_at(150.0, 40.0), Some(NoticeClick::Invoke(42, "default".into())));
+        assert_eq!(island.notice_click_at(100.0 + NOTICE_PAD_L + 65.0, 100.0), Some(NoticeClick::Invoke(42, "reply".into())));
+        assert_eq!(island.notice_click_at(90.0, 40.0), None);
+    }
+
+    #[test]
+    fn dnd_keeps_normal_notifications_in_history_but_shows_critical() {
+        let mut island = Island::new(Config::default());
+        island.set_dnd(true, 0.0);
+        let mut normal = crate::notify::fabricate("System", "normal", "body");
+        normal.id = 1;
+        island.notify(normal, 1.0);
+        assert!(island.notice.is_none());
+        assert_eq!(island.center.len(), 1);
+        let mut critical = crate::notify::fabricate("Critical", "urgent", "body");
+        critical.id = 2;
+        island.notify(critical, 2.0);
+        assert!(island.notice.as_ref().is_some_and(|notice| notice.note.critical));
+        island.set_dnd(false, 3.0);
     }
 
     #[test]

@@ -18,6 +18,10 @@ pub struct Notification {
     pub progress: Option<f64>,
     pub actions: Vec<(String, String)>,
     pub transient: bool,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 impl Notification {
@@ -39,7 +43,28 @@ pub fn fabricate(app: &str, summary: &str, body: &str) -> Notification {
     let critical = app.eq_ignore_ascii_case("critical");
     let app_kind = classify(app, "", false);
     let kind = if critical { AppKind::Critical } else { app_kind };
-    Notification { id: 0, app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None, actions: Vec::new(), transient: false }
+    Notification { id: 0, app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None, actions: Vec::new(), transient: false, icon: None, image: None }
+}
+
+impl Notification {
+    pub fn leading_image(&self) -> Option<&str> {
+        self.icon.as_deref().or(self.image.as_deref())
+    }
+}
+
+/// Blit an already-scaled themed icon or notification image. A missing asset
+/// is queued on the icon worker and leaves the caller's vector fallback.
+pub fn draw_media(cr: &cairo::Context, cache: &crate::iconload::Icons, name: &str,
+    cx: f64, cy: f64, size: f64, scale: f64, alpha: f64) -> bool {
+    let px = (size * scale).round().max(1.0) as i32;
+    let Some(surface) = cache.get_scaled(name, px) else { return false };
+    cr.save().unwrap();
+    cr.translate(cx, cy);
+    cr.scale(1.0 / scale, 1.0 / scale);
+    let _ = cr.set_source_surface(&surface, -(surface.width() as f64) / 2.0, -(surface.height() as f64) / 2.0);
+    let _ = cr.paint_with_alpha(alpha);
+    cr.restore().unwrap();
+    true
 }
 
 /// Notification bodies may carry markup (Telegram sends `<b>name</b>`):
