@@ -310,16 +310,16 @@ impl Center {
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
         if !(0.0..WIDTH).contains(&x) || !(0.0..self.height()).contains(&y) { return None; }
-        if x >= WIDTH - 52.0 && y < 58.0 { return Some(Hit::Close); }
+        if x >= WIDTH - 54.0 && y < 58.0 { return Some(Hit::Close); }
         if self.detail.is_some() {
-            if x < 86.0 && y < 58.0 { return Some(Hit::Back); }
+            if x < 107.0 && y < 58.0 { return Some(Hit::Back); }
             if x >= WIDTH - 110.0 && y >= HEIGHT - 68.0 { return Some(Hit::DetailRemove); }
-            if y >= HEIGHT - 68.0 && x >= 24.0 && x < WIDTH - 120.0 {
-                return Some(Hit::Invoke(((x - 24.0) / 154.0).floor() as usize));
+            if y >= HEIGHT - 68.0 && x >= 22.0 && x < WIDTH - 120.0 {
+                return Some(Hit::Invoke(((x - 22.0) / 154.0).floor() as usize));
             }
             return None;
         }
-        if x >= WIDTH - 143.0 && y < 58.0 { return Some(Hit::Clear); }
+        if x >= WIDTH - 156.0 && x < WIDTH - 62.0 && y < 58.0 { return Some(Hit::Clear); }
         if y >= ROW_TOP && y < ROW_TOP + ROW_H * ROWS as f64 {
             let row = ((y - ROW_TOP) / ROW_H) as usize;
             if self.rows().get(self.offset + row).is_some() {
@@ -515,19 +515,19 @@ impl Center {
     fn draw_view(&self, cr: &Context, renderer: &Renderer, media: &Icons,
         x: f64, y: f64, detail: Option<u64>, now: Time) {
         let title = if detail.is_some() { "Уведомление" } else { "Уведомления" };
-        let title_x = if detail.is_some() { x + 121.0 } else { x + 24.0 };
-        label(cr, renderer, title, title_x, y + 17.0, WIDTH - (title_x - x) - 62.0, Font::Text, 1.0);
+        let title_x = if detail.is_some() { x + 121.0 } else { x + 22.0 };
+        label(cr, renderer, title, title_x, y + 22.0, WIDTH - (title_x - x) - 62.0, Font::Text, 1.0);
         if detail.is_some() {
-            button(cr, renderer, "Назад", x + 22.0, y + 8.0, 85.0, 42.0, 1.0, self.button_hover[1].value(now));
+            button(cr, renderer, "Назад", x + 22.0, y + 13.0, 85.0, 38.0, 1.0, self.button_hover[1].value(now));
         } else {
             let unread = self.unread();
             let count = if unread > 0 { format!("{unread} новых") } else { format!("{} всего", self.len()) };
-            label(cr, renderer, &count, x + 25.0, y + 47.0, 200.0, Font::Small, 0.55);
+            label(cr, renderer, &count, x + 22.0, y + 47.0, 200.0, Font::Small, 0.55);
             if !self.entries.is_empty() {
-                button(cr, renderer, "Очистить", x + WIDTH - 145.0, y + 9.0, 91.0, 38.0, 1.0, self.button_hover[1].value(now));
+                button(cr, renderer, "Очистить", x + WIDTH - 156.0, y + 13.0, 94.0, 38.0, 1.0, self.button_hover[1].value(now));
             }
         }
-        button(cr, renderer, "×", x + WIDTH - 49.0, y + 10.0, 32.0, 32.0, 1.0, self.button_hover[0].value(now));
+        button(cr, renderer, "×", x + WIDTH - 54.0, y + 16.0, 32.0, 32.0, 1.0, self.button_hover[0].value(now));
         if let Some(serial) = detail {
             self.draw_detail(cr, renderer, media, x, y, 1.0, serial, now);
         } else {
@@ -600,9 +600,9 @@ impl Center {
         if rows.is_empty() { return; }
         if rows.len() > ROWS {
             let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(rows.len()), rows.len());
-            label(cr, renderer, &text, x + 24.0, y + height - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
+            label(cr, renderer, &text, x + 22.0, y + height - 32.0, WIDTH - 44.0, Font::Small, alpha * 0.43);
         } else {
-            label(cr, renderer, "Нажмите, чтобы открыть", x + 24.0, y + height - 32.0, WIDTH - 48.0, Font::Small, alpha * 0.43);
+            label(cr, renderer, "Нажмите, чтобы открыть", x + 22.0, y + height - 32.0, WIDTH - 44.0, Font::Small, alpha * 0.43);
         }
     }
 
@@ -620,10 +620,10 @@ impl Center {
         let opacity = alpha;
         let alpha = 1.0;
         let indent = if child { 17.0 } else { 0.0 };
-        rounded(cr, x + 16.0 + indent, top + 2.0, WIDTH - 32.0 - indent, ROW_H - 5.0, 15.0);
+        rounded(cr, x + 22.0 + indent, top + 2.0, WIDTH - 44.0 - indent, ROW_H - 5.0, 15.0);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.085 * hover) * alpha);
         let _ = cr.fill();
-        rounded(cr, x + 16.5 + indent, top + 2.5, WIDTH - 33.0 - indent, ROW_H - 6.0, 14.5);
+        rounded(cr, x + 22.5 + indent, top + 2.5, WIDTH - 45.0 - indent, ROW_H - 6.0, 14.5);
         cr.set_line_width(1.0);
         cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.08 * hover) * alpha);
         let _ = cr.stroke();
@@ -636,14 +636,14 @@ impl Center {
             let _ = cr.stroke();
         }
         if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
-            x + 43.0 + indent, top + 35.0, 39.0, renderer.scale(), alpha)) {
-            icons::draw(cr, entry.note.kind, x + 43.0 + indent, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+            x + 49.0 + indent, top + 35.0, 39.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, x + 49.0 + indent, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
         }
         if count > 1 {
             let title = format!("{}  ·  {}", entry.note.app, count);
-            label(cr, renderer, &title, x + 70.0, top + 10.0, 270.0, Font::Caption, alpha * 0.94);
+            label(cr, renderer, &title, x + 76.0, top + 10.0, 264.0, Font::Caption, alpha * 0.94);
             let description = format!("Последнее: {}", entry.note.message());
-            label(cr, renderer, &description, x + 70.0, top + 35.0, WIDTH - 170.0, Font::Small, alpha * 0.63);
+            label(cr, renderer, &description, x + 76.0, top + 35.0, WIDTH - 176.0, Font::Small, alpha * 0.63);
             let (start, end) = if self.expanded.contains(&entry.note.app) { (4.0, 0.0) } else { (0.0, 4.0) };
             cr.new_path();
             cr.move_to(x + WIDTH - 107.0, top + 30.0 + start);
@@ -655,8 +655,8 @@ impl Center {
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.5 + 0.4 * hover));
             let _ = cr.stroke();
         } else {
-            label(cr, renderer, &entry.note.app, x + 70.0 + indent, top + 10.0, 250.0 - indent, Font::Caption, alpha * 0.91);
-            label(cr, renderer, &entry.note.message(), x + 70.0 + indent, top + 35.0, WIDTH - 145.0 - indent, Font::Small, alpha * 0.63);
+            label(cr, renderer, &entry.note.app, x + 76.0 + indent, top + 10.0, 244.0 - indent, Font::Caption, alpha * 0.91);
+            label(cr, renderer, &entry.note.message(), x + 76.0 + indent, top + 35.0, WIDTH - 151.0 - indent, Font::Small, alpha * 0.63);
         }
         if unread > 0 {
             cr.new_path();
@@ -703,9 +703,9 @@ impl Center {
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
-            button(cr, renderer, text, x + 24.0 + index as f64 * 154.0, y + HEIGHT - 62.0, 144.0, 42.0, alpha, self.button_hover[2 + index].value(now));
+            button(cr, renderer, text, x + 22.0 + index as f64 * 154.0, y + HEIGHT - 62.0, 144.0, 42.0, alpha, self.button_hover[2 + index].value(now));
         }
-        button(cr, renderer, "Удалить", x + WIDTH - 112.0, y + HEIGHT - 62.0, 88.0, 42.0, alpha, self.button_hover[4].value(now));
+        button(cr, renderer, "Удалить", x + WIDTH - 110.0, y + HEIGHT - 62.0, 88.0, 42.0, alpha, self.button_hover[4].value(now));
     }
 }
 
@@ -742,33 +742,16 @@ fn centered_label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64,
 }
 
 fn button(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64, hover: f64) {
-    rounded(cr, x, y, w, h, h / 2.0);
-    let action = !matches!(text, "×" | "Назад" | "Очистить" | "Удалить");
-    let destructive = text == "Удалить";
-    if action {
-        cr.set_source_rgba(0.13 + 0.07 * hover, 0.39 + 0.09 * hover, 0.72 + 0.08 * hover, alpha);
+    if text == "×" {
+        crate::menu_style::close(cr, x, y, w, hover, alpha);
     } else {
-        cr.set_source_rgba(0.15 + 0.07 * hover, 0.15 + 0.07 * hover, 0.16 + 0.07 * hover, alpha);
+        let kind = match text {
+            "Назад" | "Очистить" => crate::menu_style::ButtonKind::Neutral,
+            "Удалить" => crate::menu_style::ButtonKind::Destructive,
+            _ => crate::menu_style::ButtonKind::Primary,
+        };
+        crate::menu_style::button(cr, renderer, text, (x, y, w, h), Font::Caption, kind, hover, alpha);
     }
-    let _ = cr.fill();
-    rounded(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, (h - 1.0) / 2.0);
-    cr.set_line_width(1.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, (0.07 + 0.11 * hover) * alpha);
-    let _ = cr.stroke();
-    let font = if text == "×" { Font::Text } else { Font::Caption };
-    let layout = renderer.layout_ellipsized(cr, text, font, w - 16.0, 1);
-    let (_, ink) = layout.pixel_extents();
-    if destructive {
-        cr.set_source_rgba(1.0, 0.46 + 0.16 * hover, 0.44 + 0.16 * hover, alpha * (0.82 + 0.18 * hover));
-    } else {
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.76 + 0.24 * hover));
-    }
-    cr.move_to(
-        renderer.snap(x + (w - ink.width() as f64) / 2.0 - ink.x() as f64),
-        renderer.snap(y + (h - ink.height() as f64) / 2.0 - ink.y() as f64),
-    );
-    pangocairo::functions::show_layout(cr, &layout);
-    cr.new_path();
 }
 
 #[cfg(test)]

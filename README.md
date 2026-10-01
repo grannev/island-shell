@@ -6,6 +6,8 @@ client rendering everything itself at the display's refresh rate.
 
 Replaced the waybar-based island (island-*.sh, 500 lines of CSS frames)
 and the walker launcher; see `CLAUDE.md` for the brief and the plan.
+The shared visual roles for menus and sheets are documented in
+[`docs/interface-style.md`](docs/interface-style.md).
 
 ## Status
 

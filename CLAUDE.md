@@ -1,6 +1,9 @@
 # island-shell — project brief
 
 Reply to the user in Russian. Code, comments and commit messages in English.
+For menu and sheet controls, follow the role-based, permissive visual guide
+in `docs/interface-style.md`; homogeneous controls share a style, while new
+control types remain allowed when their interaction calls for one.
 
 ## Goal
 A single lightweight program (Rust preferred: wayland-client +

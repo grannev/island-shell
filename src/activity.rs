@@ -389,35 +389,18 @@ pub fn draw_timer_menu(
         let enabled = !matches!(command, "toggle" | "cancel") || timer.is_some();
         let opacity = alpha * (0.3 + 0.7 * enabled_alpha[index]);
         let lit = if enabled { hover[index].clamp(0.0, 1.0) } else { 0.0 };
-        let accent = command == "25m" || command == "toggle" && timer.is_some_and(|(_, running)| !running);
-        round_rect(cr, x + bx, y + by + dy, bw, 32.0, 10.0);
-        if accent {
-            cr.set_source_rgba(0.36 + 0.11 * lit, 0.25 + 0.08 * lit, 0.12 + 0.03 * lit, opacity * k);
-        } else {
-            cr.set_source_rgba(0.14 + 0.07 * lit, 0.14 + 0.07 * lit, 0.16 + 0.07 * lit, opacity * k);
+        if command == "close" {
+            crate::menu_style::close(cr, x + bx, y + by + dy, bw, lit, opacity * k);
+            continue;
         }
-        let _ = cr.fill();
-        round_rect(cr, x + bx + 0.5, y + by + dy + 0.5, bw - 1.0, 31.0, 9.5);
-        cr.set_line_width(1.0);
-        if accent {
-            cr.set_source_rgba(1.0, 0.68, 0.32, (0.17 + 0.14 * lit) * opacity * k);
-        } else {
-            cr.set_source_rgba(1.0, 1.0, 1.0, (0.06 + 0.10 * lit) * opacity * k);
-        }
-        let _ = cr.stroke();
         let label = if command == "toggle" && timer.is_some_and(|(_, running)| !running) {
             "Продолжить"
         } else {
             label
         };
-        let layout = renderer.layout(cr, label, Font::Small);
-        let (_, e) = layout.pixel_extents();
-        cr.set_source_rgba(1.0, 1.0, 1.0, opacity * k);
-        cr.move_to(
-            renderer.snap(x + bx + (bw - e.width() as f64) / 2.0 - e.x() as f64),
-            renderer.snap(y + by + dy + (32.0 - e.height() as f64) / 2.0 - e.y() as f64),
-        );
-        pangocairo::functions::show_layout(cr, &layout);
+        let accent = command == "25m" || command == "toggle" && timer.is_some_and(|(_, running)| !running);
+        let kind = if accent { crate::menu_style::ButtonKind::Warm } else { crate::menu_style::ButtonKind::Neutral };
+        crate::menu_style::button(cr, renderer, label, (x + bx, y + by + dy, bw, 32.0), Font::Small, kind, lit, opacity * k);
     }
     timer_label(
         cr,

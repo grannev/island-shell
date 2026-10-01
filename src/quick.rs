@@ -2,6 +2,7 @@
 use cairo::Context;
 
 use crate::island::{Font, Renderer};
+use crate::menu_style;
 
 pub const WIDTH: f64 = 440.0;
 pub const HEIGHT: f64 = 324.0;
@@ -117,17 +118,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.97 * alpha);
     cr.move_to(renderer.snap(x + 22.0), renderer.snap(y + 18.0));
     pangocairo::functions::show_layout(cr, &title);
-    rounded(cr, x + WIDTH - 48.0, y + 14.0, 30.0, 30.0, 15.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, (0.10 + close_hover * 0.12) * alpha);
-    let _ = cr.fill();
-    cr.set_source_rgba(1.0, 1.0, 1.0, (0.58 + close_hover * 0.42) * alpha);
-    cr.set_line_width(1.8);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.move_to(x + WIDTH - 39.0, y + 23.0);
-    cr.line_to(x + WIDTH - 27.0, y + 35.0);
-    cr.move_to(x + WIDTH - 27.0, y + 23.0);
-    cr.line_to(x + WIDTH - 39.0, y + 35.0);
-    let _ = cr.stroke();
+    menu_style::close(cr, x + WIDTH - 48.0, y + 14.0, 30.0, close_hover, alpha);
 
     for (i, action) in ACTIONS.iter().enumerate() {
         let (tx, ty) = tile(i);

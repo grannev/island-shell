@@ -300,17 +300,17 @@ impl Panel {
     }
 
     fn hit(&self, x: f64, y: f64, now: Time) -> Option<Hit> {
-        if contains(x, y, 432.0, 20.0, 30.0, 30.0) {
+        if contains(x, y, 426.0, 24.0, 32.0, 32.0) {
             return Some(Hit::Close);
         }
         if self.prompt.is_some() {
-            if contains(x, y, 24.0, 306.0, 206.0, 38.0) {
+            if contains(x, y, 40.0, 306.0, 194.0, 38.0) {
                 return Some(Hit::Cancel);
             }
-            if contains(x, y, 244.0, 306.0, 212.0, 38.0) && self.can_submit() {
+            if contains(x, y, 246.0, 306.0, 194.0, 38.0) && self.can_submit() {
                 return Some(Hit::Submit);
             }
-            if matches!(self.prompt, Some(Prompt::Wifi(_))) && contains(x, y, 394.0, 225.0, 50.0, 42.0) {
+            if matches!(self.prompt, Some(Prompt::Wifi(_))) && contains(x, y, 375.0, 225.0, 62.0, 42.0) {
                 return Some(Hit::Reveal);
             }
             return None;
@@ -324,7 +324,7 @@ impl Panel {
         if contains(x, y, 22.0, 86.0, 436.0, 34.0) {
             return Some(Hit::Tab(if x < WIDTH / 2.0 { 0 } else { 1 }));
         }
-        if contains(x, y, 24.0, self.frame_height - 54.0, 432.0, 34.0)
+        if contains(x, y, 22.0, self.frame_height - 54.0, 436.0, 34.0)
             && (self.snapshot.powered || self.error.is_some())
         {
             return Some(Hit::Search);
@@ -536,15 +536,15 @@ impl Panel {
         // A group guarantees one coherent fade for text, icons and controls.
         let grouped = alpha < 0.999;
         if grouped { cr.push_group(); }
-        rounded(cr, 24.0, 22.0, 36.0, 36.0, 12.0);
+        rounded(cr, 22.0, 22.0, 36.0, 36.0, 12.0);
         cr.set_source_rgb(0.10, 0.52, 0.97);
         let _ = cr.fill();
-        symbol(cr, self.kind, 42.0, 40.0, 1.0, 1.0);
+        symbol(cr, self.kind, 40.0, 40.0, 1.0, 1.0);
         label(
             cr,
             renderer,
             if self.kind == Kind::Wifi { "Wi-Fi" } else { "Bluetooth" },
-            73.0,
+            72.0,
             19.0,
             Font::Text,
             278.0,
@@ -557,7 +557,7 @@ impl Panel {
         } else {
             "Выключен"
         };
-        label(cr, renderer, subtitle, 73.0, 43.0, Font::Tiny, 275.0, 0.5);
+        label(cr, renderer, subtitle, 72.0, 43.0, Font::Tiny, 275.0, 0.5);
         let power = self.power.value(now).clamp(0.0, 1.0);
         rounded(cr, 369.0, 28.0, 42.0, 24.0, 12.0);
         cr.set_source_rgb(0.20 * (1.0 - power) + 0.10 * power, 0.20 + 0.28 * power, 0.22 + 0.74 * power);
@@ -566,7 +566,7 @@ impl Panel {
         cr.arc(381.0 + 18.0 * power, 40.0, 9.0 + self.lit(Hit::Power, now) * 0.5, 0.0, std::f64::consts::TAU);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.92);
         let _ = cr.fill();
-        button(cr, renderer, "×", 432.0, 20.0, 30.0, 30.0, self.lit(Hit::Close, now), false, true);
+        button(cr, renderer, "×", 426.0, 24.0, 32.0, 32.0, self.lit(Hit::Close, now), false, true);
 
         if self.prompt.is_some() {
             self.draw_prompt(cr, renderer, now);
@@ -674,7 +674,7 @@ impl Panel {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.42);
             }
             let l = renderer.layout_ellipsized(cr, hint, Font::Tiny, 430.0, 2);
-            cr.move_to(renderer.snap(25.0), renderer.snap(height - 85.0));
+            cr.move_to(renderer.snap(22.0), renderer.snap(height - 85.0));
             pangocairo::functions::show_layout(cr, &l);
             let search = if self.scanning {
                 "Остановить поиск"
@@ -689,16 +689,16 @@ impl Panel {
                 cr,
                 renderer,
                 search,
-                24.0,
+                22.0,
                 height - 54.0,
-                432.0,
+                436.0,
                 34.0,
                 self.lit(Hit::Search, now),
                 false,
                 (self.snapshot.powered || self.error.is_some()) && (!self.busy || self.scanning),
             );
             if self.busy {
-                spinner(cr, 43.0, height - 37.0, now);
+                spinner(cr, 41.0, height - 37.0, now);
             }
         }
         if grouped {
@@ -792,13 +792,13 @@ impl Panel {
             Prompt::Wifi(d) => (d.name.as_str(), "Введите пароль сети Wi-Fi", "", true),
             Prompt::Pair(p) => ("Сопряжение", p.text.as_str(), p.code.as_str(), p.input != Input::None),
         };
-        label(cr, renderer, title, 24.0, 115.0, Font::Text, 430.0, 1.0);
-        label(cr, renderer, description, 24.0, 152.0, Font::Small, 430.0, 0.55);
+        label(cr, renderer, title, 40.0, 115.0, Font::Text, 400.0, 1.0);
+        label(cr, renderer, description, 40.0, 152.0, Font::Small, 400.0, 0.55);
         if field {
-            rounded(cr, 24.0, 225.0, 432.0, 42.0, 11.0);
+            rounded(cr, 40.0, 225.0, 400.0, 42.0, 11.0);
             cr.set_source_rgb(0.085, 0.085, 0.10);
             let _ = cr.fill();
-            rounded(cr, 24.5, 225.5, 431.0, 41.0, 10.5);
+            rounded(cr, 40.5, 225.5, 399.0, 41.0, 10.5);
             cr.set_source_rgba(0.24, 0.60, 1.0, 0.8);
             cr.set_line_width(1.0);
             let _ = cr.stroke();
@@ -811,15 +811,15 @@ impl Panel {
             l.set_text(&text);
             let width = l.pixel_extents().1.width() as f64;
             cr.save().unwrap();
-            cr.rectangle(37.0, 232.0, 349.0, 26.0);
+            cr.rectangle(53.0, 232.0, 333.0, 26.0);
             cr.clip();
             cr.set_source_rgb(1.0, 1.0, 1.0);
-            cr.move_to(renderer.snap(38.0 - (width - 335.0).max(0.0)), renderer.snap(237.0));
+            cr.move_to(renderer.snap(54.0 - (width - 319.0).max(0.0)), renderer.snap(237.0));
             pangocairo::functions::show_layout(cr, &l);
             let blink =
                 if now - self.input_since < 0.7 { 1.0 } else { 0.5 + 0.5 * ((now - self.input_since) * 5.0).cos() };
             cr.new_path();
-            cr.rectangle(39.0 + width.min(335.0), 237.0, 1.2, 17.0);
+            cr.rectangle(55.0 + width.min(319.0), 237.0, 1.2, 17.0);
             cr.set_source_rgba(0.4, 0.7, 1.0, blink);
             let _ = cr.fill();
             cr.restore().unwrap();
@@ -828,7 +828,7 @@ impl Panel {
                     cr,
                     renderer,
                     if self.reveal { "Скрыть" } else { "Показать" },
-                    391.0,
+                    375.0,
                     225.0,
                     62.0,
                     42.0,
@@ -837,22 +837,22 @@ impl Panel {
                 );
             }
         } else if !code.is_empty() {
-            centered(cr, renderer, code, 24.0, 215.0, 432.0, 52.0, Font::Query, 1.0);
+            centered(cr, renderer, code, 40.0, 215.0, 400.0, 52.0, Font::Query, 1.0);
         }
-        button(cr, renderer, "Отмена", 24.0, 306.0, 206.0, 38.0, self.lit(Hit::Cancel, now), false, true);
+        button(cr, renderer, "Отмена", 40.0, 306.0, 194.0, 38.0, self.lit(Hit::Cancel, now), false, true);
         button(
             cr,
             renderer,
             if matches!(prompt, Prompt::Wifi(_)) { "Подключиться" } else { "Подтвердить" },
-            244.0,
+            246.0,
             306.0,
-            212.0,
+            194.0,
             38.0,
             self.lit(Hit::Submit, now),
             true,
             self.can_submit(),
         );
-        label(cr, renderer, "Enter — подтвердить · Escape — закрыть", 24.0, 371.0, Font::Tiny, 430.0, 0.36);
+        label(cr, renderer, "Enter — подтвердить · Escape — закрыть", 22.0, 371.0, Font::Tiny, 436.0, 0.36);
         if k < 0.999 {
             cr.pop_group_to_source().unwrap();
             let _ = cr.paint_with_alpha(k);
@@ -903,18 +903,12 @@ fn button(
     enabled: bool,
 ) {
     let a = if enabled { 1.0 } else { 0.32 };
-    rounded(cr, x, y, w, h, 10.0);
-    if accent {
-        cr.set_source_rgba(0.12 + hover * 0.07, 0.47 + hover * 0.08, 0.91 + hover * 0.04, a);
+    if text == "×" {
+        crate::menu_style::close(cr, x, y, w, hover, a);
     } else {
-        cr.set_source_rgba(0.15 + hover * 0.07, 0.15 + hover * 0.07, 0.16 + hover * 0.07, a);
+        let kind = if accent { crate::menu_style::ButtonKind::Primary } else { crate::menu_style::ButtonKind::Neutral };
+        crate::menu_style::button(cr, renderer, text, (x, y, w, h), Font::Small, kind, hover, a);
     }
-    let _ = cr.fill();
-    rounded(cr, x + 0.5, y + 0.5, w - 1.0, h - 1.0, 9.5);
-    cr.set_line_width(1.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, (0.07 + 0.11 * hover) * a);
-    let _ = cr.stroke();
-    centered(cr, renderer, text, x, y, w, h, Font::Small, a);
 }
 fn spinner(cr: &Context, x: f64, y: f64, now: Time) {
     cr.save().unwrap();

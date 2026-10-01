@@ -438,17 +438,7 @@ impl Launcher {
         };
         let (fa, fo) = intro(0.0);
         let close = self.close_hover.value(now).clamp(0.0, 1.0);
-        rounded(cr, x + w - 49.0, y + 10.0, 34.0, 34.0, 17.0);
-        cr.set_source_rgba(0.16 + 0.08 * close, 0.16 + 0.08 * close, 0.17 + 0.08 * close, alpha);
-        let _ = cr.fill();
-        cr.set_line_width(1.8);
-        cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.62 + 0.36 * close) * alpha);
-        cr.move_to(x + w - 39.0, y + 20.0);
-        cr.line_to(x + w - 25.0, y + 34.0);
-        cr.move_to(x + w - 25.0, y + 20.0);
-        cr.line_to(x + w - 39.0, y + 34.0);
-        let _ = cr.stroke();
+        crate::menu_style::close(cr, x + w - 49.0, y + 10.0, 34.0, close, alpha);
         rounded(cr, fx, fy + fo, fw, FIELD_H, FIELD_H / 2.0);
         cr.set_source_rgba(0.15, 0.15, 0.17, fa);
         let _ = cr.fill();
