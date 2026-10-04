@@ -3,8 +3,7 @@
 //! session buttons — reached from the compact island.
 use cairo::Context;
 
-use crate::activity::SliderKind;
-use crate::control::{Sink, SinkKind};
+use crate::control::{App, Sink, SinkKind};
 use crate::island::{Font, Renderer};
 use crate::menu_style::{self, RAIL};
 
@@ -26,8 +25,17 @@ const SLIDER_X: f64 = RAIL + 12.0;
 const SLIDER_W: f64 = INNER - 24.0;
 const SLIDER_DY: f64 = 32.0;
 const SLIDER_H: f64 = 22.0;
-/// the output picker's rows
-const SINK_H: f64 = 48.0;
+/// the sound page: section captions, rows and their compact sliders
+const CAPTION_H: f64 = 24.0;
+const SECTION_GAP: f64 = 14.0;
+const SINK_H: f64 = 44.0;
+const APP_H: f64 = 54.0;
+const MIC_H: f64 = 56.0;
+const MAX_APPS: usize = 4;
+const ROW_SLIDER_X: f64 = RAIL + 52.0;
+const ROW_SLIDER_W: f64 = INNER - 52.0 - 14.0;
+const ROW_SLIDER_DY: f64 = 32.0;
+const ROW_SLIDER_H: f64 = 14.0;
 
 /// What the tiles' second lines report.
 #[derive(Clone, Copy, Default)]
@@ -48,6 +56,10 @@ pub struct Controls {
     pub sinks: Vec<Sink>,
     pub default_sink: String,
     pub layout: Option<String>,
+    pub apps: Vec<App>,
+    pub mic: Option<f64>,
+    pub mic_muted: bool,
+    pub mic_label: Option<String>,
 }
 
 impl Controls {
@@ -61,16 +73,49 @@ impl Controls {
 pub enum View {
     #[default]
     Main,
-    Outputs,
+    /// outputs, applications and the microphone
+    Sound,
+}
+
+/// The sliders the menu can hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Slider {
+    Brightness,
+    Volume,
+    /// an application on the sound page (index into `Controls::apps`)
+    App(usize),
+    Mic,
+}
+
+/// Where the sound page's parts sit (y of each, relative to the menu).
+struct SoundPage {
+    sinks: f64,
+    apps: f64,
+    app_rows: usize,
+    mic: f64,
+    height: f64,
+}
+
+fn sound_page(controls: &Controls) -> SoundPage {
+    let top = menu_style::CONTENT_TOP;
+    let sinks = top + CAPTION_H;
+    let apps_caption = sinks + controls.sinks.len().max(1) as f64 * SINK_H + SECTION_GAP;
+    let apps = apps_caption + CAPTION_H;
+    let app_rows = controls.apps.len().min(MAX_APPS);
+    let apps_h = if app_rows == 0 { SINK_H } else { app_rows as f64 * APP_H };
+    let mic = apps + apps_h + SECTION_GAP + CAPTION_H;
+    SoundPage { sinks, apps, app_rows, mic, height: mic + MIC_H + RAIL }
 }
 
 /// Everything a frame of the menu needs besides geometry.
 pub struct Frame<'a> {
     pub status: Status,
     pub controls: &'a Controls,
-    /// eased slider positions
-    pub volume: f64,
-    pub brightness: f64,
+    /// eased slider positions, and how far each has swollen in the hand
+    pub level: &'a dyn Fn(Slider) -> f64,
+    pub grow: &'a dyn Fn(Slider) -> f64,
+    /// an icon-theme icon at a size in device pixels (loaded off-thread)
+    pub icon: &'a dyn Fn(&str, i32) -> Option<cairo::ImageSurface>,
     /// how lit each control is (hover / keyboard selection)
     pub hover: &'a dyn Fn(Action) -> f64,
     /// the logout button is waiting for its confirming second press
@@ -82,8 +127,6 @@ pub struct Frame<'a> {
     /// since its symbol last bounced
     pub pressed: &'a dyn Fn(Action) -> f64,
     pub bounced: &'a dyn Fn(Action) -> f64,
-    /// how far each slider has swollen in the hand (brightness, volume)
-    pub grow: (f64, f64),
 }
 
 impl Frame<'_> {
@@ -109,6 +152,7 @@ pub enum Action {
     Notifications,
     Dnd,
     Outputs,
+    MicMute,
     Layout,
     Lock,
     Sleep,
@@ -123,7 +167,7 @@ pub enum Action {
 pub enum Hit {
     Action(Action),
     /// a slider, and where along it (0..1)
-    Slider(SliderKind, f64),
+    Slider(Slider, f64),
 }
 
 /// Keyboard order of the main page.
@@ -137,7 +181,7 @@ const SMALL: [Action; 4] = [Action::Layout, Action::Lock, Action::Sleep, Action:
 pub fn height(view: View, controls: &Controls) -> f64 {
     match view {
         View::Main => HEIGHT,
-        View::Outputs => menu_style::CONTENT_TOP + controls.sinks.len().max(1) as f64 * SINK_H + RAIL,
+        View::Sound => sound_page(controls).height,
     }
 }
 
@@ -158,9 +202,14 @@ fn inside(x: f64, y: f64, rect: (f64, f64, f64, f64)) -> bool {
     x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
 }
 
-/// Where along a slider `x` falls (0..1); also used while dragging.
-pub fn slider_fraction(x: f64) -> f64 {
-    ((x - SLIDER_X) / SLIDER_W).clamp(0.0, 1.0)
+/// Where along `slider` the menu-relative `x` falls (0..1); also used
+/// while dragging.
+pub fn slider_fraction(slider: Slider, x: f64) -> f64 {
+    let (sx, sw) = match slider {
+        Slider::Brightness | Slider::Volume => (SLIDER_X, SLIDER_W),
+        Slider::App(_) | Slider::Mic => (ROW_SLIDER_X, ROW_SLIDER_W),
+    };
+    ((x - sx) / sw).clamp(0.0, 1.0)
 }
 
 pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
@@ -168,13 +217,32 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
     if inside(x, y, (cx - 6.0, cy - 6.0, size + 12.0, size + 12.0)) {
         return Some(Hit::Action(Action::Close));
     }
-    if view == View::Outputs {
+    if view == View::Sound {
         if inside(x, y, (RAIL - 6.0, cy - 6.0, 110.0, size + 12.0)) {
             return Some(Hit::Action(Action::Back));
         }
-        let row = ((y - menu_style::CONTENT_TOP) / SINK_H).floor();
-        let within = (RAIL..RAIL + INNER).contains(&x) && row >= 0.0 && (row as usize) < controls.sinks.len();
-        return within.then(|| Hit::Action(Action::Sink(row as usize)));
+        if !(RAIL..RAIL + INNER).contains(&x) {
+            return None;
+        }
+        let page = sound_page(controls);
+        let row = ((y - page.sinks) / SINK_H).floor();
+        if row >= 0.0 && (row as usize) < controls.sinks.len() {
+            return Some(Hit::Action(Action::Sink(row as usize)));
+        }
+        let row = ((y - page.apps) / APP_H).floor();
+        // a row's slider takes the press anywhere right of its icon
+        if row >= 0.0 && (row as usize) < page.app_rows && x >= ROW_SLIDER_X - 8.0 {
+            let app = Slider::App(row as usize);
+            return Some(Hit::Slider(app, slider_fraction(app, x)));
+        }
+        if controls.mic.is_some() && (page.mic..page.mic + MIC_H).contains(&y) {
+            return Some(if x < ROW_SLIDER_X - 8.0 {
+                Hit::Action(Action::MicMute)
+            } else {
+                Hit::Slider(Slider::Mic, slider_fraction(Slider::Mic, x))
+            });
+        }
+        return None;
     }
     for (i, action) in TILES.iter().enumerate() {
         let (tx, ty) = tile(i);
@@ -185,13 +253,13 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
     if !controls.sinks.is_empty() && inside(x, y, outputs_button()) {
         return Some(Hit::Action(Action::Outputs));
     }
-    for (kind, top, present) in [
-        (SliderKind::Brightness, DISPLAY_Y, controls.brightness.is_some()),
-        (SliderKind::Volume, SOUND_Y, controls.volume.is_some()),
+    for (slider, top, present) in [
+        (Slider::Brightness, DISPLAY_Y, controls.brightness.is_some()),
+        (Slider::Volume, SOUND_Y, controls.volume.is_some()),
     ] {
         // the whole lower part of the module grabs the slider
         if present && inside(x, y, (RAIL, top + SLIDER_DY - 8.0, INNER, SLIDER_H + 16.0)) {
-            return Some(Hit::Slider(kind, slider_fraction(x)));
+            return Some(Hit::Slider(slider, slider_fraction(slider, x)));
         }
     }
     for (i, action) in SMALL.iter().enumerate() {
@@ -449,7 +517,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, view:
             menu_style::header(cr, renderer, x, y, WIDTH, None, "Пункт управления", None, 60.0, alpha);
             draw_main(cr, renderer, x, y, alpha, frame);
         }
-        View::Outputs => draw_outputs(cr, renderer, x, y, alpha, frame),
+        View::Sound => draw_sound(cr, renderer, x, y, alpha, frame),
     }
     menu_style::close(cr, x + cx, y + cy, size, close_hover, alpha);
 }
@@ -511,8 +579,8 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
     let (alpha, rise) = frame.arrival(3, base_alpha);
     module(cr, renderer, "Дисплей", x, y + DISPLAY_Y + rise, alpha);
     let present = controls.brightness.is_some();
-    slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, frame.brightness, "sun", 1.0,
-        alpha * if present { 1.0 } else { 0.35 }, frame.grow.0);
+    slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, (frame.level)(Slider::Brightness),
+        "sun", 1.0, alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Brightness));
 
     // Sound, with the output it plays through
     let (alpha, rise) = frame.arrival(4, base_alpha);
@@ -534,8 +602,8 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
     let present = controls.volume.is_some();
     let symbol = if controls.muted { "speaker-muted" } else { "speaker" };
     slider(cr, x + SLIDER_X, y + SOUND_Y + SLIDER_DY, SLIDER_W, SLIDER_H,
-        if controls.muted { 0.0 } else { frame.volume }, symbol, frame.volume, alpha * if present { 1.0 } else { 0.35 },
-        frame.grow.1);
+        if controls.muted { 0.0 } else { (frame.level)(Slider::Volume) }, symbol, (frame.level)(Slider::Volume),
+        alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Volume));
     let y = y - rise;
 
     // the keyboard layout and the session
@@ -587,46 +655,169 @@ fn two_lines(cr: &Context, renderer: &Renderer, title: &str, subtitle: &str, x: 
         menu_style::SECONDARY * alpha);
 }
 
-fn draw_outputs(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame) {
+/// A thin slider for a list row (no symbol inside); grows when held.
+fn row_slider(cr: &Context, x: f64, y: f64, w: f64, value: f64, alpha: f64, grow: f64, colour: (f64, f64, f64)) {
+    let swell = 4.0 * grow.clamp(0.0, 1.2);
+    let (x, y, w, h) = (x - swell * 0.5, y - swell * 0.5, w + swell, ROW_SLIDER_H + swell);
+    menu_style::rounded(cr, x, y, w, h, h / 2.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha);
+    let _ = cr.fill();
+    if value <= 0.001 {
+        return;
+    }
+    let fill = h + (w - h) * value.clamp(0.0, 1.0);
+    menu_style::rounded(cr, x, y, fill, h, h / 2.0);
+    cr.set_source_rgba(colour.0, colour.1, colour.2, 0.94 * alpha);
+    let _ = cr.fill();
+}
+
+fn caption(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, alpha: f64) {
+    menu_style::label(cr, renderer, text, x + RAIL + 4.0, y + 4.0, INNER, Font::Footnote, menu_style::SECONDARY * alpha);
+}
+
+fn checkmark(cr: &Context, cx: f64, cy: f64, alpha: f64) {
+    cr.new_path();
+    cr.move_to(cx - 5.5, cy + 0.5);
+    cr.line_to(cx - 1.5, cy + 4.5);
+    cr.line_to(cx + 6.0, cy - 4.5);
+    cr.set_line_width(2.2);
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_line_join(cairo::LineJoin::Round);
+    cr.set_source_rgba(menu_style::BLUE.0, menu_style::BLUE.1, menu_style::BLUE.2, alpha);
+    let _ = cr.stroke();
+}
+
+/// The microphone: a capsule and stand; struck through when muted.
+fn mic(cr: &Context, cx: f64, cy: f64, muted: bool, alpha: f64) {
+    cr.save().unwrap();
+    stroke_style(cr, 1.8, alpha);
+    menu_style::rounded(cr, cx - 3.2, cy - 8.5, 6.4, 11.0, 3.2);
+    let _ = cr.fill();
+    cr.new_path();
+    cr.arc(cx, cy - 1.0, 6.0, 0.0, std::f64::consts::PI);
+    cr.move_to(cx, cy + 5.0);
+    cr.line_to(cx, cy + 8.0);
+    let _ = cr.stroke();
+    if muted {
+        cr.set_line_width(2.0);
+        cr.move_to(cx - 8.0, cy - 8.5);
+        cr.line_to(cx + 8.0, cy + 8.5);
+        let _ = cr.stroke();
+    }
+    cr.restore().unwrap();
+    cr.new_path();
+}
+
+fn draw_sound(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame) {
+    let controls = frame.controls;
     let back = (frame.hover)(Action::Back);
     menu_style::chevron(cr, x + RAIL + 5.0, y + menu_style::HEADER_MID, 7.0, std::f64::consts::PI, alpha * (0.8 + 0.2 * back));
     menu_style::text(cr, renderer, "Назад", x + RAIL + 16.0,
         y + menu_style::HEADER_MID - menu_style::line_height(cr, renderer, Font::Body) / 2.0, 80.0, Font::Body,
         menu_style::BLUE, alpha * (0.85 + 0.15 * back));
-    menu_style::centred(cr, renderer, "Вывод звука", (x + 110.0, y + menu_style::HEADER_MID - 12.0, WIDTH - 220.0, 24.0),
+    menu_style::centred(cr, renderer, "Звук", (x + 110.0, y + menu_style::HEADER_MID - 12.0, WIDTH - 220.0, 24.0),
         Font::Title, (1.0, 1.0, 1.0), alpha);
-    let sinks = &frame.controls.sinks;
-    let top = y + menu_style::CONTENT_TOP;
+    let page = sound_page(controls);
+    let body_h = menu_style::line_height(cr, renderer, Font::Body);
+    let label_h = menu_style::line_height(cr, renderer, Font::Label);
+
+    // where the sound goes
+    caption(cr, renderer, "Вывод", x, y + page.sinks - CAPTION_H, alpha);
+    let sinks = &controls.sinks;
+    let top = y + page.sinks;
     menu_style::group(cr, x + RAIL, top, INNER, sinks.len().max(1) as f64 * SINK_H, 0.0, alpha);
     if sinks.is_empty() {
         menu_style::centred(cr, renderer, "Нет устройств вывода", (x + RAIL, top, INNER, SINK_H), Font::Body,
             (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
     }
-    let body_h = menu_style::line_height(cr, renderer, Font::Body);
     for (i, sink) in sinks.iter().enumerate() {
         let ry = top + i as f64 * SINK_H;
         if i > 0 {
             menu_style::separator(cr, renderer, x + RAIL + 52.0, x + RAIL + INNER, ry, alpha);
         }
         menu_style::highlight(cr, x + RAIL, ry, INNER, SINK_H, (frame.hover)(Action::Sink(i)), alpha);
-        let current = sink.name == frame.controls.default_sink;
+        let current = sink.name == controls.default_sink;
         let (wx, wy) = (x + RAIL + 12.0 + 14.0, ry + SINK_H / 2.0);
-        menu_style::well(cr, wx, wy, 14.0, current.then_some(menu_style::BLUE), alpha);
-        glyph(cr, sink_glyph(sink.kind), wx, wy, 1.0, (1.0, 1.0, 1.0, alpha));
+        let press = menu_style::press_scale((frame.pressed)(Action::Sink(i)));
+        menu_style::transformed(cr, wx, wy, press * menu_style::bounce_scale((frame.bounced)(Action::Sink(i))), 0.0, || {
+            menu_style::well(cr, wx, wy, 14.0, current.then_some(menu_style::BLUE), alpha);
+            glyph(cr, sink_glyph(sink.kind), wx, wy, 1.0, (1.0, 1.0, 1.0, alpha));
+        });
         menu_style::label(cr, renderer, &sink.label, x + RAIL + 52.0, ry + (SINK_H - body_h) / 2.0, INNER - 52.0 - 44.0,
             Font::Body, alpha);
         if current {
-            let (cx, cy) = (x + RAIL + INNER - 22.0, ry + SINK_H / 2.0);
-            cr.new_path();
-            cr.move_to(cx - 5.5, cy + 0.5);
-            cr.line_to(cx - 1.5, cy + 4.5);
-            cr.line_to(cx + 6.0, cy - 4.5);
-            cr.set_line_width(2.2);
-            cr.set_line_cap(cairo::LineCap::Round);
-            cr.set_line_join(cairo::LineJoin::Round);
-            cr.set_source_rgba(menu_style::BLUE.0, menu_style::BLUE.1, menu_style::BLUE.2, alpha);
-            let _ = cr.stroke();
+            checkmark(cr, x + RAIL + INNER - 22.0, ry + SINK_H / 2.0, alpha);
         }
+    }
+
+    // the applications playing, each with its own level
+    caption(cr, renderer, "Приложения", x, y + page.apps - CAPTION_H, alpha);
+    let top = y + page.apps;
+    if page.app_rows == 0 {
+        menu_style::group(cr, x + RAIL, top, INNER, SINK_H, 0.0, alpha);
+        menu_style::centred(cr, renderer, "Ничего не воспроизводится", (x + RAIL, top, INNER, SINK_H), Font::Body,
+            (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
+    } else {
+        menu_style::group(cr, x + RAIL, top, INNER, page.app_rows as f64 * APP_H, 0.0, alpha);
+    }
+    for (i, app) in controls.apps.iter().take(page.app_rows).enumerate() {
+        let ry = top + i as f64 * APP_H;
+        if i > 0 {
+            menu_style::separator(cr, renderer, x + ROW_SLIDER_X, x + RAIL + INNER, ry, alpha);
+        }
+        let (ix, iy, size) = (x + RAIL + 12.0, ry + (APP_H - 28.0) / 2.0, 28.0);
+        let px = (size * renderer.scale()).round() as i32;
+        match (frame.icon)(&app.icon, px) {
+            Some(surface) => {
+                cr.save().unwrap();
+                cr.translate(ix, iy);
+                cr.scale(size / surface.width() as f64, size / surface.height() as f64);
+                let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+                let _ = cr.paint_with_alpha(alpha);
+                cr.restore().unwrap();
+            }
+            None => {
+                menu_style::well(cr, ix + size / 2.0, iy + size / 2.0, size / 2.0, None, alpha);
+                glyph(cr, "speaker", ix + size / 2.0, iy + size / 2.0, 1.0, (1.0, 1.0, 1.0, alpha));
+            }
+        }
+        let level = (frame.level)(Slider::App(i));
+        let percent = format!("{}%", (level * 100.0).round());
+        menu_style::label(cr, renderer, &app.name, x + ROW_SLIDER_X, ry + 8.0, ROW_SLIDER_W - 50.0, Font::Label, alpha);
+        crate::motion::text(cr, renderer, &format!("quick{:.4}:app{i}", frame.opened), &percent,
+            x + ROW_SLIDER_X, ry + 8.0 + (label_h - menu_style::line_height(cr, renderer, Font::Footnote)) / 2.0,
+            ROW_SLIDER_W, 1.0, Font::Footnote, (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
+        row_slider(cr, x + ROW_SLIDER_X, ry + ROW_SLIDER_DY, ROW_SLIDER_W, if app.muted { 0.0 } else { level },
+            alpha * if app.muted { 0.5 } else { 1.0 }, (frame.grow)(Slider::App(i)), (1.0, 1.0, 1.0));
+    }
+
+    // the microphone
+    caption(cr, renderer, "Микрофон", x, y + page.mic - CAPTION_H, alpha);
+    let top = y + page.mic;
+    menu_style::group(cr, x + RAIL, top, INNER, MIC_H, 0.0, alpha);
+    let present = controls.mic.is_some();
+    let muted = controls.mic_muted;
+    let (wx, wy) = (x + RAIL + 12.0 + 16.0, top + MIC_H / 2.0);
+    let lit = (frame.hover)(Action::MicMute);
+    let press = menu_style::press_scale((frame.pressed)(Action::MicMute));
+    menu_style::transformed(cr, wx, wy, press * menu_style::bounce_scale((frame.bounced)(Action::MicMute)), 0.0, || {
+        menu_style::well(cr, wx, wy, 16.0, muted.then_some(menu_style::RED), alpha * if present { 1.0 } else { 0.4 });
+        if !muted && lit > 0.0 {
+            menu_style::well(cr, wx, wy, 16.0, Some((0.3, 0.3, 0.32)), alpha * lit * 0.5);
+        }
+        mic(cr, wx, wy, muted, alpha);
+    });
+    let name = controls.mic_label.as_deref().unwrap_or(if present { "Микрофон" } else { "Нет микрофона" });
+    menu_style::label(cr, renderer, name, x + ROW_SLIDER_X, top + 8.0, ROW_SLIDER_W - 50.0, Font::Label, alpha);
+    if present {
+        let level = (frame.level)(Slider::Mic);
+        let status = if muted { "Выкл.".to_string() } else { format!("{}%", (level * 100.0).round()) };
+        crate::motion::text(cr, renderer, &format!("quick{:.4}:mic", frame.opened), &status,
+            x + ROW_SLIDER_X, top + 8.0 + (label_h - menu_style::line_height(cr, renderer, Font::Footnote)) / 2.0,
+            ROW_SLIDER_W, 1.0, Font::Footnote, if muted { menu_style::RED } else { (1.0, 1.0, 1.0) },
+            if muted { alpha } else { menu_style::SECONDARY * alpha });
+        row_slider(cr, x + ROW_SLIDER_X, top + ROW_SLIDER_DY, ROW_SLIDER_W, if muted { 0.0 } else { level },
+            alpha * if muted { 0.5 } else { 1.0 }, (frame.grow)(Slider::Mic), (1.0, 1.0, 1.0));
     }
 }
 
@@ -643,6 +834,8 @@ mod tests {
                 Sink { name: "b".into(), label: "AirPods".into(), kind: SinkKind::Bluetooth },
             ],
             default_sink: "b".into(),
+            apps: vec![App { name: "Firefox".into(), icon: "firefox".into(), streams: vec![1, 2], volume: 0.8, muted: false }],
+            mic: Some(0.7),
             ..Controls::default()
         }
     }
@@ -659,13 +852,18 @@ mod tests {
         }
         let (bx, by, bw, _) = outputs_button();
         assert_eq!(hit(View::Main, &c, bx + bw - 10.0, by + 10.0), Some(Hit::Action(Action::Outputs)));
-        assert_eq!(hit(View::Main, &c, SLIDER_X, SOUND_Y + SLIDER_DY + 10.0), Some(Hit::Slider(SliderKind::Volume, 0.0)));
+        assert_eq!(hit(View::Main, &c, SLIDER_X, SOUND_Y + SLIDER_DY + 10.0), Some(Hit::Slider(Slider::Volume, 0.0)));
         assert_eq!(hit(View::Main, &c, SLIDER_X + SLIDER_W, DISPLAY_Y + SLIDER_DY + 10.0),
-            Some(Hit::Slider(SliderKind::Brightness, 1.0)));
+            Some(Hit::Slider(Slider::Brightness, 1.0)));
         assert_eq!(hit(View::Main, &c, WIDTH - 37.0, 40.0), Some(Hit::Action(Action::Close)));
         assert_eq!(hit(View::Main, &c, WIDTH / 2.0, HEIGHT - 8.0), None);
-        assert_eq!(hit(View::Outputs, &c, 200.0, menu_style::CONTENT_TOP + SINK_H + 10.0), Some(Hit::Action(Action::Sink(1))));
-        assert_eq!(hit(View::Outputs, &c, 40.0, 40.0), Some(Hit::Action(Action::Back)));
+        let page = sound_page(&c);
+        assert_eq!(hit(View::Sound, &c, 200.0, page.sinks + SINK_H + 10.0), Some(Hit::Action(Action::Sink(1))));
+        assert_eq!(hit(View::Sound, &c, 40.0, 40.0), Some(Hit::Action(Action::Back)));
+        assert_eq!(hit(View::Sound, &c, ROW_SLIDER_X + ROW_SLIDER_W, page.apps + 40.0), Some(Hit::Slider(Slider::App(0), 1.0)));
+        assert_eq!(hit(View::Sound, &c, 40.0, page.mic + 20.0), Some(Hit::Action(Action::MicMute)));
+        assert_eq!(hit(View::Sound, &c, ROW_SLIDER_X, page.mic + 30.0), Some(Hit::Slider(Slider::Mic, 0.0)));
+        assert_eq!(page.height, height(View::Sound, &c));
         let without = Controls { volume: None, ..controls() };
         assert_eq!(hit(View::Main, &without, SLIDER_X + 50.0, SOUND_Y + SLIDER_DY + 10.0), None);
     }

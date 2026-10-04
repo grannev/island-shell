@@ -314,6 +314,8 @@ pub struct App {
     /// session) and whether the menu was open at the last change
     controls: std::sync::mpsc::Sender<crate::control::Request>,
     quick_was_open: bool,
+    /// refreshes the sound page's applications while it is open
+    sound_poll: Option<RegistrationToken>,
     pub exit: bool,
 }
 
@@ -431,6 +433,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_dnd,
         controls,
         quick_was_open: false,
+        sound_poll: None,
         exit: false,
     };
 
@@ -627,6 +630,9 @@ fn read_muted() -> bool {
     let zero = out(&["get-sink-volume", "@DEFAULT_SINK@"]).is_some_and(|s| s.split_whitespace().any(|w| w == "0%"));
     muted || zero
 }
+
+/// How often the open sound page re-reads the playing applications.
+const SOUND_POLL: Duration = Duration::from_millis(1000);
 
 /// Logical pixels a notch of the wheel scrolls a list: about one row, as
 /// GTK and browsers do for a list this size.
@@ -1103,6 +1109,17 @@ impl App {
             let _ = self.controls.send(crate::control::Request::Refresh);
         }
         self.quick_was_open = quick;
+        // the sound page follows applications starting and stopping
+        let sound = self.island.sound_page_open();
+        if sound && self.sound_poll.is_none() {
+            let tx = self.controls.clone();
+            self.sound_poll = self.loop_handle.insert_source(Timer::from_duration(SOUND_POLL), move |_, _, _: &mut App| {
+                let _ = tx.send(crate::control::Request::Refresh);
+                TimeoutAction::ToDuration(SOUND_POLL)
+            }).ok();
+        } else if !sound {
+            if let Some(token) = self.sound_poll.take() { self.loop_handle.remove(token); }
+        }
         // whoever closed the launcher (a key, Touch ID, the compositor),
         // the keyboard goes back when it is gone
         let wants_keyboard = self.island.launcher.is_some()
@@ -1978,8 +1995,12 @@ impl App {
                 self.notification_dnd.store(enabled, Ordering::Relaxed);
             }
             Action::Outputs => {
-                self.island.quick_show(View::Outputs, now);
+                self.island.quick_show(View::Sound, now);
                 let _ = self.controls.send(Request::Refresh);
+            }
+            Action::MicMute => {
+                self.island.toggle_mic(now);
+                let _ = self.controls.send(Request::MicMute);
             }
             Action::Back => self.island.quick_show(View::Main, now),
             Action::Sink(index) => {
@@ -2003,10 +2024,17 @@ impl App {
     }
 
     /// Send a slider's new value to the worker (it keeps only the latest).
-    fn set_level(&self, kind: activity::SliderKind, value: f64) {
-        let request = match kind {
-            activity::SliderKind::Volume => crate::control::Request::Volume(value),
-            activity::SliderKind::Brightness => crate::control::Request::Brightness(value),
+    fn set_level(&self, slider: crate::quick::Slider, value: f64) {
+        use crate::control::Request;
+        use crate::quick::Slider;
+        let request = match slider {
+            Slider::Volume => Request::Volume(value),
+            Slider::Brightness => Request::Brightness(value),
+            Slider::Mic => Request::Mic(value),
+            Slider::App(i) => match self.island.controls.apps.get(i) {
+                Some(app) => Request::AppVolume(app.streams.clone(), value),
+                None => return,
+            },
         };
         let _ = self.controls.send(request);
     }

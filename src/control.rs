@@ -27,6 +27,18 @@ pub struct Sink {
     pub kind: SinkKind,
 }
 
+/// An application playing sound: all its streams under one slider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct App {
+    pub name: String,
+    /// an icon-theme name (the stream's icon, else its binary)
+    pub icon: String,
+    /// the sink-input indices it owns
+    pub streams: Vec<u32>,
+    pub volume: f64,
+    pub muted: bool,
+}
+
 /// What the menu shows; `None` where a reading failed (the control greys out).
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -35,12 +47,20 @@ pub struct Snapshot {
     pub sinks: Vec<Sink>,
     pub default_sink: String,
     pub layout: Option<String>,
+    pub apps: Vec<App>,
+    /// the default microphone's level and mute, and what it is called
+    pub mic: Option<(f64, bool)>,
+    pub mic_label: Option<String>,
 }
 
 pub enum Request {
     Refresh,
     Volume(f64),
     Brightness(f64),
+    /// one application's streams
+    AppVolume(Vec<u32>, f64),
+    Mic(f64),
+    MicMute,
     Sink(String),
     NextLayout,
     Lock,
@@ -59,12 +79,19 @@ pub fn spawn(tx: Sender<Snapshot>) -> mpsc::Sender<Request> {
                 // a drag sends many values; only the latest of each matters
                 let mut volume = None;
                 let mut brightness = None;
+                let mut mic = None;
+                let mut apps: Vec<(Vec<u32>, f64)> = Vec::new();
                 let mut refresh = false;
                 let mut rest = Vec::new();
                 for request in std::iter::once(first).chain(rx.try_iter()) {
                     match request {
                         Request::Volume(v) => volume = Some(v),
                         Request::Brightness(v) => brightness = Some(v),
+                        Request::Mic(v) => mic = Some(v),
+                        Request::AppVolume(streams, v) => match apps.iter_mut().find(|(s, _)| *s == streams) {
+                            Some(slot) => slot.1 = v,
+                            None => apps.push((streams, v)),
+                        },
                         Request::Refresh => refresh = true,
                         other => rest.push(other),
                     }
@@ -74,6 +101,16 @@ pub fn spawn(tx: Sender<Snapshot>) -> mpsc::Sender<Request> {
                 }
                 if let Some(v) = brightness {
                     set_brightness(v);
+                }
+                if let Some(v) = mic {
+                    let value = format!("{:.3}", v.clamp(0.0, 1.0));
+                    run("wpctl", &["set-volume", "@DEFAULT_AUDIO_SOURCE@", &value]);
+                }
+                for (streams, v) in apps {
+                    let percent = format!("{}%", (v.clamp(0.0, 1.0) * 100.0).round());
+                    for stream in streams {
+                        run("pactl", &["set-sink-input-volume", &stream.to_string(), &percent]);
+                    }
                 }
                 for request in rest {
                     refresh |= worker.run(request);
@@ -130,6 +167,10 @@ impl Worker {
                 }
                 true
             }
+            Request::MicMute => {
+                run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]);
+                true
+            }
             Request::Lock => {
                 run("loginctl", &["lock-session"]);
                 false
@@ -144,7 +185,7 @@ impl Worker {
                 }
                 false
             }
-            Request::Refresh | Request::Volume(_) | Request::Brightness(_) => true,
+            Request::Refresh | Request::Volume(_) | Request::Brightness(_) | Request::Mic(_) | Request::AppVolume(..) => true,
         }
     }
 
@@ -156,8 +197,20 @@ impl Worker {
             sinks: sinks(),
             default_sink: output("pactl", &["get-default-sink"]).unwrap_or_default(),
             layout,
+            apps: output("pactl", &["-f", "json", "list", "sink-inputs"]).map(|json| parse_apps(&json)).unwrap_or_default(),
+            mic: read_level("@DEFAULT_AUDIO_SOURCE@"),
+            mic_label: output("pactl", &["get-default-source"]).and_then(|name| {
+                let json = output("pactl", &["-f", "json", "list", "sources"])?;
+                source_label(&json, &name)
+            }),
         }
     }
+}
+
+fn read_level(target: &str) -> Option<(f64, bool)> {
+    let text = output("wpctl", &["get-volume", target])?;
+    let value = text.split_whitespace().find_map(|word| word.parse::<f64>().ok())?;
+    Some((value.clamp(0.0, 1.0), text.contains("MUTED")))
 }
 
 fn run(program: &str, args: &[&str]) {
@@ -226,6 +279,48 @@ pub fn parse_sinks(json: &str) -> Vec<Sink> {
         .collect()
 }
 
+/// The applications playing now, one entry per application however many
+/// streams it opened (a browser often has several).
+pub fn parse_apps(json: &str) -> Vec<App> {
+    let Ok(serde_json::Value::Array(list)) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    let mut apps: Vec<App> = Vec::new();
+    for stream in &list {
+        let Some(index) = stream["index"].as_u64() else { continue };
+        let props = &stream["properties"];
+        let prop = |key: &str| props[key].as_str().filter(|s| !s.is_empty() && *s != "(null)").map(str::to_string);
+        // event sounds (notification chimes) are not something to mix
+        if prop("media.role").as_deref() == Some("event") {
+            continue;
+        }
+        let binary = prop("application.process.binary");
+        let name = prop("application.name").or_else(|| binary.clone()).unwrap_or_else(|| "Приложение".into());
+        let icon = prop("application.icon_name").or(binary).unwrap_or_default();
+        let levels: Vec<f64> = stream["volume"].as_object().map(|channels| {
+            channels.values().filter_map(|c| c["value_percent"].as_str()?.trim_end_matches('%').parse::<f64>().ok()).collect()
+        }).unwrap_or_default();
+        let volume = (levels.iter().copied().fold(0.0, f64::max) / 100.0).clamp(0.0, 1.0);
+        let muted = stream["mute"].as_bool().unwrap_or(false);
+        match apps.iter_mut().find(|a| a.name == name) {
+            Some(app) => {
+                app.streams.push(index as u32);
+                app.volume = app.volume.max(volume);
+            }
+            None => apps.push(App { name, icon, streams: vec![index as u32], volume, muted }),
+        }
+    }
+    apps
+}
+
+/// The default microphone, named as a person would.
+fn source_label(json: &str, name: &str) -> Option<String> {
+    let serde_json::Value::Array(list) = serde_json::from_str::<serde_json::Value>(json).ok()? else { return None };
+    let source = list.iter().find(|s| s["name"].as_str() == Some(name))?;
+    if name.starts_with("alsa_input") {
+        return Some("Встроенный микрофон".into());
+    }
+    source["description"].as_str().map(str::to_string)
+}
+
 /// A layout name as the menu says it.
 pub fn layout_label(name: &str) -> String {
     match name {
@@ -258,6 +353,23 @@ mod tests {
         assert!((after.volume.unwrap().0 - volume).abs() < 0.011);
         assert!((after.brightness.unwrap() - before.brightness.unwrap()).abs() < 0.011);
         assert!(!after.sinks.is_empty() && after.sinks.iter().any(|s| s.name == after.default_sink));
+        // applications and the microphone: write back what they are at
+        if let Some((mic, _)) = before.mic {
+            let value = format!("{mic:.3}");
+            run("wpctl", &["set-volume", "@DEFAULT_AUDIO_SOURCE@", &value]);
+            assert!((worker.snapshot().mic.unwrap().0 - mic).abs() < 0.011);
+        }
+        for app in &before.apps {
+            let percent = format!("{}%", (app.volume * 100.0).round());
+            for stream in &app.streams {
+                run("pactl", &["set-sink-input-volume", &stream.to_string(), &percent]);
+            }
+        }
+        let again = worker.snapshot();
+        for (a, b) in before.apps.iter().zip(&again.apps) {
+            assert_eq!(a.name, b.name);
+            assert!((a.volume - b.volume).abs() < 0.011, "{} {} → {}", a.name, a.volume, b.volume);
+        }
         let layout = before.layout.clone().expect("layout");
         worker.run(Request::NextLayout);
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -283,5 +395,24 @@ mod tests {
         assert_eq!((sinks[0].kind, sinks[0].label.as_str()), (SinkKind::Speaker, "Динамики"));
         assert_eq!((sinks[1].kind, sinks[1].label.as_str()), (SinkKind::Bluetooth, "AirPods Pro"));
         assert_eq!(layout_label("Russian"), "Русская");
+    }
+
+    #[test]
+    fn streams_of_one_application_share_a_slider() {
+        let json = r#"[
+            {"index":1506,"mute":false,"volume":{"front-left":{"value_percent":"100%"},"front-right":{"value_percent":"100%"}},
+             "properties":{"application.name":"Firefox","application.process.binary":"firefox-esr"}},
+            {"index":1534,"mute":false,"volume":{"front-left":{"value_percent":"40%"}},
+             "properties":{"application.name":"Firefox","application.process.binary":"firefox-esr"}},
+            {"index":1600,"mute":true,"volume":{"mono":{"value_percent":"55%"}},
+             "properties":{"application.name":"Telegram","application.icon_name":"telegram"}},
+            {"index":1700,"mute":false,"volume":{"mono":{"value_percent":"80%"}},
+             "properties":{"application.name":"sound","media.role":"event"}}
+        ]"#;
+        let apps = parse_apps(json);
+        assert_eq!(apps.len(), 2);
+        assert_eq!((apps[0].name.as_str(), apps[0].icon.as_str(), apps[0].streams.clone(), apps[0].volume),
+            ("Firefox", "firefox-esr", vec![1506, 1534], 1.0));
+        assert_eq!((apps[1].icon.as_str(), apps[1].muted, apps[1].volume), ("telegram", true, 0.55));
     }
 }

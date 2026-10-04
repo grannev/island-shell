@@ -116,10 +116,10 @@ const DODGE_DUR: f64 = 0.25;
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
 const HOVER_RESPONSE: f64 = 0.4;
 const HOVER_DAMPING: f64 = 0.6;
-fn slider_index(kind: activity::SliderKind) -> usize {
+fn slider_of(kind: activity::SliderKind) -> quick::Slider {
     match kind {
-        activity::SliderKind::Brightness => 0,
-        activity::SliderKind::Volume => 1,
+        activity::SliderKind::Brightness => quick::Slider::Brightness,
+        activity::SliderKind::Volume => quick::Slider::Volume,
     }
 }
 
@@ -464,18 +464,18 @@ pub struct Island {
     /// the environment the Control Center shows (volume, brightness,
     /// outputs, layout), with eased slider positions
     pub controls: quick::Controls,
-    volume_shown: Spring,
-    brightness_shown: Spring,
+    /// each slider's eased position
+    slider_shown: HashMap<quick::Slider, Spring>,
     /// the slider held by the pointer
-    quick_drag: Option<activity::SliderKind>,
+    quick_drag: Option<quick::Slider>,
     logout_armed_at: Option<Time>,
     /// when the Control Center opened (its rows arrive in a wave), when
     /// each control was last pressed and when its symbol last bounced
     quick_opened_at: Time,
     quick_pressed: HashMap<quick::Action, Time>,
     quick_bounced: HashMap<quick::Action, Time>,
-    /// the sliders swell while held (brightness, volume)
-    slider_grow: [Spring; 2],
+    /// the sliders swell while held
+    slider_grow: HashMap<quick::Slider, Spring>,
     quick_close_hover: Spring,
     quick_retiring_at: Option<Time>,
     /// the notification center was just closed: its content fades with the
@@ -645,14 +645,13 @@ impl Island {
             quick_view: quick::View::Main,
             quick_view_from: None,
             controls: quick::Controls::default(),
-            volume_shown: Spring::new(0.0, SLIDER_SPRING, 1.0),
-            brightness_shown: Spring::new(0.0, SLIDER_SPRING, 1.0),
+            slider_shown: HashMap::new(),
             quick_drag: None,
             logout_armed_at: None,
             quick_opened_at: f64::NEG_INFINITY,
             quick_pressed: HashMap::new(),
             quick_bounced: HashMap::new(),
-            slider_grow: std::array::from_fn(|_| Spring::new(0.0, 0.3, 0.62)),
+            slider_grow: HashMap::new(),
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
             quick_retiring_at: None,
             center_retiring_at: None,
@@ -719,10 +718,10 @@ impl Island {
             || self.activity_value.is_moving(now) && self.activity.is_some()
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
             || self.quick_hover_springs.values().any(|s| s.is_moving(now))
-            || self.quick_open && (self.volume_shown.is_moving(now) || self.brightness_shown.is_moving(now))
+            || self.quick_open && self.slider_shown.values().any(|s| s.is_moving(now))
             || self.quick_open && (now - self.quick_opened_at < 0.6
                 || self.quick_pressed.values().chain(self.quick_bounced.values()).any(|t| now - t < 1.0)
-                || self.slider_grow.iter().any(|s| s.is_moving(now)))
+                || self.slider_grow.values().any(|s| s.is_moving(now)))
             || self.quick_view_from.is_some_and(|(_, since)| now - since < SHEET_SWAP)
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
@@ -1459,8 +1458,8 @@ impl Island {
         // over it and none queued for after it closes
         if let activity::Event::Slider { kind, value, muted } = &event {
             if self.quick_open {
-                if self.quick_drag != Some(*kind) {
-                    self.set_control_level(*kind, *value, now);
+                if self.quick_drag != Some(slider_of(*kind)) {
+                    self.set_control_level(slider_of(*kind), *value, now);
                     if *kind == activity::SliderKind::Volume { self.controls.muted = *muted; }
                 }
                 self.sync(now);
@@ -2144,21 +2143,25 @@ impl Island {
                 }
                 let springs = &self.quick_hover_springs;
                 let hover = |action: quick::Action| springs.get(&action).map_or(0.0, |s| s.value(now));
+                let (shown, grown, icons) = (&self.slider_shown, &self.slider_grow, &self.launcher_icons);
+                let level = |slider: quick::Slider| shown.get(&slider).map_or(0.0, |s| s.value(now).clamp(0.0, 1.0));
+                let grow = |slider: quick::Slider| grown.get(&slider).map_or(0.0, |s| s.value(now));
+                let icon = |name: &str, px: i32| if name.is_empty() { None } else { icons.get_scaled(name, px) };
                 let (pressed_at, bounced_at) = (&self.quick_pressed, &self.quick_bounced);
                 let pressed = |action: quick::Action| pressed_at.get(&action).map_or(f64::INFINITY, |t| now - t);
                 let bounced = |action: quick::Action| bounced_at.get(&action).map_or(f64::INFINITY, |t| now - t);
                 let frame = quick::Frame {
                     status: self.quick_status(now),
                     controls: &self.controls,
-                    volume: self.volume_shown.value(now).clamp(0.0, 1.0),
-                    brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
+                    level: &level,
+                    grow: &grow,
+                    icon: &icon,
                     hover: &hover,
                     logout_armed: self.logout_armed_at.is_some(),
                     now,
                     opened: self.quick_opened_at,
                     pressed: &pressed,
                     bounced: &bounced,
-                    grow: (self.slider_grow[0].value(now), self.slider_grow[1].value(now)),
                 };
                 let (qx, qy) = (cx - quick::WIDTH / 2.0, dy + climb + enter);
                 let close = self.quick_close_hover.value(now);
@@ -2235,18 +2238,22 @@ impl Island {
         if sheet_k < 1.0 && pill_alpha > 0.0 {
             let hover = |_: quick::Action| 0.0;
             let never = |_: quick::Action| f64::INFINITY;
+            let shown = &self.slider_shown;
+            let level = |slider: quick::Slider| shown.get(&slider).map_or(0.0, |s| s.value(now).clamp(0.0, 1.0));
+            let no_grow = |_: quick::Slider| 0.0;
+            let no_icon = |_: &str, _: i32| None;
             let frame = quick::Frame {
                 status: self.quick_status(now),
                 controls: &self.controls,
-                volume: self.volume_shown.value(now).clamp(0.0, 1.0),
-                brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
+                level: &level,
+                grow: &no_grow,
+                icon: &no_icon,
                 hover: &hover,
                 logout_armed: false,
                 now,
                 opened: self.quick_opened_at,
                 pressed: &never,
                 bounced: &never,
-                grow: (0.0, 0.0),
             };
             quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
                 pill_alpha * (1.0 - sheet_k), self.quick_view, 0.0, &frame);
@@ -2615,10 +2622,10 @@ impl Island {
     pub fn quick_press(&mut self, px: f64, py: f64, now: Time) -> Option<quick::Hit> {
         let hit = self.quick_hit(px, py)?;
         match hit {
-            quick::Hit::Slider(kind, value) => {
-                self.quick_drag = Some(kind);
-                self.slider_grow[slider_index(kind)].set(1.0, now);
-                self.set_control_level(kind, value, now);
+            quick::Hit::Slider(slider, value) => {
+                self.quick_drag = Some(slider);
+                self.slider_grow.entry(slider).or_insert_with(|| Spring::new(0.0, 0.3, 0.62)).set(1.0, now);
+                self.set_control_level(slider, value, now);
             }
             quick::Hit::Action(action) => self.tap(action, now),
         }
@@ -2626,17 +2633,17 @@ impl Island {
     }
 
     /// The held slider follows the pointer, even outside the menu.
-    pub fn quick_drag_to(&mut self, px: f64, now: Time) -> Option<(activity::SliderKind, f64)> {
-        let kind = self.quick_drag?;
+    pub fn quick_drag_to(&mut self, px: f64, now: Time) -> Option<(quick::Slider, f64)> {
+        let slider = self.quick_drag?;
         let rect = self.quick_rect?;
-        let value = quick::slider_fraction(px - rect.x);
-        self.set_control_level(kind, value, now);
-        Some((kind, value))
+        let value = quick::slider_fraction(slider, px - rect.x);
+        self.set_control_level(slider, value, now);
+        Some((slider, value))
     }
 
     pub fn quick_release(&mut self, now: Time) -> bool {
-        let Some(kind) = self.quick_drag.take() else { return false };
-        self.slider_grow[slider_index(kind)].set(0.0, now);
+        let Some(slider) = self.quick_drag.take() else { return false };
+        if let Some(spring) = self.slider_grow.get_mut(&slider) { spring.set(0.0, now); }
         true
     }
 
@@ -2657,42 +2664,77 @@ impl Island {
         self.sync(now);
     }
 
-    fn set_control_level(&mut self, kind: activity::SliderKind, value: f64, now: Time) {
-        match kind {
-            activity::SliderKind::Volume => {
+    /// Move a slider's eased position (a fresh one starts where it is).
+    fn show_level(&mut self, slider: quick::Slider, value: f64, now: Time) {
+        self.slider_shown.entry(slider).or_insert_with(|| Spring::new(value, SLIDER_SPRING, 1.0)).set(value, now);
+    }
+
+    fn set_control_level(&mut self, slider: quick::Slider, value: f64, now: Time) {
+        match slider {
+            quick::Slider::Volume => {
                 self.controls.volume = Some(value);
                 self.controls.muted = false;
-                self.volume_shown.set(value, now);
             }
-            activity::SliderKind::Brightness => {
-                self.controls.brightness = Some(value);
-                self.brightness_shown.set(value, now);
+            quick::Slider::Brightness => self.controls.brightness = Some(value),
+            quick::Slider::App(i) => {
+                if let Some(app) = self.controls.apps.get_mut(i) {
+                    app.volume = value;
+                    app.muted = false;
+                }
             }
+            quick::Slider::Mic => self.controls.mic = Some(value),
         }
+        self.show_level(slider, value, now);
     }
 
     /// A fresh reading of the environment for the Control Center.
     pub fn set_controls(&mut self, snapshot: crate::control::Snapshot, now: Time) {
         // the held slider is the truth until it is let go
-        if self.quick_drag != Some(activity::SliderKind::Volume) {
+        let held = self.quick_drag;
+        if held != Some(quick::Slider::Volume) {
             if let Some((value, muted)) = snapshot.volume {
-                self.controls.muted = muted;
-                self.set_control_level(activity::SliderKind::Volume, value, now);
+                self.set_control_level(quick::Slider::Volume, value, now);
                 self.controls.muted = muted;
             } else {
                 self.controls.volume = None;
             }
         }
-        if self.quick_drag != Some(activity::SliderKind::Brightness) {
+        if held != Some(quick::Slider::Brightness) {
             match snapshot.brightness {
-                Some(value) => self.set_control_level(activity::SliderKind::Brightness, value, now),
+                Some(value) => self.set_control_level(quick::Slider::Brightness, value, now),
                 None => self.controls.brightness = None,
             }
         }
+        // while an application's slider is held its row must not move
+        if !matches!(held, Some(quick::Slider::App(_))) {
+            self.controls.apps = snapshot.apps;
+            for i in 0..self.controls.apps.len() {
+                let value = self.controls.apps[i].volume;
+                self.show_level(quick::Slider::App(i), value, now);
+            }
+        }
+        if held != Some(quick::Slider::Mic) {
+            self.controls.mic = snapshot.mic.map(|(value, _)| value);
+            self.controls.mic_muted = snapshot.mic.is_some_and(|(_, muted)| muted);
+            if let Some((value, _)) = snapshot.mic { self.show_level(quick::Slider::Mic, value, now); }
+        }
+        self.controls.mic_label = snapshot.mic_label;
         self.controls.sinks = snapshot.sinks;
         self.controls.default_sink = snapshot.default_sink;
         if let Some(layout) = snapshot.layout { self.set_layout(layout, now); }
         self.sync(now);
+    }
+
+    /// Mute or unmute the microphone at once (the worker confirms).
+    pub fn toggle_mic(&mut self, now: Time) {
+        self.controls.mic_muted = !self.controls.mic_muted;
+        self.quick_bounced.insert(quick::Action::MicMute, now);
+        self.sync(now);
+    }
+
+    /// Is the sound page showing (its rows are refreshed while it is)?
+    pub fn sound_page_open(&self) -> bool {
+        self.quick_open && self.quick_view == quick::View::Sound
     }
 
     /// Switch the Control Center's page with a short crossfade.
@@ -2723,7 +2765,8 @@ impl Island {
         match self.quick_view {
             quick::View::Main => quick::ACTIONS.iter().copied()
                 .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty()).collect(),
-            quick::View::Outputs => (0..self.controls.sinks.len()).map(quick::Action::Sink).collect(),
+            quick::View::Sound => (0..self.controls.sinks.len()).map(quick::Action::Sink)
+                .chain(self.controls.mic.is_some().then_some(quick::Action::MicMute)).collect(),
         }
     }
 
@@ -3379,8 +3422,8 @@ mod tests {
         let mut island = gallery_island();
         island.open_quick_menu(10.0);
         island.set_controls(crate::control::Snapshot {
-            volume: Some((0.45, false)), brightness: Some(0.7), sinks: vec![], default_sink: String::new(),
-            layout: Some("Russian".into()),
+            volume: Some((0.45, false)), brightness: Some(0.7), layout: Some("Russian".into()),
+            ..Default::default()
         }, 10.0);
         filmstrip("motion-quick-open", &mut island, 10.0, 10, 0.05);
         island.set_dnd(true, 11.0);
@@ -3445,6 +3488,12 @@ mod tests {
             ],
             default_sink: "bt".into(),
             layout: Some("Russian".into()),
+            apps: vec![
+                crate::control::App { name: "Firefox".into(), icon: "firefox-esr".into(), streams: vec![1, 2], volume: 0.8, muted: false },
+                crate::control::App { name: "Telegram".into(), icon: "org.telegram.desktop".into(), streams: vec![3], volume: 0.35, muted: false },
+            ],
+            mic: Some((0.7, false)),
+            mic_label: Some("Встроенный микрофон".into()),
         };
         let mut island = gallery_island();
         island.open_quick_menu(10.0);
@@ -3454,8 +3503,20 @@ mod tests {
         island.quick_hover = Some(quick::Action::Sleep);
         island.sync(12.0);
         gallery_shot_after("02b-quick-menu-armed", &mut island, 12.0, 0.6);
-        island.quick_show(quick::View::Outputs, 13.0);
-        gallery_shot("02c-quick-outputs", &mut island, 13.0);
+        island.quick_show(quick::View::Sound, 13.0);
+        for _ in 0..100 {
+            island.drain_assets(13.0, 1.5);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let renderer = Renderer::new(1.5);
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+            let ctx = Context::new(&scratch).unwrap();
+            ctx.scale(1.5, 1.5);
+            island.draw(&ctx, &renderer, 490.0, 13.0);
+        }
+        gallery_shot("02c-quick-sound", &mut island, 13.0);
+        island.toggle_mic(16.0);
+        island.controls.apps.clear();
+        gallery_shot_after("02d-quick-sound-muted", &mut island, 16.0, 1.0);
 
 
         let mut island = gallery_island();
