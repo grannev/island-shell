@@ -6,8 +6,12 @@ client rendering everything itself at the display's refresh rate.
 
 Replaced the waybar-based island (island-*.sh, 500 lines of CSS frames)
 and the walker launcher; see `CLAUDE.md` for the brief and the plan.
-The shared visual roles for menus and sheets are documented in
-[`docs/interface-style.md`](docs/interface-style.md).
+Every sheet is drawn with one Apple-style design system (`src/menu_style.rs`:
+system colours, SF Pro text styles, capsule buttons, grouped lists, a
+circular close control); its roles are documented in
+[`docs/interface-style.md`](docs/interface-style.md). The gallery test renders
+every surface at 1.5× for review:
+`ISLAND_GALLERY=1 cargo test gallery -- --ignored` → `target/gallery/`.
 
 ## Status
 
@@ -205,8 +209,9 @@ body invokes the default action when one exists. The shortcut menu has a
 **Do Not Disturb** tile, also controlled by `island-shell dnd on|off|toggle|status`.
 It suppresses ordinary popups and sounds while still saving them to history;
 critical alerts continue to appear. The choice survives restarts, and its
-shortcut tile switches in place without closing the menu; the label stays
-"Тишина" while the whole tile eases into a purple active appearance.
+shortcut tile switches in place without closing the menu; the title stays
+"Тишина", its status line reads Вкл./Выкл. and the round icon eases into
+purple.
 Optional local sounds use `paplay` and the
 existing TriTone/Critical Stop files, respecting `suppress-sound` and avoiding
 duplicates for Telegram and Thunderbird. The box morphs into a wide pill with the app's icon

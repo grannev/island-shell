@@ -438,19 +438,17 @@ impl Launcher {
         };
         let (fa, fo) = intro(0.0);
         let close = self.close_hover.value(now).clamp(0.0, 1.0);
-        crate::menu_style::close(cr, x + w - 49.0, y + 10.0, 34.0, close, alpha);
+        crate::menu_style::close(cr, x + w - FIELD_PAD - crate::menu_style::CLOSE_SIZE, y + 10.0,
+            crate::menu_style::CLOSE_SIZE, close, alpha);
+        // Spotlight's field: a filled capsule, no outline
         rounded(cr, fx, fy + fo, fw, FIELD_H, FIELD_H / 2.0);
-        cr.set_source_rgba(0.15, 0.15, 0.17, fa);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * fa);
         let _ = cr.fill();
-        rounded(cr, fx + 0.5, fy + fo + 0.5, fw - 1.0, FIELD_H - 1.0, (FIELD_H - 1.0) / 2.0);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.11 * fa);
-        let _ = cr.stroke();
 
         // the magnifying glass (SF Symbols, in the same face as the text)
         let glass = renderer.layout(cr, "\u{1002AB}", Font::Text);
         let (_, g_ext) = glass.pixel_extents();
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.45 * fa);
+        cr.set_source_rgba(1.0, 1.0, 1.0, crate::menu_style::SECONDARY * fa);
         cr.move_to(renderer.snap(fx + 18.0), renderer.snap(fy + fo + (FIELD_H - g_ext.height() as f64) / 2.0 - g_ext.y() as f64));
         pangocairo::functions::show_layout(cr, &glass);
 
@@ -465,14 +463,15 @@ impl Launcher {
         let q_layout = renderer.layout_ellipsized(cr, &query, Font::Query, fw - 90.0, 1);
         let (_, q_ext) = q_layout.pixel_extents();
         let q_y = renderer.snap(fy + fo + (FIELD_H - q_ext.height() as f64) / 2.0 - q_ext.y() as f64);
-        cr.set_source_rgba(1.0, 1.0, 1.0, if placeholder { 0.35 * fa } else { fa });
+        cr.set_source_rgba(1.0, 1.0, 1.0, if placeholder { crate::menu_style::TERTIARY * fa } else { fa });
         cr.move_to(renderer.snap(text_x + if placeholder { placeholder_shift } else { 0.0 }), q_y);
         pangocairo::functions::show_layout(cr, &q_layout);
 
         // the caret, blinking on the macOS cadence
         if Self::caret_on(now) {
             let cx = renderer.snap(text_x + if placeholder { 0.0 } else { q_ext.width() as f64 } + 1.0);
-            cr.set_source_rgba(0.40, 0.80, 1.0, 0.95 * fa);
+            let blue = crate::menu_style::BLUE;
+            cr.set_source_rgba(blue.0, blue.1, blue.2, fa);
             cr.rectangle(cx, renderer.snap(fy + fo + 11.0), 2.0, FIELD_H - 22.0);
             let _ = cr.fill();
         }
@@ -493,13 +492,11 @@ impl Launcher {
         let sel_alpha = self.sel_alpha.state(now).x * alpha;
         if sel_alpha > 0.002 {
             let sy = view_top + (self.sel_slot.state(now).x - scroll) * ROW_H;
-            rounded(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0, 13.0);
-            cr.set_source_rgba(0.16, 0.20, 0.26, sel_alpha);
+            // Spotlight's selection: the system accent, solid
+            rounded(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0, 10.0);
+            let blue = crate::menu_style::BLUE;
+            cr.set_source_rgba(blue.0, blue.1, blue.2, 0.92 * sel_alpha);
             let _ = cr.fill();
-            rounded(cr, x + FIELD_PAD - 5.5, sy + 2.5, w - 2.0 * (FIELD_PAD - 6.0) - 1.0, ROW_H - 5.0, 12.5);
-            cr.set_line_width(1.0);
-            cr.set_source_rgba(0.42, 0.77, 1.0, 0.23 * sel_alpha);
-            let _ = cr.stroke();
         }
 
         // the rows
@@ -542,23 +539,17 @@ impl Launcher {
         }
         cr.restore().unwrap();
 
+        let searching = self.file_due.is_some() || self.file_request.is_some();
         if self.matches == 0 {
-            let text = renderer.layout(cr, if self.file_due.is_some() || self.file_request.is_some() {
-                "Ищем файлы…"
-            } else { "Ничего не найдено" }, Font::Text);
-            let (_, e) = text.pixel_extents();
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.4 * alpha);
-            cr.move_to(renderer.snap(x + w / 2.0 - e.width() as f64 / 2.0), renderer.snap(y + LIST_TOP + 30.0));
-            pangocairo::functions::show_layout(cr, &text);
+            crate::menu_style::centred(cr, renderer, if searching { "Ищем файлы…" } else { "Ничего не найдено" },
+                (x, y + LIST_TOP + 20.0, w, 24.0), Font::Headline, (1.0, 1.0, 1.0), crate::menu_style::SECONDARY * alpha);
         }
-        let footer = if self.file_due.is_some() || self.file_request.is_some() {
-            "Поиск файлов…"
-        } else if let Some(note) = &self.file_note { note }
-        else { "file: — только файлы и каталоги · Enter — открыть" };
-        let hint = renderer.layout_ellipsized(cr, footer, Font::Tiny, w - 2.0 * FIELD_PAD, 1);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.36 * alpha);
-        cr.move_to(renderer.snap(x + FIELD_PAD), renderer.snap(y + 494.0));
-        pangocairo::functions::show_layout(cr, &hint);
+        // a status line only while there is a status (no instructions)
+        let footer = if searching && self.matches > 0 { Some("Поиск файлов…") } else { self.file_note.as_deref() };
+        if let Some(footer) = footer {
+            crate::menu_style::label(cr, renderer, footer, x + FIELD_PAD, y + PANEL_H - 20.0, w - 2.0 * FIELD_PAD,
+                Font::Footnote, crate::menu_style::SECONDARY * alpha);
+        }
     }
 
     fn draw_row(&self, cr: &Context, renderer: &Renderer, row: &Row, x: f64, y: f64, w: f64, alpha: f64, now: Time) {
@@ -588,21 +579,24 @@ impl Launcher {
 
         let text_x = renderer.snap(icon_x + ICON + ICON_GAP);
         let max_w = w - (text_x - x) - FIELD_PAD;
-        let name = renderer.layout_ellipsized(cr, row.entry.name(), Font::Text, max_w, 1);
+        let selected = (1.0 - (row.slot.state(now).x - self.sel_slot.state(now).x).abs()).clamp(0.0, 1.0)
+            * self.sel_alpha.state(now).x;
+        let name = renderer.layout_ellipsized(cr, row.entry.name(), Font::Headline, max_w, 1);
         let (_, n_ext) = name.pixel_extents();
         if row.entry.subtitle().is_empty() {
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
             cr.move_to(text_x, renderer.snap(y + (ROW_H - n_ext.height() as f64) / 2.0 - n_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &name);
         } else {
-            let sub = renderer.layout_ellipsized(cr, row.entry.subtitle(), Font::Small, max_w, 1);
+            let sub = renderer.layout_ellipsized(cr, row.entry.subtitle(), Font::Subhead, max_w, 1);
             let (_, s_ext) = sub.pixel_extents();
             let total = n_ext.height() as f64 + 1.0 + s_ext.height() as f64;
             let top = y + (ROW_H - total) / 2.0;
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
             cr.move_to(text_x, renderer.snap(top - n_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &name);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * alpha);
+            let sub_alpha = crate::menu_style::SECONDARY + (0.85 - crate::menu_style::SECONDARY) * selected;
+            cr.set_source_rgba(1.0, 1.0, 1.0, sub_alpha * alpha);
             cr.move_to(text_x, renderer.snap(top + n_ext.height() as f64 + 1.0 - s_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &sub);
         }

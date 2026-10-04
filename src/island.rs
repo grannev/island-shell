@@ -1950,8 +1950,8 @@ impl Island {
             if let Some(auth) = self.auth {
                 let (result, caption, since) = match auth {
                     Auth::Waiting(since) => (None, "Touch ID", since),
-                    Auth::Ok(since) => (Some((touchid::Mark::Check, rgb(0x34C759))), "Touch ID", since),
-                    Auth::Fail(since) => (Some((touchid::Mark::Cross, rgb(0xFF3B30))), "Try again", since),
+                    Auth::Ok(since) => (Some((touchid::Mark::Check, crate::menu_style::GREEN)), "Touch ID", since),
+                    Auth::Fail(since) => (Some((touchid::Mark::Cross, crate::menu_style::RED)), "Повторите попытку", since),
                 };
                 if result.is_some() {
                     self.last_mark = result;
@@ -2024,7 +2024,7 @@ impl Island {
                     self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb + enter, w: quick::WIDTH, h: quick::HEIGHT });
                 }
                 quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb + enter, pill_alpha * arrive,
-                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.center.unread(), self.dnd_glow.value(now));
+                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.quick_status(now));
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 let enter = 8.0 * (1.0 - sheet_k);
@@ -2088,7 +2088,7 @@ impl Island {
         }
         if sheet_k < 1.0 && pill_alpha > 0.0 {
             quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
-                pill_alpha * (1.0 - sheet_k), [0.0; 6], 0.0, self.center.unread(), self.dnd_glow.value(now));
+                pill_alpha * (1.0 - sheet_k), [0.0; 6], 0.0, self.quick_status(now));
         }
         if pl > 0.0 {
             if let Some(song) = &self.song {
@@ -2249,6 +2249,14 @@ impl Island {
     }
 
     pub fn quick_menu_open(&self) -> bool { self.quick_open }
+
+    fn quick_status(&self, now: Time) -> quick::Status {
+        quick::Status {
+            unread: self.center.unread(),
+            dnd: self.dnd_glow.value(now),
+            timer: self.timer.as_ref().map(|t| (t.remaining(now), t.running)),
+        }
+    }
 
     pub fn notification_id(&self) -> Option<u32> { self.notice.as_ref().map(|n| n.note.id).filter(|id| *id != 0) }
 
@@ -2736,6 +2744,44 @@ pub enum Font {
     Tiny,
     /// the launcher's search field, 21 px
     Query,
+    // Sheet typography (Apple's text styles, SF Pro Text):
+    /// sheet titles, Semibold 17
+    Title,
+    /// row titles, Semibold 15
+    Headline,
+    /// running text, Regular 15
+    Body,
+    /// secondary lines, Regular 13
+    Subhead,
+    /// buttons and segments, Medium 14
+    Label,
+    /// fine print, Regular 12
+    Footnote,
+}
+
+const FONT_MEDIUM: &str = "SF Pro Text Medium";
+
+impl Font {
+    const ALL: [Font; 11] = [
+        Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query,
+        Font::Title, Font::Headline, Font::Body, Font::Subhead, Font::Label, Font::Footnote,
+    ];
+
+    fn face(self) -> (&'static str, f64) {
+        match self {
+            Font::Text => (FONT, FONT_PX),
+            Font::Caption => (FONT, CAPTION_PX),
+            Font::Small => (FONT_REGULAR, SMALL_PX),
+            Font::Tiny => (FONT_REGULAR, TINY_PX),
+            Font::Query => (FONT, QUERY_PX),
+            Font::Title => (FONT, 17.0),
+            Font::Headline => (FONT, 15.0),
+            Font::Body => (FONT_REGULAR, 15.0),
+            Font::Subhead => (FONT_REGULAR, 13.0),
+            Font::Label => (FONT_MEDIUM, 14.0),
+            Font::Footnote => (FONT_REGULAR, 12.0),
+        }
+    }
 }
 
 /// Pango setup shared by all drawing: fonts, hinting for the fractional
@@ -2743,11 +2789,7 @@ pub enum Font {
 /// same clock string sixty times a second would cost more than drawing).
 pub struct Renderer {
     scale: f64,
-    text: pango::FontDescription,
-    caption: pango::FontDescription,
-    small: pango::FontDescription,
-    tiny: pango::FontDescription,
-    query: pango::FontDescription,
+    fonts: Vec<pango::FontDescription>,
     ctx: pango::Context,
     cache: RefCell<LayoutCache>,
 }
@@ -2780,16 +2822,15 @@ impl LayoutCache {
 
 impl Renderer {
     pub fn new(scale: f64) -> Self {
-        let mut text = pango::FontDescription::from_string(FONT);
-        text.set_absolute_size(FONT_PX * pango::SCALE as f64);
-        let mut caption = pango::FontDescription::from_string(FONT);
-        caption.set_absolute_size(CAPTION_PX * pango::SCALE as f64);
-        let mut small = pango::FontDescription::from_string(FONT_REGULAR);
-        small.set_absolute_size(SMALL_PX * pango::SCALE as f64);
-        let mut tiny = pango::FontDescription::from_string(FONT_REGULAR);
-        tiny.set_absolute_size(TINY_PX * pango::SCALE as f64);
-        let mut query = pango::FontDescription::from_string(FONT);
-        query.set_absolute_size(QUERY_PX * pango::SCALE as f64);
+        let fonts = Font::ALL
+            .iter()
+            .map(|font| {
+                let (face, px) = font.face();
+                let mut desc = pango::FontDescription::from_string(face);
+                desc.set_absolute_size(px * pango::SCALE as f64);
+                desc
+            })
+            .collect();
         // the context takes the scale from a scratch surface; frames keep
         // the same transform, so it stays valid
         let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).expect("scratch surface");
@@ -2802,10 +2843,10 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        let renderer = Renderer { scale, text, caption, small, tiny, query, ctx, cache: RefCell::new(LayoutCache::default()) };
+        let renderer = Renderer { scale, fonts, ctx, cache: RefCell::new(LayoutCache::default()) };
         // Resolve common font faces at startup/scale changes, not on the
         // first visible frame of a newly opened panel.
-        for font in [Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query] {
+        for font in Font::ALL {
             renderer.layout(&cr, "Aa Яя 0123456789", font).pixel_extents();
         }
         renderer
@@ -2903,13 +2944,7 @@ impl Renderer {
             return l;
         }
         let layout = pango::Layout::new(&self.ctx);
-        layout.set_font_description(Some(match font {
-            Font::Text => &self.text,
-            Font::Caption => &self.caption,
-            Font::Small => &self.small,
-            Font::Tiny => &self.tiny,
-            Font::Query => &self.query,
-        }));
+        layout.set_font_description(Some(&self.fonts[font as usize]));
         layout.set_text(text);
         cache.insert(key, layout.clone());
         layout
@@ -2918,6 +2953,211 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    /// Settle `island` and paint it over a desktop-coloured background into
+    /// target/gallery/<name>.png, cropped to what it drew.
+    fn gallery_shot(name: &str, island: &mut Island, t: Time) {
+        gallery_shot_after(name, island, t, 2.0);
+    }
+
+    fn gallery_shot_after(name: &str, island: &mut Island, t: Time, settle: f64) {
+        let scale = 1.5;
+        let renderer = Renderer::new(scale);
+        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let ctx = Context::new(&scratch).unwrap();
+        ctx.scale(scale, scale);
+        for n in 0..(settle * 60.0) as usize {
+            let now = t + n as f64 / 60.0;
+            island.drain_assets(now, scale);
+            island.advance(now);
+            island.draw(&ctx, &renderer, 490.0, now);
+        }
+        let end = t + settle;
+        island.advance(end);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(scale, scale);
+        let gradient = cairo::LinearGradient::new(0.0, 0.0, 980.0, 560.0);
+        gradient.add_color_stop_rgb(0.0, 0.10, 0.16, 0.22);
+        gradient.add_color_stop_rgb(1.0, 0.26, 0.42, 0.48);
+        cr.set_source(&gradient).unwrap();
+        cr.paint().unwrap();
+        let frame = island.draw(&cr, &renderer, 490.0, end);
+        drop(cr);
+        let b = frame.bounds.unwrap_or(Rect { x: 0.0, y: 0.0, w: 980.0, h: 560.0 });
+        let (x0, x1) = (((b.x - 24.0) * scale).max(0.0) as i32, ((b.x + b.w + 24.0) * scale).min(1470.0) as i32);
+        let y1 = ((b.y + b.h + 24.0) * scale).min(840.0) as i32;
+        let out = cairo::ImageSurface::create(cairo::Format::ARgb32, x1 - x0, y1).unwrap();
+        let oc = Context::new(&out).unwrap();
+        oc.set_source_surface(&surface, -x0 as f64, 0.0).unwrap();
+        oc.paint().unwrap();
+        drop(oc);
+        std::fs::create_dir_all("target/gallery").unwrap();
+        out.write_to_png(&mut std::fs::File::create(format!("target/gallery/{name}.png")).unwrap()).unwrap();
+    }
+
+    fn menu_style_top() -> f64 { crate::menu_style::CONTENT_TOP }
+
+    fn gallery_song(playing: bool) -> crate::dbus::NowPlaying {
+        crate::dbus::NowPlaying {
+            bus_name: "gallery".into(), app: "Firefox".into(), playing, artist: "Nils Frahm".into(),
+            title: "Says".into(), art_url: String::new(), track_id: "gallery".into(), length: 534.0,
+        }
+    }
+
+    fn gallery_island() -> Island {
+        let mut island = Island::new(Config::default());
+        island.clock = "Mon Oct 5  9:41 AM".into();
+        island.sync(10.0);
+        island
+    }
+
+    /// Every inner surface, settled, at the display's 1.5 scale:
+    /// `ISLAND_GALLERY=1 cargo test gallery -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "writes target/gallery/*.png; set ISLAND_GALLERY=1"]
+    fn gallery() {
+        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
+        use crate::network::{Device, Kind};
+        let device = |id: &str, name: &str, paired: bool, security: &str, signal: u8, icon: &str| Device {
+            id: id.into(), name: name.into(), interface: "wlan0".into(), profile: None, connected: false,
+            paired, security: security.into(), signal, battery: None, icon: icon.into(),
+        };
+
+        let mut island = gallery_island();
+        island.song = Some(Song { now: gallery_song(true), position: 141.0, position_at: 10.0 });
+        island.reveal.set_at(1.0, 10.0);
+        island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
+        gallery_shot("01-compact-music", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        island.open_quick_menu(10.0);
+        gallery_shot("02-quick-menu", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        island.timer_command("menu", 10.0).unwrap();
+        gallery_shot("03-timer-menu", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        island.timer_command("25m", 10.0).unwrap();
+        island.timer_command("menu", 10.0).unwrap();
+        gallery_shot("04-timer-running-menu", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        island.timer_command("25m", 10.0).unwrap();
+        gallery_shot("05-timer-compact", &mut island, 10.0);
+
+        let wifi = || vec![
+            Device { connected: true, ..device("home", "Home Wi-Fi", true, "WPA2", 82, "") },
+            device("studio", "Studio · 5 GHz", true, "WPA3", 64, ""),
+            device("guest", "Guest", false, "", 40, ""),
+            device("long", "Neighbourhood network with a long name", false, "WPA2", 22, ""),
+        ];
+        let mut island = gallery_island();
+        island.network_panel = Some(crate::connections::Panel::preview(Kind::Wifi, wifi(), None, 10.0));
+        island.live_activity(activity::Event::WifiOpen, 10.0);
+        gallery_shot("06-wifi", &mut island, 10.0);
+        if let Some(panel) = island.network_panel.as_mut() { panel.pointer(200.0, 120.0 + 52.0 + 20.0, 12.0); }
+        gallery_shot("06b-wifi-hover", &mut island, 12.0);
+
+        let mut island = gallery_island();
+        island.network_panel = Some(crate::connections::Panel::preview(Kind::Wifi, wifi(), Some(1), 10.0));
+        island.live_activity(activity::Event::WifiOpen, 10.0);
+        gallery_shot("07-wifi-password", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        let bt = vec![
+            Device { connected: true, battery: Some(84), ..device("a", "AirPods Pro", true, "", 0, "audio-headphones") },
+            device("k", "Magic Keyboard", true, "", 0, "input-keyboard"),
+            device("m", "MX Master 3S", true, "", 0, "input-mouse"),
+        ];
+        island.network_panel = Some(crate::connections::Panel::preview(Kind::Bluetooth, bt, None, 10.0));
+        island.live_activity(activity::Event::BluetoothOpen, 10.0);
+        gallery_shot("08-bluetooth", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        for (n, (app, summary, body)) in [
+            ("Telegram", "Alice", "Are we still on for tonight? I booked the table for eight."),
+            ("Telegram", "Bob", "Sent you the photos"),
+            ("Firefox", "Download complete", "island-shell.tar.gz"),
+            ("notify-send", "Backup finished", "412 files, 1.2 GB"),
+        ].into_iter().enumerate() {
+            let mut note = crate::notify::fabricate(app, summary, body);
+            note.id = n as u32 + 1;
+            island.center.upsert(note, 5.0 + n as f64);
+        }
+        island.open_notification_center(10.0);
+        gallery_shot("09-notification-center", &mut island, 10.0);
+        island.center.click(90.0, menu_style_top() + 12.0, 13.0);
+        gallery_shot("09b-notification-detail", &mut island, 13.0);
+
+        let mut island = gallery_island();
+        island.notify(crate::notify::fabricate("Telegram", "Alice", "Are we still on for tonight? I booked the table for eight, and the place is near the river."), 10.0);
+        gallery_shot("10-notification", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        island.song = Some(Song { now: gallery_song(true), position: 141.0, position_at: 10.0 });
+        island.reveal.set_at(1.0, 10.0);
+        island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
+        let renderer = Renderer::new(1.5);
+        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let ctx = Context::new(&scratch).unwrap();
+        ctx.scale(1.5, 1.5);
+        island.draw(&ctx, &renderer, 490.0, 10.1);
+        let eq = island.eq_rect.unwrap();
+        island.hovered = true;
+        island.set_eq_hover(eq.x + eq.w / 2.0, eq.y + 10.0, 10.2);
+        gallery_shot("11-player", &mut island, 10.2);
+
+        let mut island = gallery_island();
+        island.set_player(Some(&gallery_song(true)), 10.0);
+        gallery_shot_after("12-now-playing-toast", &mut island, 10.0, 1.2);
+
+        let mut island = gallery_island();
+        island.live_activity(activity::Event::Slider { kind: activity::SliderKind::Volume, value: 0.65, muted: false }, 10.0);
+        gallery_shot_after("13-volume", &mut island, 10.0, 0.9);
+
+        let mut island = gallery_island();
+        island.live_activity(activity::Event::Charging { percent: 72 }, 10.0);
+        gallery_shot("14-charging", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        let ready = std::time::Instant::now();
+        while island.catalog.apps.is_empty() && ready.elapsed().as_secs() < 5 {
+            island.drain_assets(9.0, 1.5);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        island.toggle_launcher(10.0);
+        for _ in 0..200 {
+            island.drain_assets(10.0, 1.5);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        gallery_shot("15-launcher", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        let editor = Editor {
+            server: "gallery".into(), focused: true, mode: "n".into(), file: "island.rs".into(),
+            dir: "~/it/coding/island-shell/src".into(), lang: "rust".into(), modified: true,
+            line: 1690, col: 9, lines: 3480, percent: 48, encoding: "utf-8".into(), indent: "4 spaces".into(),
+            branch: "main".into(), added: 42, removed: 7, cwd: "~/it/coding/island-shell".into(),
+            buffers: vec![
+                nvim::Buffer { id: 1, name: "island.rs".into(), lang: "rust".into(), modified: true, current: true },
+                nvim::Buffer { id: 2, name: "app.rs".into(), lang: "rust".into(), modified: false, current: false },
+                nvim::Buffer { id: 3, name: "README.md".into(), lang: "markdown".into(), modified: false, current: false },
+            ],
+            ..Editor::default()
+        };
+        island.set_editor(editor, 10.0);
+        island.draw(&ctx, &renderer, 490.0, 10.5);
+        let chip = island.editor_chip_rect.unwrap();
+        island.hovered = true;
+        island.set_editor_chip_hover(chip.x + chip.w / 2.0, chip.y + 10.0, 10.6);
+        gallery_shot("16-editor", &mut island, 10.6);
+
+        let mut island = gallery_island();
+        island.auth_started(10.0);
+        gallery_shot("17-touch-id", &mut island, 10.0);
+    }
+
     #[test]
     fn config_reads_every_key_and_rejects_nonsense() {
         let mut config = Config::default();

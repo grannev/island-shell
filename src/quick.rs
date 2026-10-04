@@ -5,11 +5,21 @@ use crate::island::{Font, Renderer};
 use crate::menu_style;
 
 pub const WIDTH: f64 = 440.0;
-pub const HEIGHT: f64 = 324.0;
-const PAD: f64 = 18.0;
+const PAD: f64 = menu_style::RAIL;
 const GAP: f64 = 10.0;
 const TILE_W: f64 = (WIDTH - PAD * 2.0 - GAP) / 2.0;
-const TILE_H: f64 = 70.0;
+const TILE_H: f64 = 64.0;
+pub const HEIGHT: f64 = menu_style::CONTENT_TOP + 3.0 * TILE_H + 2.0 * GAP + PAD;
+
+/// What the tiles' second lines report.
+#[derive(Clone, Copy, Default)]
+pub struct Status {
+    pub unread: usize,
+    /// Do Not Disturb, eased 0..1
+    pub dnd: f64,
+    /// a countdown's remaining seconds and whether it is running
+    pub timer: Option<(f64, bool)>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -25,11 +35,12 @@ pub enum Action {
 pub const ACTIONS: [Action; 6] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd];
 
 fn tile(i: usize) -> (f64, f64) {
-    (PAD + (i % 2) as f64 * (TILE_W + GAP), 64.0 + (i / 2) as f64 * (TILE_H + GAP))
+    (PAD + (i % 2) as f64 * (TILE_W + GAP), menu_style::CONTENT_TOP + (i / 2) as f64 * (TILE_H + GAP))
 }
 
 pub fn hit(x: f64, y: f64) -> Option<Action> {
-    if (WIDTH - 49.0..WIDTH - 12.0).contains(&x) && (12.0..47.0).contains(&y) {
+    let (cx, cy, size) = menu_style::close_rect(WIDTH);
+    if (cx - 6.0..cx + size + 6.0).contains(&x) && (cy - 6.0..cy + size + 6.0).contains(&y) {
         return Some(Action::Close);
     }
     ACTIONS.iter().enumerate().find_map(|(i, action)| {
@@ -38,22 +49,13 @@ pub fn hit(x: f64, y: f64) -> Option<Action> {
     })
 }
 
-fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    cr.new_path();
-    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
-    cr.close_path();
-}
-
 fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
     cr.save().unwrap();
     cr.translate(x, y);
     cr.scale(scale, scale);
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_join(cairo::LineJoin::Round);
-    cr.set_line_width(2.1);
+    cr.set_line_width(2.2);
     cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
     match action {
         Action::Wifi => {
@@ -113,64 +115,63 @@ fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
     cr.restore().unwrap();
 }
 
-pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 6], close_hover: f64, unread: usize, dnd_level: f64) {
-    let title = renderer.layout(cr, "Быстрый доступ", Font::Text);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.97 * alpha);
-    cr.move_to(renderer.snap(x + 22.0), renderer.snap(y + 18.0));
-    pangocairo::functions::show_layout(cr, &title);
-    menu_style::close(cr, x + WIDTH - 48.0, y + 14.0, 30.0, close_hover, alpha);
+fn clock(seconds: f64) -> String {
+    let s = seconds.ceil().max(0.0) as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
 
+/// The menu: a header and six Control Center-style modules — a round
+/// icon well, a title and a status line.
+#[allow(clippy::too_many_arguments)]
+pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, hover: [f64; 6], close_hover: f64, status: Status) {
+    menu_style::header(cr, renderer, x, y, WIDTH, None, "Быстрый доступ", None, 60.0, alpha);
+    let (cx, cy, size) = menu_style::close_rect(WIDTH);
+    menu_style::close(cr, x + cx, y + cy, size, close_hover, alpha);
+
+    let dnd = status.dnd.clamp(0.0, 1.0);
     for (i, action) in ACTIONS.iter().enumerate() {
         let (tx, ty) = tile(i);
         let (tx, ty) = (x + tx, y + ty);
         let h = hover[i].clamp(0.0, 1.0);
-        let on = if *action == Action::Dnd { dnd_level.clamp(0.0, 1.0) } else { 0.0 };
-        rounded(cr, tx, ty, TILE_W, TILE_H, 17.0);
-        cr.set_source_rgba(0.13 + 0.15 * on, 0.13 + 0.07 * on, 0.14 + 0.28 * on,
-            (0.98 + 0.02 * h) * alpha);
-        let _ = cr.fill();
-        rounded(cr, tx + 0.5, ty + 0.5, TILE_W - 1.0, TILE_H - 1.0, 16.5);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(0.72 + 0.18 * on, 0.70 + 0.06 * on, 0.80 + 0.18 * on,
-            (0.08 + 0.11 * h + 0.25 * on) * alpha);
-        let _ = cr.stroke();
+        menu_style::group(cr, tx, ty, TILE_W, TILE_H, h, alpha);
         let accent = match action {
-            Action::Wifi => (0.11, 0.57, 0.97),
-            Action::Bluetooth => (0.13, 0.48, 0.91),
-            Action::Timer => (0.95, 0.57, 0.12),
-            Action::Launcher => (0.43, 0.43, 0.49),
-            Action::Notifications => (0.38, 0.71, 0.94),
-            Action::Dnd => (0.36 + 0.19 * on, 0.36 + 0.07 * on, 0.40 + 0.51 * on),
+            Action::Wifi | Action::Bluetooth => Some(menu_style::BLUE),
+            Action::Timer => Some(menu_style::ORANGE),
+            Action::Notifications => Some(menu_style::RED),
+            Action::Launcher => None,
+            Action::Dnd => None,
             Action::Close => unreachable!(),
         };
-        rounded(cr, tx + 14.0, ty + 15.0, 40.0, 40.0, 12.0);
-        cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
-        let _ = cr.fill();
-        icon(cr, *action, tx + 34.0, ty + 35.0, alpha, 1.0 + 0.045 * h);
-        let label = match action {
-            Action::Wifi => "Wi-Fi",
-            Action::Bluetooth => "Bluetooth",
-            Action::Timer => "Таймер",
-            Action::Launcher => "Лаунчер",
-            Action::Notifications => "Уведомления",
-            Action::Dnd => "Тишина",
-            Action::Close => unreachable!(),
-        };
-        let layout = renderer.layout(cr, label, Font::Caption);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.87 + 0.13 * h) * alpha);
-        cr.move_to(renderer.snap(tx + 66.0), renderer.snap(ty + 25.0));
-        pangocairo::functions::show_layout(cr, &layout);
-        if *action == Action::Notifications && unread > 0 {
-            let count = renderer.layout(cr, &unread.min(99).to_string(), Font::Small);
-            cr.set_source_rgba(0.46, 0.82, 1.0, alpha);
-            cr.move_to(renderer.snap(tx + TILE_W - 22.0), renderer.snap(ty + 5.0));
-            pangocairo::functions::show_layout(cr, &count);
+        let (wx, wy) = (tx + 14.0 + 18.0, ty + TILE_H / 2.0);
+        menu_style::well(cr, wx, wy, 18.0, accent, alpha);
+        if *action == Action::Dnd && dnd > 0.0 {
+            menu_style::well(cr, wx, wy, 18.0, Some(menu_style::PURPLE), alpha * dnd);
         }
+        icon(cr, *action, wx, wy, alpha, 0.78 + 0.03 * h);
+        let (title, subtitle) = match action {
+            Action::Wifi => ("Wi-Fi", "Сети".to_string()),
+            Action::Bluetooth => ("Bluetooth", "Устройства".to_string()),
+            Action::Timer => ("Таймер", match status.timer {
+                Some((left, true)) => clock(left),
+                Some((left, false)) => format!("Пауза · {}", clock(left)),
+                None => "Выкл.".to_string(),
+            }),
+            Action::Launcher => ("Лаунчер", "Приложения".to_string()),
+            Action::Notifications => ("Уведомления", match status.unread {
+                0 => "Нет новых".to_string(),
+                n => format!("{} новых", n.min(99)),
+            }),
+            Action::Dnd => ("Тишина", if dnd > 0.5 { "Вкл.".to_string() } else { "Выкл.".to_string() }),
+            Action::Close => unreachable!(),
+        };
+        let text_x = tx + 64.0;
+        let text_w = TILE_W - 64.0 - 10.0;
+        let title_h = menu_style::line_height(cr, renderer, Font::Headline);
+        let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+        let top = ty + (TILE_H - title_h - sub_h) / 2.0;
+        menu_style::label(cr, renderer, title, text_x, top, text_w, Font::Headline, alpha);
+        menu_style::label(cr, renderer, &subtitle, text_x, top + title_h, text_w, Font::Subhead, menu_style::SECONDARY * alpha);
     }
-    let hint = renderer.layout(cr, "Esc — закрыть", Font::Small);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.4 * alpha);
-    cr.move_to(renderer.snap(x + 23.0), renderer.snap(y + HEIGHT - 23.0));
-    pangocairo::functions::show_layout(cr, &hint);
 }
 
 #[cfg(test)]

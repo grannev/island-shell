@@ -1,42 +1,70 @@
 # Island interface style
 
-The island has a small visual vocabulary, not a ban on new controls. Match the
-role of an element before matching its appearance. Within one role, use the
-same geometry, surface, border, type treatment and motion in the quick menu
-and every sheet opened from it.
+The island's sheets follow Apple's dark-mode design language: system
+colours, SF Pro text styles, capsule buttons, grouped lists and a circular
+close control. Everything is drawn by `src/menu_style.rs`; match the role of
+an element before matching its appearance, and draw it with that module's
+helper rather than local geometry. New kinds of controls are welcome when
+their interaction differs (a slider, a countdown ring, a swipeable row) —
+give the new family a clear purpose and add its helper to `menu_style.rs`.
 
-## Shared roles
+## Tokens
 
-- **Action buttons:** use `menu_style::button`. Neutral is the default;
-  primary marks the main action, warm is reserved for the timer's chosen
-  duration/resume action, and destructive marks removal. The role determines
-  colour, not the window that happens to contain the button. Use a 1 px soft
-  border, 10 px rounded-rectangle corners, centred ellipsized label, and eased
-  hover. Disabled controls keep their shape and reduce opacity.
-- **Close buttons:** use `menu_style::close` in every menu and sheet. Keep a
-  rounded-square surface with the same 10 px corners as action buttons,
-  identical cross strokes and hover response. Place the
-  drawing inside the existing hit rectangle. The meaning of close (dismiss
-  or return to the quick menu) comes from navigation context, not a new icon.
-- **Navigation tiles:** the quick menu's large icon-and-label cards form a
-  separate family. All tiles share size, layout, radius and hover motion;
-  semantic icon colours and the active Quiet state may differ.
-- **Segmented controls, switches and list-row actions:** these are not action
-  buttons. Keep each family internally consistent across Wi-Fi, Bluetooth
-  and future sheets. State changes should ease rather than snap.
+- **Colours:** `BLUE` #0A84FF (actions, selection, connected state),
+  `GREEN` #30D158, `ORANGE` #FF9F0A (timer), `RED` #FF453A (removal,
+  errors, notifications), `PURPLE` #BF5AF2 (Do Not Disturb), `TEAL`
+  #64D2FF, `GRAY` #636366. Text is white at `PRIMARY` 1.0, `SECONDARY`
+  0.6 or `TERTIARY` 0.3. Cards, tiles and lists use `GROUPED` #1C1C1E on
+  the island's black. No outlines on buttons, cards or tiles.
+- **Type** (`Font`): `Title` Semibold 17 (sheet titles), `Headline`
+  Semibold 15 (row and tile titles), `Body` Regular 15 (list rows, running
+  text), `Subhead` Regular 13 (second lines, status), `Label` Medium 14
+  (buttons, segments), `Footnote` Regular 12 (timestamps, status lines).
+  The compact island keeps its own `Text`/`Caption`/`Small`/`Tiny`.
+- **Geometry:** a 22 px outer rail (`RAIL`); the header row is centred on
+  y = 40 (`HEADER_MID`); content starts at y = 76 (`CONTENT_TOP`); 22 px
+  bottom rail. Grouped lists and cards have 12 px corners, quick-menu tiles
+  16 px, app tiles 25 % of their size.
 
-## Alignment
+## Roles
 
-Wi-Fi, Bluetooth and notification sheets use a 22 px outer content rail:
-headers, tabs, rows, footers and full-width actions start there and end
-22 px before the opposite edge. Header controls share a centreline; adjacent
-controls keep a visible gap. Inset content inside a card uses its own
-consistent padding (18 px in connection prompts). Drawing and hit testing
-must be updated together when a control moves.
+- **Header** (`header`): optional 36 px app tile with a white glyph, title,
+  optional subtitle stacked on the header centre line. Trailing controls
+  (a switch, a small "Очистить" capsule) sit left of the close control and
+  share the centre line.
+- **Close** (`close`, `close_rect`): a 30 px grey circle with an xmark at
+  the header's right end, in every sheet and the launcher. Whether it
+  dismisses or returns to the quick menu comes from navigation context.
+- **Buttons** (`button`): capsules, 34 px (`BUTTON_H`) or 30 px
+  (`SMALL_BUTTON_H`). `Primary` is filled blue for the main action,
+  `Neutral` grey, `Warm` orange-tinted for the timer's chosen duration /
+  resume, `Destructive` red-tinted for removal and cancelling, `Plain`
+  blue text for navigation ("‹ Назад") and inline toggles ("Показать").
+  Disabled controls keep their shape at reduced opacity.
+- **Grouped lists** (`group`, `separator`, `highlight`): one rounded
+  container per list, hairline separators inset to the text column, a
+  rounded wash under the pointer. Leading symbols sit in a round `well`
+  (blue when connected / active). A row shows its state at rest (signal,
+  lock, battery, time) and what a click does only under the pointer.
+- **Cards**: notifications are separate `group` platters, as in
+  Notification Center; time and an unread dot on the right, × on hover.
+- **Quick-menu tiles**: Control Center modules — a round coloured well, a
+  `Headline` title and a `Subhead` status line.
+- **Segmented controls, switches, fields** (`segmented`, `toggle`,
+  `field`): the iOS shapes; focus is a blue ring, selection a grey thumb.
+- **Selection** in the launcher is the solid system blue, as in Spotlight.
 
-New kinds of controls are welcome when their interaction differs (for
-example, a slider, countdown ring or swipeable row). Give the new family a
-clear purpose and apply its style consistently wherever that same purpose
-recurs. Avoid one-off geometry or colour changes between otherwise identical
-controls. Prefer editing a shared drawing helper over patching a single
-window; preserve hit targets and keyboard behaviour while restyling.
+## Copy
+
+Interface text is Russian; product names (Wi-Fi, Bluetooth, Touch ID) and
+the clock format stay as they are. Sheets carry no instruction footers
+("Esc — закрыть"): keyboard behaviour is documented in the README, and a
+status line appears only while there is a status or an error.
+
+## Rules
+
+Within one role use the same geometry, colour, type and motion everywhere.
+Drawing and hit testing must move together; preserve hit targets and
+keyboard behaviour while restyling. Check changes with the gallery:
+`ISLAND_GALLERY=1 cargo test gallery -- --ignored` renders every surface at
+1.5× into `target/gallery/`.

@@ -49,7 +49,7 @@ impl Event {
             Event::Wifi { .. } => (390.0, PILL_H),
             Event::Screenshot { .. } => (390.0, 106.0),
             Event::TimerDone => (270.0, PILL_H),
-            Event::TimerMenu => (390.0, 184.0),
+            Event::TimerMenu => (TIMER_MENU_W, 176.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
     }
@@ -211,7 +211,7 @@ fn spawn_wifi(tx: Sender<Event>) {
                     if next == wifi {
                         continue;
                     }
-                    let ssid = next.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "Disconnected".into());
+                    let ssid = next.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "Отключено".into());
                     let _ = tx.send(Event::Wifi { ssid });
                     wifi = next;
                 }
@@ -322,30 +322,46 @@ pub fn timer_width(cr: &Context, renderer: &Renderer, remaining: f64) -> f64 {
     24.0 + 6.0 + renderer.layout(cr, &text, Font::Small).pixel_extents().1.width() as f64
 }
 
+pub const TIMER_MENU_W: f64 = 390.0;
+
 // The same geometry drives rendering and hit testing.
 pub const TIMER_BUTTONS: [(&str, &str, f64, f64, f64); 7] = [
-    ("5m", "5 мин", 22.0, 72.0, 80.0),
-    ("15m", "15 мин", 111.0, 72.0, 80.0),
-    ("25m", "25 мин", 200.0, 72.0, 80.0),
-    ("50m", "50 мин", 289.0, 72.0, 79.0),
-    ("toggle", "Пауза", 22.0, 122.0, 166.0),
-    ("cancel", "Отменить", 200.0, 122.0, 168.0),
-    ("close", "×", 337.0, 18.0, 31.0),
+    ("5m", "5 мин", 22.0, 76.0, 80.5),
+    ("15m", "15 мин", 110.5, 76.0, 80.5),
+    ("25m", "25 мин", 199.0, 76.0, 80.5),
+    ("50m", "50 мин", 287.5, 76.0, 80.5),
+    ("toggle", "Пауза", 22.0, 120.0, 168.0),
+    ("cancel", "Отменить", 200.0, 120.0, 168.0),
+    ("close", "×", TIMER_MENU_W - 22.0 - 30.0, 25.0, 30.0),
 ];
+
+fn timer_button_h(command: &str) -> f64 {
+    if command == "close" { crate::menu_style::CLOSE_SIZE } else { crate::menu_style::BUTTON_H }
+}
 
 pub fn timer_menu_hit(x: f64, y: f64) -> Option<&'static str> {
     TIMER_BUTTONS.iter().find_map(|(command, _, bx, by, bw)| {
-        (x >= *bx && x <= bx + bw && y >= *by && y <= by + 32.0).then_some(*command)
+        (x >= *bx && x <= bx + bw && y >= *by && y <= by + timer_button_h(command)).then_some(*command)
     })
 }
 
-fn timer_label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, font: Font, alpha: f64) {
-    let layout = renderer.layout(cr, text, font);
+/// The stopwatch glyph of the timer's tile, centred on cx, cy.
+fn stopwatch(cr: &Context, cx: f64, cy: f64, alpha: f64) {
+    cr.new_path();
+    cr.set_line_width(2.0);
+    cr.set_line_cap(cairo::LineCap::Round);
     cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.move_to(renderer.snap(x), renderer.snap(y));
-    pangocairo::functions::show_layout(cr, &layout);
+    cr.arc(cx, cy + 1.5, 9.0, 0.0, std::f64::consts::TAU);
+    let _ = cr.stroke();
+    cr.move_to(cx, cy + 1.5);
+    cr.line_to(cx, cy - 3.5);
+    cr.move_to(cx - 2.5, cy - 10.0);
+    cr.line_to(cx + 2.5, cy - 10.0);
+    let _ = cr.stroke();
+    cr.new_path();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_timer_menu(
     cr: &Context,
     renderer: &Renderer,
@@ -358,59 +374,38 @@ pub fn draw_timer_menu(
     since: f64,
     now: f64,
 ) {
+    use crate::menu_style::{self, ButtonKind};
     let heading_k = smoothstep((now - since) / 0.24);
     let heading_y = (1.0 - heading_k) * 5.0;
-    round_rect(cr, x + 22.0, y + 18.0 + heading_y, 38.0, 38.0, 12.0);
-    cr.set_source_rgba(0.95, 0.57, 0.12, alpha * heading_k);
-    let _ = cr.fill();
-    cr.save().unwrap();
-    cr.set_line_width(1.8);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * heading_k);
-    cr.arc(x + 41.0, y + 38.0 + heading_y, 10.0, 0.0, std::f64::consts::TAU);
-    let _ = cr.stroke();
-    cr.move_to(x + 41.0, y + 38.0 + heading_y);
-    cr.line_to(x + 41.0, y + 32.0 + heading_y);
-    cr.move_to(x + 41.0, y + 38.0 + heading_y);
-    cr.line_to(x + 46.0, y + 41.0 + heading_y);
-    let _ = cr.stroke();
-    cr.restore().unwrap();
-    timer_label(cr, renderer, "Таймер", x + 72.0, y + 17.0 + heading_y, Font::Text, alpha * heading_k);
     let subtitle = match timer {
         Some((remaining, running)) => {
             format!("{} · {}", timer_text(remaining), if running { "идёт отсчёт" } else { "на паузе" })
         }
         None => "Выберите время · Помодоро — 25 мин".into(),
     };
-    timer_label(cr, renderer, &subtitle, x + 72.0, y + 43.0 + heading_y, Font::Small, alpha * 0.55 * heading_k);
+    let glyph = |cr: &Context, cx: f64, cy: f64| stopwatch(cr, cx, cy, 1.0);
+    menu_style::header(cr, renderer, x, y + heading_y, TIMER_MENU_W, Some((menu_style::ORANGE, &glyph)),
+        "Таймер", Some(&subtitle), 60.0, alpha * heading_k);
+    let paused = timer.is_some_and(|(_, running)| !running);
     for (index, (command, label, bx, by, bw)) in TIMER_BUTTONS.into_iter().enumerate() {
         let k = smoothstep((now - since - 0.05 - index as f64 * 0.035) / 0.23);
         let dy = 5.0 * (1.0 - k);
         let enabled = !matches!(command, "toggle" | "cancel") || timer.is_some();
-        let opacity = alpha * (0.3 + 0.7 * enabled_alpha[index]);
+        let opacity = alpha * (0.35 + 0.65 * enabled_alpha[index]);
         let lit = if enabled { hover[index].clamp(0.0, 1.0) } else { 0.0 };
         if command == "close" {
-            crate::menu_style::close(cr, x + bx, y + by + dy, bw, lit, opacity * k);
+            menu_style::close(cr, x + bx, y + by + dy, bw, lit, opacity * k);
             continue;
         }
-        let label = if command == "toggle" && timer.is_some_and(|(_, running)| !running) {
-            "Продолжить"
-        } else {
-            label
+        let label = if command == "toggle" && paused { "Продолжить" } else { label };
+        let kind = match command {
+            "25m" => ButtonKind::Warm,
+            "toggle" if paused => ButtonKind::Warm,
+            "cancel" if timer.is_some() => ButtonKind::Destructive,
+            _ => ButtonKind::Neutral,
         };
-        let accent = command == "25m" || command == "toggle" && timer.is_some_and(|(_, running)| !running);
-        let kind = if accent { crate::menu_style::ButtonKind::Warm } else { crate::menu_style::ButtonKind::Neutral };
-        crate::menu_style::button(cr, renderer, label, (x + bx, y + by + dy, bw, 32.0), Font::Small, kind, lit, opacity * k);
+        menu_style::button(cr, renderer, label, (x + bx, y + by + dy, bw, timer_button_h(command)), kind, lit, opacity * k);
     }
-    timer_label(
-        cr,
-        renderer,
-        "Кольцо — пауза · правый клик — меню · Esc — закрыть",
-        x + 22.0,
-        y + 163.0,
-        Font::Tiny,
-        alpha * heading_k * 0.45,
-    );
 }
 
 pub fn draw_timer(
@@ -490,9 +485,9 @@ pub fn draw_pill(
     match event {
         Event::Slider { kind, muted, value: target } => {
             let label = match kind {
-                SliderKind::Volume if *muted => "Muted",
-                SliderKind::Volume => "Volume",
-                SliderKind::Brightness => "Brightness",
+                SliderKind::Volume if *muted => "Без звука",
+                SliderKind::Volume => "Громкость",
+                SliderKind::Brightness => "Яркость",
             };
             draw_osd_symbol(cr, renderer, kind, x0 + 35.0, y0 + 29.0, enter, *muted, *target);
             let title = renderer.layout(cr, label, Font::Caption);
@@ -520,12 +515,12 @@ pub fn draw_pill(
             draw_two_lines(
                 cr,
                 renderer,
-                "Charging",
-                &format!("{percent}% charged"),
+                "Зарядка",
+                &format!("Заряжено {percent}%"),
                 x0 + 91.0,
                 cy,
                 enter,
-                (0.20, 0.78, 0.35),
+                crate::menu_style::GREEN,
             );
         }
         Event::BatteryLow { percent } => {
@@ -533,22 +528,22 @@ pub fn draw_pill(
             draw_two_lines(
                 cr,
                 renderer,
-                "Low Battery",
-                &format!("{percent}% remaining"),
+                "Низкий заряд",
+                &format!("Осталось {percent}%"),
                 x0 + 91.0,
                 cy,
                 enter,
-                (1.0, 0.34, 0.30),
+                crate::menu_style::RED,
             );
         }
         Event::Bluetooth { name, battery } => {
             draw_headphones(cr, x0 + 49.0, cy, enter);
-            let detail = battery.map_or_else(|| "Connected".to_string(), |p| format!("Connected · {p}%"));
-            draw_two_lines(cr, renderer, name, &detail, x0 + 88.0, cy, enter, (0.38, 0.72, 1.0));
+            let detail = battery.map_or_else(|| "Подключено".to_string(), |p| format!("Подключено · {p}%"));
+            draw_two_lines(cr, renderer, name, &detail, x0 + 88.0, cy, enter, crate::menu_style::BLUE);
         }
         Event::Wifi { ssid } => {
             draw_wifi(cr, x0 + 48.0, cy, enter);
-            draw_two_lines(cr, renderer, "Wi-Fi", ssid, x0 + 88.0, cy, enter, (0.40, 0.85, 1.0));
+            draw_two_lines(cr, renderer, "Wi-Fi", ssid, x0 + 88.0, cy, enter, crate::menu_style::TEAL);
         }
         Event::Screenshot { path } => {
             let size = 68.0;
@@ -571,12 +566,12 @@ pub fn draw_pill(
                 let _ = cr.paint();
             }
             cr.restore().unwrap();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Screenshot");
-            draw_two_lines(cr, renderer, "Screenshot saved", name, x0 + 104.0, cy, enter, (0.40, 0.85, 1.0));
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Снимок экрана");
+            draw_two_lines(cr, renderer, "Снимок сохранён", name, x0 + 104.0, cy, enter, crate::menu_style::TEAL);
         }
         Event::TimerDone => {
             draw_clock(cr, x0 + 50.0, cy, enter);
-            draw_two_lines(cr, renderer, "Timer", "Time is up", x0 + 90.0, cy, enter, (1.0, 0.62, 0.12));
+            draw_two_lines(cr, renderer, "Таймер", "Время вышло", x0 + 90.0, cy, enter, crate::menu_style::ORANGE);
         }
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}

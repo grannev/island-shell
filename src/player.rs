@@ -344,7 +344,7 @@ pub fn draw_toast(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: 
     let text_x = x + TOAST_PAD + TOAST_ART + 16.0;
     let text_w = (x + w - TOAST_PAD - bars_w - 14.0) - text_x;
     let (ta, to) = stage(0.06);
-    let label = renderer.layout_ellipsized(cr, &format!("{} · Now Playing", view.app), Font::Caption, text_w, 1);
+    let label = renderer.layout_ellipsized(cr, &format!("{} · Сейчас играет", view.app), Font::Caption, text_w, 1);
     let title = renderer.layout_ellipsized(
         cr,
         &if view.artist.is_empty() { view.title.to_string() } else { format!("{} — {}", view.title, view.artist) },
@@ -369,7 +369,7 @@ pub fn draw_toast(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: 
 
 /// The width a toast needs for this track.
 pub fn toast_width(cr: &Context, renderer: &Renderer, view: &View) -> f64 {
-    let label = renderer.layout_ellipsized(cr, &format!("{} · Now Playing", view.app), Font::Caption, TOAST_MAX_TEXT, 1);
+    let label = renderer.layout_ellipsized(cr, &format!("{} · Сейчас играет", view.app), Font::Caption, TOAST_MAX_TEXT, 1);
     let title = renderer.layout_ellipsized(
         cr,
         &if view.artist.is_empty() { view.title.to_string() } else { format!("{} — {}", view.title, view.artist) },

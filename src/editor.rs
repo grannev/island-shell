@@ -12,18 +12,18 @@ use crate::island::{Font, Renderer, smoothstep};
 use crate::nvim::{Diagnostics, Editor};
 
 pub const PANEL_W: f64 = 470.0;
-pub const PANEL_H: f64 = 238.0;
+pub const PANEL_H: f64 = BUTTON_Y + crate::menu_style::SMALL_BUTTON_H + PAD;
 pub const PANEL_R: f64 = 30.0;
 
 const PAD: f64 = 22.0;
-const ICON: f64 = 44.0;
-const ICON_R: f64 = 11.0;
-const STATS_Y: f64 = 88.0;
-const LIST_TOP: f64 = 112.0;
-const ROW_H: f64 = 30.0;
+const ICON: f64 = crate::menu_style::TILE;
+const ICON_R: f64 = 9.0;
+const STATS_Y: f64 = 86.0;
+const LIST_TOP: f64 = 106.0;
+const ROW_H: f64 = 34.0;
 pub const MAX_BUFFERS: usize = 3;
-const BUTTON_Y: f64 = 208.0;
-const BUTTON_GAP: f64 = 96.0;
+const BUTTON_Y: f64 = LIST_TOP + ROW_H * MAX_BUFFERS as f64 + 12.0;
+const BUTTON_GAP: f64 = 8.0;
 
 /// The chip's own metrics, in the line's coordinates.
 const CHIP_H: f64 = 19.0;
@@ -204,20 +204,21 @@ fn save_flash(cr: &Context, x: f64, y: f64, w: f64, t: f64, alpha: f64) {
     cr.restore().unwrap();
 }
 
-/// Where the buttons sit, relative to the panel's top-left corner.
-fn button_centres(w: f64) -> [(Action, f64, f64); 3] {
-    let cx = w / 2.0;
+/// Where the buttons sit (x, y, w), relative to the panel's top-left corner:
+/// three equal capsules across the content rail.
+fn buttons(w: f64) -> [(Action, f64, f64, f64); 3] {
+    let bw = (w - 2.0 * PAD - 2.0 * BUTTON_GAP) / 3.0;
     [
-        (Action::Save, cx - BUTTON_GAP, BUTTON_Y),
-        (Action::Format, cx, BUTTON_Y),
-        (Action::CloseBuffer, cx + BUTTON_GAP, BUTTON_Y),
+        (Action::Save, PAD, BUTTON_Y, bw),
+        (Action::Format, PAD + bw + BUTTON_GAP, BUTTON_Y, bw),
+        (Action::CloseBuffer, PAD + 2.0 * (bw + BUTTON_GAP), BUTTON_Y, bw),
     ]
 }
 
 /// Hit test in the panel's own coordinates.
 pub fn hit(editor: &Editor, w: f64, x: f64, y: f64, diagnostic_view: bool) -> Option<Action> {
-    for (action, bx, by) in button_centres(w) {
-        if (x - bx).abs() <= 34.0 && (y - by).abs() <= 20.0 {
+    for (action, bx, by, bw) in buttons(w) {
+        if x >= bx && x <= bx + bw && y >= by - 3.0 && y <= by + crate::menu_style::SMALL_BUTTON_H + 3.0 {
             return Some(action);
         }
     }
@@ -266,32 +267,30 @@ pub fn draw(
         (alpha * k, 8.0 * (1.0 - k))
     };
 
-    // the file card: a tile in the language's colour with its initials
+    use crate::menu_style::{self, ButtonKind};
+    // the header: a tile in the language's colour with its initials, the
+    // file and where it lives
     let (ha, ho) = stage(0.0);
     let icon_x = x + PAD;
-    let icon_y = y + PAD + ho;
+    let icon_y = y + menu_style::HEADER_MID - ICON / 2.0 + ho;
     language_tile(cr, renderer, &editor.lang, icon_x, icon_y, ICON, ha);
-
-    let text_x = renderer.snap(icon_x + ICON + 14.0);
+    let text_x = icon_x + ICON + 12.0;
     let text_w = w - (text_x - x) - PAD;
     let name = if editor.file.is_empty() { "[No Name]".to_string() } else { editor.file.clone() };
-    let title = renderer.layout_ellipsized(cr, &name, Font::Text, text_w - 40.0, 1);
-    let (_, t_ext) = title.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, ha);
-    cr.move_to(text_x + ho, renderer.snap(y + PAD + 2.0 - t_ext.y() as f64));
-    pangocairo::functions::show_layout(cr, &title);
+    let title_h = menu_style::line_height(cr, renderer, Font::Title);
+    let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+    let top = y + menu_style::HEADER_MID - (title_h + sub_h) / 2.0 + ho;
+    let title = renderer.layout_ellipsized(cr, &name, Font::Title, text_w - 24.0, 1);
+    let title_w = title.pixel_extents().1.width() as f64;
+    menu_style::label(cr, renderer, &name, text_x, top, text_w - 24.0, Font::Title, ha);
     if editor.modified {
         let (r, g, b) = editor.mode().colour();
         cr.new_path();
-        cr.arc(text_x + t_ext.width() as f64 + 10.0, y + PAD + 2.0 + t_ext.height() as f64 / 2.0, 3.0, 0.0, 2.0 * PI);
+        cr.arc(text_x + title_w + 10.0, top + title_h / 2.0, 3.5, 0.0, 2.0 * PI);
         cr.set_source_rgba(r, g, b, ha);
         let _ = cr.fill();
     }
-    let dir = renderer.layout_ellipsized(cr, &editor.dir, Font::Small, text_w, 1);
-    let (_, d_ext) = dir.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.45 * ha);
-    cr.move_to(text_x + ho, renderer.snap(y + PAD + 2.0 + t_ext.height() as f64 + 2.0 - d_ext.y() as f64));
-    pangocairo::functions::show_layout(cr, &dir);
+    menu_style::label(cr, renderer, &editor.dir, text_x, top + title_h, text_w, Font::Subhead, menu_style::SECONDARY * ha);
 
     // the stats line: mode, position, git, diagnostics
     let (sa, so) = stage(0.06);
@@ -299,15 +298,14 @@ pub fn draw(
     let (mr, mg, mb) = mode.colour();
     let mut sx = x + PAD;
     let sy = y + STATS_Y + so;
-    let mode_label = renderer.layout(cr, mode.name(), Font::Tiny);
+    let mode_label = renderer.layout(cr, mode.name(), Font::Footnote);
     let (_, m_ext) = mode_label.pixel_extents();
-    capsule(cr, sx, sy - 9.0, m_ext.width() as f64 + 16.0, 18.0, 9.0);
-    cr.set_source_rgba(mr, mg, mb, 0.20 * sa);
+    let mode_w = m_ext.width() as f64 + 16.0;
+    capsule(cr, sx, sy - 10.0, mode_w, 20.0, 10.0);
+    cr.set_source_rgba(mr, mg, mb, 0.22 * sa);
     let _ = cr.fill();
-    cr.set_source_rgba(mr, mg, mb, sa);
-    cr.move_to(renderer.snap(sx + 8.0), renderer.snap(sy - m_ext.height() as f64 / 2.0 - m_ext.y() as f64));
-    pangocairo::functions::show_layout(cr, &mode_label);
-    sx += m_ext.width() as f64 + 16.0 + 14.0;
+    menu_style::centred(cr, renderer, mode.name(), (sx, sy - 10.0, mode_w, 20.0), Font::Footnote, (mr, mg, mb), sa);
+    sx += mode_w + 12.0;
 
     // "Top" and "End" read better than 0% and 100%, as in Vim's ruler
     let place = if editor.line <= 1 {
@@ -318,21 +316,17 @@ pub fn draw(
         format!("{}%", editor.percent)
     };
     let position = format!("{}:{}  ·  {}  ·  {}", editor.line, editor.col, place, editor.indent);
-    let layout = renderer.layout_ellipsized(cr, &position, Font::Tiny, w * 0.4, 1);
-    let (_, p_ext) = layout.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.55 * sa);
-    cr.move_to(renderer.snap(sx), renderer.snap(sy - p_ext.height() as f64 / 2.0 - p_ext.y() as f64));
-    pangocairo::functions::show_layout(cr, &layout);
+    let foot_h = menu_style::line_height(cr, renderer, Font::Subhead);
+    menu_style::label(cr, renderer, &position, sx, sy - foot_h / 2.0, w * 0.42, Font::Subhead, menu_style::SECONDARY * sa);
 
     // diagnostics on the right of the same line, clickable
     let mut rx = x + w - PAD;
     if diagnostic_view {
-        let layout = renderer.layout(cr, "‹ Buffers", Font::Tiny);
-        let (_, ext) = layout.pixel_extents();
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.7 * sa);
-        cr.move_to(renderer.snap(rx - ext.width() as f64), renderer.snap(sy - ext.height() as f64 / 2.0 - ext.y() as f64));
-        pangocairo::functions::show_layout(cr, &layout);
-        rx -= ext.width() as f64 + 12.0;
+        let back = "Буферы";
+        let bw = renderer.layout(cr, back, Font::Subhead).pixel_extents().1.width() as f64;
+        menu_style::text(cr, renderer, back, rx - bw, sy - foot_h / 2.0, bw + 2.0, Font::Subhead, menu_style::BLUE, sa);
+        menu_style::chevron(cr, rx - bw - 9.0, sy, 4.5, PI, sa * 0.9);
+        rx -= bw + 24.0;
     } else if editor.diagnostics.any() {
         let lit = hovered == Some(Action::Diagnostics);
         rx = draw_diagnostics(cr, renderer, &editor.diagnostics, rx, sy, sa * if lit { 1.0 } else { 0.85 });
@@ -343,92 +337,91 @@ pub fn draw(
         } else {
             editor.branch.clone()
         };
-        let layout = renderer.layout_ellipsized(cr, &text, Font::Tiny, w * 0.35, 1);
-        let (_, e) = layout.pixel_extents();
-        let bx = rx - e.width() as f64 - 14.0;
-        cr.set_source_rgba(GIT_ADD.0, GIT_ADD.1, GIT_ADD.2, 0.85 * sa);
-        cr.move_to(renderer.snap(bx), renderer.snap(sy - e.height() as f64 / 2.0 - e.y() as f64));
-        pangocairo::functions::show_layout(cr, &layout);
+        let layout = renderer.layout_ellipsized(cr, &text, Font::Subhead, w * 0.35, 1);
+        let bw = layout.pixel_extents().1.width() as f64;
+        menu_style::text(cr, renderer, &text, rx - bw - 12.0, sy - foot_h / 2.0, bw + 2.0, Font::Subhead, menu_style::GREEN, 0.9 * sa);
     }
 
+    // the list: buffers, or this file's problems — one grouped list
+    let (la, lo) = stage(0.1);
+    let list_h = ROW_H * MAX_BUFFERS as f64;
+    menu_style::group(cr, x + PAD, y + LIST_TOP + lo, w - 2.0 * PAD, list_h, 0.0, la);
+    let body_h = menu_style::line_height(cr, renderer, Font::Body);
     if diagnostic_view {
         for (i, d) in editor.diagnostic_items.iter().take(MAX_BUFFERS).enumerate() {
-            let ry = y + LIST_TOP + ROW_H * i as f64;
-            if hovered == Some(Action::Diagnostic(i)) {
-                capsule(cr, x + PAD - 8.0, ry, w - 2.0 * PAD + 16.0, ROW_H - 2.0, 8.0);
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha);
-                let _ = cr.fill();
+            let ry = y + LIST_TOP + ROW_H * i as f64 + lo;
+            if i > 0 {
+                menu_style::separator(cr, renderer, x + PAD + 30.0, x + w - PAD, ry, la);
             }
+            menu_style::highlight(cr, x + PAD, ry, w - 2.0 * PAD, ROW_H, f64::from(hovered == Some(Action::Diagnostic(i))), la);
             let colour = match d.severity { 1 => ERROR_COLOR, 2 => WARN_COLOR, _ => INFO_COLOR };
-            let text = format!("{}:{}  {}", d.line, d.col, d.message);
-            let layout = renderer.layout_ellipsized(cr, &text, Font::Small, w - 2.0 * PAD, 1);
-            let (_, ext) = layout.pixel_extents();
-            cr.set_source_rgba(colour.0, colour.1, colour.2, alpha * 0.9);
-            cr.move_to(renderer.snap(x + PAD), renderer.snap(ry + (ROW_H - ext.height() as f64) / 2.0 - ext.y() as f64));
-            pangocairo::functions::show_layout(cr, &layout);
+            cr.new_path();
+            cr.arc(x + PAD + 15.0, ry + ROW_H / 2.0, 3.5, 0.0, 2.0 * PI);
+            cr.set_source_rgba(colour.0, colour.1, colour.2, la);
+            let _ = cr.fill();
+            let place = format!("{}:{}", d.line, d.col);
+            let pw = renderer.layout(cr, &place, Font::Subhead).pixel_extents().1.width() as f64;
+            menu_style::label(cr, renderer, &place, x + w - PAD - 12.0 - pw, ry + (ROW_H - foot_h) / 2.0, pw + 2.0,
+                Font::Subhead, menu_style::SECONDARY * la);
+            menu_style::label(cr, renderer, &d.message, x + PAD + 30.0, ry + (ROW_H - body_h) / 2.0,
+                w - 2.0 * PAD - 54.0 - pw, Font::Body, la);
         }
         if editor.diagnostic_items.is_empty() {
-            let layout = renderer.layout(cr, "No problems in this file", Font::Small);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * alpha);
-            cr.move_to(x + PAD, y + LIST_TOP + 12.0);
-            pangocairo::functions::show_layout(cr, &layout);
+            menu_style::centred(cr, renderer, "Проблем нет", (x + PAD, y + LIST_TOP + lo, w - 2.0 * PAD, list_h),
+                Font::Body, (1.0, 1.0, 1.0), menu_style::SECONDARY * la);
         }
     } else {
-    // the buffer list
-    for (i, buffer) in editor.buffers.iter().take(MAX_BUFFERS).enumerate() {
-        let (ba, bo) = stage(0.1 + 0.04 * i as f64);
-        let ry = y + LIST_TOP + ROW_H * i as f64 + bo;
-        let lit = hovered == Some(Action::Buffer(buffer.id));
-        if buffer.current || lit {
-            capsule(cr, x + PAD - 8.0, ry + 1.0, w - 2.0 * (PAD - 8.0), ROW_H - 4.0, 9.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, if lit { 0.12 } else { 0.07 } * ba);
-            let _ = cr.fill();
+        for (i, buffer) in editor.buffers.iter().take(MAX_BUFFERS).enumerate() {
+            let (ba, bo) = stage(0.1 + 0.04 * i as f64);
+            let ry = y + LIST_TOP + ROW_H * i as f64 + bo;
+            if i > 0 {
+                menu_style::separator(cr, renderer, x + PAD + 14.0, x + w - PAD, ry, ba);
+            }
+            menu_style::highlight(cr, x + PAD, ry, w - 2.0 * PAD, ROW_H, f64::from(hovered == Some(Action::Buffer(buffer.id))), ba);
+            let room = w - 2.0 * PAD - 28.0 - 30.0;
+            let layout = renderer.layout_ellipsized(cr, &buffer.name, Font::Body, room, 1);
+            let nw = layout.pixel_extents().1.width() as f64;
+            menu_style::label(cr, renderer, &buffer.name, x + PAD + 14.0, ry + (ROW_H - body_h) / 2.0, room, Font::Body,
+                if buffer.current { 1.0 } else { 0.85 } * ba);
+            if buffer.modified {
+                cr.new_path();
+                cr.arc(x + PAD + 14.0 + nw + 9.0, ry + ROW_H / 2.0, 3.0, 0.0, 2.0 * PI);
+                cr.set_source_rgba(1.0, 1.0, 1.0, menu_style::SECONDARY * ba);
+                let _ = cr.fill();
+            }
+            if buffer.current {
+                // the iOS selection mark, in the mode's colour
+                let (cx, cy) = (x + w - PAD - 22.0, ry + ROW_H / 2.0);
+                cr.new_path();
+                cr.move_to(cx - 5.5, cy + 0.5);
+                cr.line_to(cx - 1.5, cy + 4.5);
+                cr.line_to(cx + 6.0, cy - 4.5);
+                cr.set_line_width(2.2);
+                cr.set_line_cap(cairo::LineCap::Round);
+                cr.set_line_join(cairo::LineJoin::Round);
+                cr.set_source_rgba(mr, mg, mb, ba);
+                let _ = cr.stroke();
+            }
         }
-        let mark = renderer.layout(cr, if buffer.current { "▸" } else { " " }, Font::Tiny);
-        let (_, k_ext) = mark.pixel_extents();
-        cr.set_source_rgba(mr, mg, mb, ba);
-        cr.move_to(renderer.snap(x + PAD), renderer.snap(ry + (ROW_H - k_ext.height() as f64) / 2.0 - k_ext.y() as f64));
-        pangocairo::functions::show_layout(cr, &mark);
-        let label = renderer.layout_ellipsized(cr, &buffer.name, Font::Small, w - 2.0 * PAD - 60.0, 1);
-        let (_, l_ext) = label.pixel_extents();
-        cr.set_source_rgba(1.0, 1.0, 1.0, if buffer.current { 0.95 } else { 0.6 } * ba);
-        cr.move_to(renderer.snap(x + PAD + 18.0), renderer.snap(ry + (ROW_H - l_ext.height() as f64) / 2.0 - l_ext.y() as f64));
-        pangocairo::functions::show_layout(cr, &label);
-        if buffer.modified {
-            cr.new_path();
-            cr.arc(x + PAD + 18.0 + l_ext.width() as f64 + 9.0, ry + ROW_H / 2.0, 2.6, 0.0, 2.0 * PI);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * ba);
-            let _ = cr.fill();
-        }
-    }
-
     }
 
     // the buttons
     let (ca, co) = stage(0.16);
-    for (action, bx, by) in button_centres(w) {
+    for (action, bx, by, bw) in buttons(w) {
         let lit = hovered == Some(action);
         let squish = match pressed {
-            Some((a, since)) if a == action => 1.0 - 0.14 * (-(now - since) / 0.12).exp(),
+            Some((a, since)) if a == action => 1.0 - 0.06 * (-(now - since) / 0.12).exp(),
             _ => 1.0,
         };
-        let label = match action {
-            Action::Save => "Save",
-            Action::Format => "Format",
-            _ => "Close",
+        let (label, kind) = match action {
+            Action::Save => ("Сохранить", if editor.modified { ButtonKind::Primary } else { ButtonKind::Neutral }),
+            Action::Format => ("Формат", ButtonKind::Neutral),
+            _ => ("Закрыть", ButtonKind::Neutral),
         };
-        let layout = renderer.layout(cr, label, Font::Tiny);
-        let (_, e) = layout.pixel_extents();
-        let bw = (e.width() as f64 + 34.0) * squish;
-        capsule(cr, x + bx - bw / 2.0, y + by - 13.0 * squish + co, bw, 26.0 * squish, 13.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (if lit { 0.16 } else { 0.08 }) * ca);
-        let _ = cr.fill();
-        cr.set_source_rgba(1.0, 1.0, 1.0, (if lit { 1.0 } else { 0.8 }) * ca);
-        cr.move_to(
-            renderer.snap(x + bx - e.width() as f64 / 2.0),
-            renderer.snap(y + by - e.height() as f64 / 2.0 - e.y() as f64 + co),
-        );
-        pangocairo::functions::show_layout(cr, &layout);
+        let h = menu_style::SMALL_BUTTON_H;
+        let (sw, sh) = (bw * squish, h * squish);
+        menu_style::button(cr, renderer, label, (x + bx + (bw - sw) / 2.0, y + by + (h - sh) / 2.0 + co, sw, sh),
+            kind, f64::from(lit), ca);
     }
 }
 
@@ -439,7 +432,7 @@ fn draw_diagnostics(cr: &Context, renderer: &Renderer, d: &Diagnostics, right: f
         if count == 0 {
             continue;
         }
-        let layout = renderer.layout(cr, &count.to_string(), Font::Tiny);
+        let layout = renderer.layout(cr, &count.to_string(), Font::Subhead);
         let (_, e) = layout.pixel_extents();
         x -= e.width() as f64;
         cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
@@ -494,7 +487,7 @@ fn language_tile(cr: &Context, renderer: &Renderer, lang: &str, x: f64, y: f64, 
     } else {
         initials.chars().take(2).collect::<String>().to_uppercase()
     };
-    let layout = renderer.layout(cr, &text, Font::Tiny);
+    let layout = renderer.layout(cr, &text, if text.chars().count() > 2 { Font::Tiny } else { Font::Label });
     let (_, e) = layout.pixel_extents();
     cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
     cr.move_to(

@@ -2,6 +2,7 @@
 
 use crate::anim::{Spring, Time};
 use crate::island::{Font, Renderer, smoothstep};
+use crate::menu_style::{self, ButtonKind, RAIL};
 use crate::network::{self, Action, Device, Input, Kind, Message, Snapshot, Update};
 use cairo::Context;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
@@ -12,10 +13,20 @@ use std::sync::{
 };
 
 pub const WIDTH: f64 = 480.0;
-pub const HEIGHT: f64 = 482.0;
-const LIST_Y: f64 = 132.0;
+const TABS_Y: f64 = menu_style::CONTENT_TOP;
+const TABS_H: f64 = 32.0;
+const LIST_Y: f64 = TABS_Y + TABS_H + 12.0;
 const ROW_H: f64 = 52.0;
 const VISIBLE: usize = 5;
+/// below the list: a status line, the search button and the bottom rail
+const FOOTER: f64 = 24.0 + menu_style::BUTTON_H + RAIL;
+pub const HEIGHT: f64 = LIST_Y + VISIBLE as f64 * ROW_H + FOOTER;
+const PROMPT_Y: f64 = menu_style::CONTENT_TOP;
+const PROMPT_FIELD_Y: f64 = PROMPT_Y + 84.0;
+const PROMPT_BUTTONS_Y: f64 = PROMPT_FIELD_Y + 40.0 + 22.0;
+const PROMPT_H: f64 = PROMPT_BUTTONS_Y + menu_style::BUTTON_H + 18.0 - PROMPT_Y;
+const TOGGLE_X: f64 = WIDTH - RAIL - menu_style::CLOSE_SIZE - 12.0 - 46.0;
+const INNER: f64 = WIDTH - 2.0 * RAIL;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Hit {
@@ -79,6 +90,24 @@ impl Panel {
     pub fn new(kind: Kind, session: u64, tx: Sender<Message>, now: Time) -> Self {
         let mut panel = Self::idle(kind, session, tx, now);
         panel.start(Action::Refresh, now);
+        panel
+    }
+
+    /// A settled sheet with fixed devices and no background work (gallery).
+    #[cfg(test)]
+    pub(crate) fn preview(kind: Kind, devices: Vec<Device>, prompt: Option<usize>, now: Time) -> Self {
+        let (tx, _) = smithay_client_toolkit::reexports::calloop::channel::channel();
+        let mut panel = Self::idle(kind, 1, tx, now);
+        panel.set_snapshot(Snapshot { powered: true, devices }, now);
+        panel.power.set(1.0, now);
+        if let Some(index) = prompt {
+            panel.prompt = Some(match kind {
+                Kind::Wifi => Prompt::Wifi(panel.snapshot.devices[index].clone()),
+                Kind::Bluetooth => Prompt::Wifi(panel.snapshot.devices[index].clone()),
+            });
+            panel.prompt_since = now;
+            panel.input = "password".into();
+        }
         panel
     }
 
@@ -148,7 +177,15 @@ impl Panel {
     }
 
     pub fn height(&self) -> f64 {
-        if self.prompt.is_some() { 420.0 } else { LIST_Y + self.rows().len().clamp(3, VISIBLE) as f64 * ROW_H + 90.0 }
+        if self.prompt.is_some() {
+            PROMPT_Y + PROMPT_H + RAIL
+        } else {
+            LIST_Y + self.rows().len().clamp(3, VISIBLE) as f64 * ROW_H + FOOTER
+        }
+    }
+
+    fn list_height(&self) -> f64 {
+        (self.frame_height - FOOTER - LIST_Y).max(0.0)
     }
 
     pub fn describe(&self) -> String {
@@ -300,17 +337,19 @@ impl Panel {
     }
 
     fn hit(&self, x: f64, y: f64, now: Time) -> Option<Hit> {
-        if contains(x, y, 426.0, 24.0, 32.0, 32.0) {
+        let (cx, cy, size) = menu_style::close_rect(WIDTH);
+        if contains(x, y, cx - 4.0, cy - 4.0, size + 8.0, size + 8.0) {
             return Some(Hit::Close);
         }
         if self.prompt.is_some() {
-            if contains(x, y, 40.0, 306.0, 194.0, 38.0) {
+            let half = (INNER - 36.0 - 10.0) / 2.0;
+            if contains(x, y, RAIL + 18.0, PROMPT_BUTTONS_Y, half, menu_style::BUTTON_H) {
                 return Some(Hit::Cancel);
             }
-            if contains(x, y, 246.0, 306.0, 194.0, 38.0) && self.can_submit() {
+            if contains(x, y, RAIL + 18.0 + half + 10.0, PROMPT_BUTTONS_Y, half, menu_style::BUTTON_H) && self.can_submit() {
                 return Some(Hit::Submit);
             }
-            if matches!(self.prompt, Some(Prompt::Wifi(_))) && contains(x, y, 375.0, 225.0, 62.0, 42.0) {
+            if matches!(self.prompt, Some(Prompt::Wifi(_))) && contains(x, y, WIDTH - RAIL - 18.0 - 86.0, PROMPT_FIELD_Y, 86.0, 40.0) {
                 return Some(Hit::Reveal);
             }
             return None;
@@ -318,25 +357,22 @@ impl Panel {
         if self.busy && !self.scanning {
             return None;
         }
-        if contains(x, y, 369.0, 25.0, 46.0, 28.0) && self.loaded {
+        if contains(x, y, TOGGLE_X - 4.0, 22.0, 54.0, 36.0) && self.loaded {
             return Some(Hit::Power);
         }
-        if contains(x, y, 22.0, 86.0, 436.0, 34.0) {
+        if contains(x, y, RAIL, TABS_Y, INNER, TABS_H) {
             return Some(Hit::Tab(if x < WIDTH / 2.0 { 0 } else { 1 }));
         }
-        if contains(x, y, 22.0, self.frame_height - 54.0, 436.0, 34.0)
+        if contains(x, y, RAIL, self.frame_height - RAIL - menu_style::BUTTON_H, INNER, menu_style::BUTTON_H)
             && (self.snapshot.powered || self.error.is_some())
         {
             return Some(Hit::Search);
         }
-        if self.snapshot.powered
-            && contains(x, y, 22.0, LIST_Y, 436.0, (self.frame_height - 90.0 - LIST_Y).max(0.0))
-            && now - self.changed > 0.18
-        {
+        if self.snapshot.powered && contains(x, y, RAIL, LIST_Y, INNER, self.list_height()) && now - self.changed > 0.18 {
             let offset = self.scroll.value(now);
             for row in self.rows() {
                 let pos = self.slots.get(&row.id).map_or(0.0, |s| s.value(now));
-                if contains(x, y, 22.0, LIST_Y + (pos - offset) * ROW_H, 436.0, ROW_H - 2.0) {
+                if contains(x, y, RAIL, LIST_Y + (pos - offset) * ROW_H, INNER, ROW_H) {
                     return Some(Hit::Row(row.id));
                 }
             }
@@ -536,80 +572,31 @@ impl Panel {
         // A group guarantees one coherent fade for text, icons and controls.
         let grouped = alpha < 0.999;
         if grouped { cr.push_group(); }
-        rounded(cr, 22.0, 22.0, 36.0, 36.0, 12.0);
-        cr.set_source_rgb(0.10, 0.52, 0.97);
-        let _ = cr.fill();
-        symbol(cr, self.kind, 40.0, 40.0, 1.0, 1.0);
-        label(
-            cr,
-            renderer,
-            if self.kind == Kind::Wifi { "Wi-Fi" } else { "Bluetooth" },
-            72.0,
-            19.0,
-            Font::Text,
-            278.0,
-            1.0,
-        );
         let subtitle = if !self.loaded {
-            "Загружаем устройства…"
+            "Загрузка…"
         } else if self.snapshot.powered {
             "Включён"
         } else {
             "Выключен"
         };
-        label(cr, renderer, subtitle, 72.0, 43.0, Font::Tiny, 275.0, 0.5);
-        let power = self.power.value(now).clamp(0.0, 1.0);
-        rounded(cr, 369.0, 28.0, 42.0, 24.0, 12.0);
-        cr.set_source_rgb(0.20 * (1.0 - power) + 0.10 * power, 0.20 + 0.28 * power, 0.22 + 0.74 * power);
-        let _ = cr.fill();
-        cr.new_path();
-        cr.arc(381.0 + 18.0 * power, 40.0, 9.0 + self.lit(Hit::Power, now) * 0.5, 0.0, std::f64::consts::TAU);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.92);
-        let _ = cr.fill();
-        button(cr, renderer, "×", 426.0, 24.0, 32.0, 32.0, self.lit(Hit::Close, now), false, true);
+        let kind = self.kind;
+        let glyph = move |cr: &Context, cx: f64, cy: f64| symbol(cr, kind, cx, cy + 0.5, 1.05, 1.0);
+        menu_style::header(cr, renderer, 0.0, 0.0, WIDTH, Some((menu_style::BLUE, &glyph)),
+            if self.kind == Kind::Wifi { "Wi-Fi" } else { "Bluetooth" }, Some(subtitle), WIDTH - TOGGLE_X + 8.0, 1.0);
+        menu_style::toggle(cr, TOGGLE_X, menu_style::HEADER_MID - 14.0, self.power.value(now),
+            self.lit(Hit::Power, now), if self.loaded { 1.0 } else { 0.4 });
+        let (cx, cy, size) = menu_style::close_rect(WIDTH);
+        menu_style::close(cr, cx, cy, size, self.lit(Hit::Close, now), 1.0);
 
         if self.prompt.is_some() {
             self.draw_prompt(cr, renderer, now);
         } else {
-            rounded(cr, 22.0, 86.0, 436.0, 34.0, 11.0);
-            cr.set_source_rgb(0.11, 0.11, 0.12);
-            let _ = cr.fill();
-            rounded(cr, 25.0 + self.tab_slide.value(now) * 216.0, 89.0, 214.0, 28.0, 8.0);
-            cr.set_source_rgb(0.25, 0.25, 0.27);
-            let _ = cr.fill();
-            rounded(cr, 25.5 + self.tab_slide.value(now) * 216.0, 89.5, 213.0, 27.0, 7.5);
-            cr.set_line_width(1.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.11);
-            let _ = cr.stroke();
-            let tabs = if self.kind == Kind::Wifi {
-                ["Все сети", "Сохранённые"]
-            } else {
-                ["Мои устройства", "Поиск устройств"]
-            };
-            for (index, text) in tabs.iter().enumerate() {
-                centered(
-                    cr,
-                    renderer,
-                    text,
-                    24.0 + index as f64 * 216.0,
-                    88.0,
-                    216.0,
-                    30.0,
-                    Font::Small,
-                    if self.tab == index { 1.0 } else { 0.50 + self.lit(Hit::Tab(index), now) * 0.25 },
-                );
-            }
+            let tabs = if self.kind == Kind::Wifi { ["Все сети", "Сохранённые"] } else { ["Мои устройства", "Поиск"] };
+            menu_style::segmented(cr, renderer, (RAIL, TABS_Y, INNER, TABS_H), &tabs, self.tab_slide.value(now),
+                &[self.lit(Hit::Tab(0), now), self.lit(Hit::Tab(1), now)], 1.0);
             let rows = self.rows();
+            let list_h = self.list_height();
             let fade = smoothstep((now - self.changed) / 0.24);
-            if fade < 1.0 && !self.old_rows.is_empty() {
-                cr.save().unwrap();
-                cr.rectangle(20.0, LIST_Y, 440.0, (height - 90.0 - LIST_Y).max(0.0));
-                cr.clip();
-                for (i, d) in self.old_rows.iter().enumerate() {
-                    self.draw_row(cr, renderer, d, LIST_Y + i as f64 * ROW_H - fade * 8.0, 1.0 - fade, now);
-                }
-                cr.restore().unwrap();
-            }
             if rows.is_empty() || !self.snapshot.powered {
                 let (title, hint) = if !self.loaded {
                     ("Загрузка…", "Получаем состояние адаптера")
@@ -618,64 +605,58 @@ impl Panel {
                 } else if self.busy {
                     ("Ищем поблизости", "Список обновится автоматически")
                 } else if self.kind == Kind::Bluetooth && self.tab == 0 {
-                    ("Пока нет устройств", "Откройте вкладку поиска для сопряжения")
+                    ("Пока нет устройств", "Откройте поиск, чтобы создать пару")
                 } else if self.kind == Kind::Bluetooth {
                     ("Устройства не найдены", "Включите на устройстве режим сопряжения")
                 } else {
-                    ("Сети не найдены", "Нажмите кнопку поиска ниже")
+                    ("Сети не найдены", "Нажмите «Найти сети» ниже")
                 };
-                rounded(cr, 22.0, LIST_Y, 436.0, (height - 90.0 - LIST_Y).max(0.0), 16.0);
-                cr.set_source_rgb(0.13, 0.13, 0.14);
-                let _ = cr.fill();
-                rounded(cr, 22.5, LIST_Y + 0.5, 435.0, (height - 91.0 - LIST_Y).max(0.0), 15.5);
-                cr.set_line_width(1.0);
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
-                let _ = cr.stroke();
-                let center = LIST_Y + (height - 90.0 - LIST_Y) / 2.0;
+                menu_style::group(cr, RAIL, LIST_Y, INNER, list_h, 0.0, 1.0);
+                let centre = LIST_Y + list_h / 2.0;
                 let appear = if self.old_rows.is_empty() { 1.0 } else { fade };
-                symbol(cr, self.kind, WIDTH / 2.0, center - 24.0, 1.8, 0.3 * appear);
-                centered(cr, renderer, title, 22.0, center + 10.0, 436.0, 25.0, Font::Text, 0.85 * appear);
-                centered(cr, renderer, hint, 22.0, center + 40.0, 436.0, 24.0, Font::Small, 0.45 * appear);
+                symbol(cr, self.kind, WIDTH / 2.0, centre - 26.0, 1.6, menu_style::TERTIARY * appear);
+                menu_style::centred(cr, renderer, title, (RAIL, centre - 6.0, INNER, 22.0), Font::Headline,
+                    (1.0, 1.0, 1.0), appear);
+                menu_style::centred(cr, renderer, hint, (RAIL, centre + 16.0, INNER, 20.0), Font::Subhead,
+                    (1.0, 1.0, 1.0), menu_style::SECONDARY * appear);
             } else {
+                let shown = rows.len().clamp(1, VISIBLE) as f64 * ROW_H;
+                menu_style::group(cr, RAIL, LIST_Y, INNER, shown.min(list_h), 0.0, 1.0);
                 cr.save().unwrap();
-                cr.rectangle(20.0, LIST_Y, 440.0, (height - 90.0 - LIST_Y).max(0.0));
+                menu_style::rounded(cr, RAIL, LIST_Y, INNER, shown.min(list_h), menu_style::GROUP_R);
                 cr.clip();
+                if fade < 1.0 && !self.old_rows.is_empty() {
+                    for (i, d) in self.old_rows.iter().enumerate() {
+                        self.draw_row(cr, renderer, d, LIST_Y + i as f64 * ROW_H - fade * 8.0, 1.0 - fade, i > 0, now);
+                    }
+                }
+                let offset = self.scroll.value(now);
                 for (i, d) in rows.iter().enumerate() {
                     let slot = self.slots.get(&d.id).map_or(i as f64, |s| s.value(now));
-                    let ry = LIST_Y + (slot - self.scroll.value(now)) * ROW_H + (1.0 - fade) * 8.0;
+                    let ry = LIST_Y + (slot - offset) * ROW_H + (1.0 - fade) * 8.0;
                     if ry + ROW_H < LIST_Y || ry > LIST_Y + ROW_H * VISIBLE as f64 {
                         continue;
                     }
                     let appear = self.born.get(&d.id).map_or(1.0, |t| smoothstep((now - t) / 0.25));
-                    self.draw_row(cr, renderer, d, ry, fade * appear, now);
+                    self.draw_row(cr, renderer, d, ry, fade * appear, slot - offset > 0.5, now);
                 }
                 cr.restore().unwrap();
                 if rows.len() > VISIBLE {
-                    let track = ROW_H * VISIBLE as f64;
+                    let track = ROW_H * VISIBLE as f64 - 12.0;
                     let thumb = track * VISIBLE as f64 / rows.len() as f64;
-                    let sy = LIST_Y + (track - thumb) * self.scroll.value(now) / (rows.len() - VISIBLE) as f64;
-                    rounded(cr, 465.0, sy, 3.0, thumb, 1.5);
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.25);
+                    let sy = LIST_Y + 6.0 + (track - thumb) * offset / (rows.len() - VISIBLE) as f64;
+                    menu_style::rounded(cr, WIDTH - RAIL - 6.0, sy, 3.0, thumb, 1.5);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.28);
                     let _ = cr.fill();
                 }
             }
-            let hint = if let Some(error) = &self.error {
-                error.as_str()
-            } else if self.busy {
-                &self.status
-            } else if self.kind == Kind::Wifi {
-                "Клик по подключённой сети — отключить"
-            } else {
-                "Клик по подключённому устройству — отключить"
-            };
-            if self.error.is_some() {
-                cr.set_source_rgb(1.0, 0.42, 0.38);
-            } else {
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.42);
+            // a status line only when there is something to say
+            let status_y = LIST_Y + list_h + 5.0;
+            if let Some(error) = &self.error {
+                menu_style::text(cr, renderer, error, RAIL + 2.0, status_y, INNER - 4.0, Font::Footnote, menu_style::RED, 1.0);
+            } else if self.busy && !self.status.is_empty() {
+                menu_style::label(cr, renderer, &self.status, RAIL + 2.0, status_y, INNER - 4.0, Font::Footnote, menu_style::SECONDARY);
             }
-            let l = renderer.layout_ellipsized(cr, hint, Font::Tiny, 430.0, 2);
-            cr.move_to(renderer.snap(22.0), renderer.snap(height - 85.0));
-            pangocairo::functions::show_layout(cr, &l);
             let search = if self.scanning {
                 "Остановить поиск"
             } else if self.busy {
@@ -685,20 +666,12 @@ impl Panel {
             } else {
                 "Искать устройства"
             };
-            button(
-                cr,
-                renderer,
-                search,
-                22.0,
-                height - 54.0,
-                436.0,
-                34.0,
-                self.lit(Hit::Search, now),
-                false,
-                (self.snapshot.powered || self.error.is_some()) && (!self.busy || self.scanning),
-            );
+            let enabled = (self.snapshot.powered || self.error.is_some()) && (!self.busy || self.scanning);
+            let by = height - RAIL - menu_style::BUTTON_H;
+            menu_style::button(cr, renderer, search, (RAIL, by, INNER, menu_style::BUTTON_H), ButtonKind::Neutral,
+                self.lit(Hit::Search, now), if enabled { 1.0 } else { 0.4 });
             if self.busy {
-                spinner(cr, 41.0, height - 37.0, now);
+                menu_style::spinner(cr, RAIL + 22.0, by + menu_style::BUTTON_H / 2.0, 7.0, now, 1.0);
             }
         }
         if grouped {
@@ -709,70 +682,79 @@ impl Panel {
         cr.new_path();
     }
 
-    fn draw_row(&self, cr: &Context, renderer: &Renderer, d: &Device, y: f64, alpha: f64, now: Time) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_row(&self, cr: &Context, renderer: &Renderer, d: &Device, y: f64, alpha: f64, divider: bool, now: Time) {
+        if alpha <= 0.002 {
+            return;
+        }
         let hover = self.lit(Hit::Row(d.id.clone()), now);
-        rounded(cr, 22.0, y, 436.0, ROW_H - 3.0, 12.0);
-        if d.connected {
-            cr.set_source_rgba(0.14 + 0.05 * hover, 0.22 + 0.05 * hover, 0.34 + 0.06 * hover, alpha);
-        } else {
-            cr.set_source_rgba(0.13 + 0.06 * hover, 0.13 + 0.06 * hover, 0.14 + 0.06 * hover, alpha);
+        let text_x = RAIL + 58.0;
+        if divider {
+            menu_style::separator(cr, renderer, text_x, WIDTH - RAIL, y, alpha);
         }
-        let _ = cr.fill();
-        rounded(cr, 22.5, y + 0.5, 435.0, ROW_H - 4.0, 11.5);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(if d.connected { 0.32 } else { 1.0 }, if d.connected { 0.66 } else { 1.0 },
-            1.0, alpha * (if d.connected { 0.28 } else { 0.06 } + hover * 0.10));
-        let _ = cr.stroke();
+        menu_style::highlight(cr, RAIL, y, INNER, ROW_H, hover, alpha);
+        let mid = y + ROW_H / 2.0;
+        let well_x = RAIL + 14.0 + 15.0;
+        menu_style::well(cr, well_x, mid, 15.0, d.connected.then_some(menu_style::BLUE), alpha);
         if self.kind == Kind::Wifi {
-            symbol(cr, Kind::Wifi, 43.0, y + 24.0, 0.86, alpha * if d.connected { 1.0 } else { 0.7 });
+            symbol(cr, Kind::Wifi, well_x, mid + 0.5, 0.78, alpha);
         } else {
-            device_symbol(cr, &d.icon, 43.0, y + 24.0, alpha * if d.connected { 1.0 } else { 0.7 });
+            device_symbol(cr, &d.icon, well_x, mid, alpha);
         }
-        label(cr, renderer, &d.name, 67.0, y + 5.0, Font::Small, 252.0, alpha * 0.95);
         let detail = if self.kind == Kind::Wifi {
-            format!(
-                "{} · {}%{}",
-                if d.connected {
-                    "Подключено"
-                } else if d.paired {
-                    "Сохранено"
-                } else {
-                    "Доступно"
-                },
-                d.signal,
-                if d.security.is_empty() { " · открытая" } else { " · защищённая" }
-            )
+            if d.connected {
+                "Подключено".to_string()
+            } else if d.paired {
+                "Сохранённая сеть".to_string()
+            } else if d.security.is_empty() {
+                "Открытая сеть".to_string()
+            } else {
+                format!("Защищённая · {}", d.security)
+            }
         } else if d.name == crate::network::UNNAMED_BLUETOOTH {
             format!("{} · имя не передано", d.interface)
+        } else if d.connected {
+            "Подключено".to_string()
+        } else if d.paired {
+            "Не подключено".to_string()
         } else {
-            format!(
-                "{}{}",
-                if d.connected {
-                    "Подключено"
-                } else if d.paired {
-                    "Сопряжено"
-                } else {
-                    "Новое устройство"
-                },
-                d.battery.map_or(String::new(), |v| format!(" · {v}%"))
-            )
+            "Новое устройство".to_string()
         };
-        label(cr, renderer, &detail, 67.0, y + 27.0, Font::Tiny, 270.0, alpha * 0.43);
         let action = if d.connected {
             "Отключить"
         } else if self.kind == Kind::Bluetooth && !d.paired {
-            "Сопрячь"
+            "Создать пару"
         } else {
             "Подключить"
         };
-        rounded(cr, 341.0, y + 10.0, 101.0, 29.0, 9.0);
-        if d.connected {
-            cr.set_source_rgba(0.26, 0.54, 0.89, alpha * (0.25 + hover * 0.20));
-        } else {
-            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.07 + hover * 0.12));
+        let action_w = renderer.layout(cr, action, Font::Label).pixel_extents().1.width() as f64 + 24.0;
+        let trailing_w = action_w.max(64.0);
+        let text_w = WIDTH - RAIL - 14.0 - trailing_w - 8.0 - text_x;
+        let title_h = menu_style::line_height(cr, renderer, Font::Body);
+        let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+        let top = mid - (title_h + sub_h) / 2.0;
+        menu_style::label(cr, renderer, &d.name, text_x, top, text_w, Font::Body, alpha);
+        menu_style::label(cr, renderer, &detail, text_x, top + title_h, text_w, Font::Subhead, menu_style::SECONDARY * alpha);
+        // at rest the row shows its state; under the pointer, what a click does
+        let right = WIDTH - RAIL - 14.0;
+        let rest = alpha * (1.0 - hover);
+        if rest > 0.01 {
+            if self.kind == Kind::Wifi {
+                strength(cr, right - 10.0, mid, d.signal, rest);
+                if !d.security.is_empty() {
+                    lock(cr, right - 34.0, mid, rest * menu_style::SECONDARY);
+                }
+            } else if let Some(battery) = d.battery {
+                let s = format!("{battery}%");
+                let w = renderer.layout(cr, &s, Font::Subhead).pixel_extents().1.width() as f64;
+                menu_style::label(cr, renderer, &s, right - w, mid - sub_h / 2.0, w + 2.0, Font::Subhead, menu_style::SECONDARY * rest);
+            }
         }
-        let _ = cr.fill();
-        centered(cr, renderer, action, 342.0, y + 10.0, 99.0, 29.0, Font::Tiny, alpha * (0.66 + hover * 0.34));
+        if hover > 0.01 {
+            let h = 26.0;
+            let kind = if d.connected { ButtonKind::Neutral } else { ButtonKind::Primary };
+            menu_style::button(cr, renderer, action, (right - action_w, mid - h / 2.0, action_w, h), kind, 0.0, alpha * hover);
+        }
     }
 
     fn draw_prompt(&self, cr: &Context, renderer: &Renderer, now: Time) {
@@ -781,78 +763,65 @@ impl Panel {
         cr.save().unwrap();
         cr.translate(0.0, (1.0 - k) * 7.0);
         if k < 0.999 { cr.push_group(); }
-        rounded(cr, 22.0, 95.0, 436.0, 262.0, 17.0);
-        cr.set_source_rgb(0.13, 0.13, 0.14);
-        let _ = cr.fill();
-        rounded(cr, 22.5, 95.5, 435.0, 261.0, 16.5);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.07);
-        let _ = cr.stroke();
+        menu_style::group(cr, RAIL, PROMPT_Y, INNER, PROMPT_H, 0.0, 1.0);
         let (title, description, code, field) = match prompt {
             Prompt::Wifi(d) => (d.name.as_str(), "Введите пароль сети Wi-Fi", "", true),
-            Prompt::Pair(p) => ("Сопряжение", p.text.as_str(), p.code.as_str(), p.input != Input::None),
+            Prompt::Pair(p) => ("Создание пары", p.text.as_str(), p.code.as_str(), p.input != Input::None),
         };
-        label(cr, renderer, title, 40.0, 115.0, Font::Text, 400.0, 1.0);
-        label(cr, renderer, description, 40.0, 152.0, Font::Small, 400.0, 0.55);
+        let inset = RAIL + 18.0;
+        let inner = INNER - 36.0;
+        menu_style::label(cr, renderer, title, inset, PROMPT_Y + 18.0, inner, Font::Headline, 1.0);
+        let wrapped = renderer.layout_ellipsized(cr, description, Font::Subhead, inner, 2);
+        cr.set_source_rgba(1.0, 1.0, 1.0, menu_style::SECONDARY);
+        cr.move_to(renderer.snap(inset), renderer.snap(PROMPT_Y + 42.0));
+        pangocairo::functions::show_layout(cr, &wrapped);
+        cr.new_path();
         if field {
-            rounded(cr, 40.0, 225.0, 400.0, 42.0, 11.0);
-            cr.set_source_rgb(0.085, 0.085, 0.10);
-            let _ = cr.fill();
-            rounded(cr, 40.5, 225.5, 399.0, 41.0, 10.5);
-            cr.set_source_rgba(0.24, 0.60, 1.0, 0.8);
-            cr.set_line_width(1.0);
-            let _ = cr.stroke();
+            let fy = PROMPT_FIELD_Y;
+            menu_style::field(cr, inset, fy, inner, 40.0, true, 1.0);
             let text = if matches!(prompt, Prompt::Wifi(_)) && !self.reveal {
                 "•".repeat(self.input.chars().count())
             } else {
                 self.input.clone()
             };
-            let l = renderer.layout(cr, "", Font::Small).copy();
+            let l = renderer.layout(cr, "", Font::Body).copy();
             l.set_text(&text);
-            let width = l.pixel_extents().1.width() as f64;
+            let (_, logical) = l.pixel_extents();
+            let width = logical.width() as f64;
+            let room = inner - 24.0 - 86.0;
             cr.save().unwrap();
-            cr.rectangle(53.0, 232.0, 333.0, 26.0);
+            cr.rectangle(inset + 10.0, fy + 4.0, room + 4.0, 32.0);
             cr.clip();
             cr.set_source_rgb(1.0, 1.0, 1.0);
-            cr.move_to(renderer.snap(54.0 - (width - 319.0).max(0.0)), renderer.snap(237.0));
+            let ty = fy + (40.0 - logical.height() as f64) / 2.0;
+            cr.move_to(renderer.snap(inset + 12.0 - (width - room).max(0.0)), renderer.snap(ty));
             pangocairo::functions::show_layout(cr, &l);
             let blink =
                 if now - self.input_since < 0.7 { 1.0 } else { 0.5 + 0.5 * ((now - self.input_since) * 5.0).cos() };
             cr.new_path();
-            cr.rectangle(55.0 + width.min(319.0), 237.0, 1.2, 17.0);
-            cr.set_source_rgba(0.4, 0.7, 1.0, blink);
+            cr.rectangle(inset + 13.0 + width.min(room), fy + 10.0, 2.0, 20.0);
+            cr.set_source_rgba(menu_style::BLUE.0, menu_style::BLUE.1, menu_style::BLUE.2, blink);
             let _ = cr.fill();
             cr.restore().unwrap();
             if matches!(prompt, Prompt::Wifi(_)) {
-                centered(
-                    cr,
-                    renderer,
-                    if self.reveal { "Скрыть" } else { "Показать" },
-                    375.0,
-                    225.0,
-                    62.0,
-                    42.0,
-                    Font::Tiny,
-                    0.55 + 0.45 * self.lit(Hit::Reveal, now),
-                );
+                menu_style::button(cr, renderer, if self.reveal { "Скрыть" } else { "Показать" },
+                    (inset + inner - 86.0, fy, 86.0, 40.0), ButtonKind::Plain, self.lit(Hit::Reveal, now), 1.0);
             }
         } else if !code.is_empty() {
-            centered(cr, renderer, code, 40.0, 215.0, 400.0, 52.0, Font::Query, 1.0);
+            menu_style::centred(cr, renderer, code, (inset, PROMPT_FIELD_Y - 6.0, inner, 52.0), Font::Query, (1.0, 1.0, 1.0), 1.0);
         }
-        button(cr, renderer, "Отмена", 40.0, 306.0, 194.0, 38.0, self.lit(Hit::Cancel, now), false, true);
-        button(
+        let half = (inner - 10.0) / 2.0;
+        menu_style::button(cr, renderer, "Отмена", (inset, PROMPT_BUTTONS_Y, half, menu_style::BUTTON_H),
+            ButtonKind::Neutral, self.lit(Hit::Cancel, now), 1.0);
+        menu_style::button(
             cr,
             renderer,
             if matches!(prompt, Prompt::Wifi(_)) { "Подключиться" } else { "Подтвердить" },
-            246.0,
-            306.0,
-            194.0,
-            38.0,
+            (inset + half + 10.0, PROMPT_BUTTONS_Y, half, menu_style::BUTTON_H),
+            ButtonKind::Primary,
             self.lit(Hit::Submit, now),
-            true,
-            self.can_submit(),
+            if self.can_submit() { 1.0 } else { 0.4 },
         );
-        label(cr, renderer, "Enter — подтвердить · Escape — закрыть", 22.0, 371.0, Font::Tiny, 436.0, 0.36);
         if k < 0.999 {
             cr.pop_group_to_source().unwrap();
             let _ = cr.paint_with_alpha(k);
@@ -864,62 +833,39 @@ impl Panel {
 fn contains(x: f64, y: f64, bx: f64, by: f64, w: f64, h: f64) -> bool {
     x >= bx && x <= bx + w && y >= by && y <= by + h
 }
-fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    cr.new_path();
-    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
-    cr.close_path();
-}
-fn label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, font: Font, w: f64, alpha: f64) {
-    let l = renderer.layout_ellipsized(cr, text, font, w, 1);
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.move_to(renderer.snap(x), renderer.snap(y));
-    pangocairo::functions::show_layout(cr, &l);
-    cr.new_path();
-}
-fn centered(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, w: f64, h: f64, font: Font, alpha: f64) {
-    let l = renderer.layout_ellipsized(cr, text, font, w - 6.0, 1);
-    let (_, e) = l.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.move_to(
-        renderer.snap(x + (w - e.width() as f64) / 2.0 - e.x() as f64),
-        renderer.snap(y + (h - e.height() as f64) / 2.0 - e.y() as f64),
-    );
-    pangocairo::functions::show_layout(cr, &l);
-    cr.new_path();
-}
-fn button(
-    cr: &Context,
-    renderer: &Renderer,
-    text: &str,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    hover: f64,
-    accent: bool,
-    enabled: bool,
-) {
-    let a = if enabled { 1.0 } else { 0.32 };
-    if text == "×" {
-        crate::menu_style::close(cr, x, y, w, hover, a);
-    } else {
-        let kind = if accent { crate::menu_style::ButtonKind::Primary } else { crate::menu_style::ButtonKind::Neutral };
-        crate::menu_style::button(cr, renderer, text, (x, y, w, h), Font::Small, kind, hover, a);
+/// Wi-Fi strength: three arcs, as many lit as the signal earns.
+fn strength(cr: &Context, cx: f64, cy: f64, signal: u8, alpha: f64) {
+    let lit = if signal >= 67 { 3 } else if signal >= 34 { 2 } else { 1 };
+    cr.save().unwrap();
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_line_width(1.8);
+    for (i, r) in [3.2, 6.6, 10.0].into_iter().enumerate() {
+        cr.new_path();
+        cr.arc(cx, cy + 5.0, r, 3.92, 5.50);
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * if i < lit { 0.9 } else { 0.22 });
+        let _ = cr.stroke();
     }
+    cr.new_path();
+    cr.arc(cx, cy + 5.0, 1.2, 0.0, std::f64::consts::TAU);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.9);
+    let _ = cr.fill();
+    cr.restore().unwrap();
 }
-fn spinner(cr: &Context, x: f64, y: f64, now: Time) {
+
+/// A small padlock.
+fn lock(cr: &Context, cx: f64, cy: f64, alpha: f64) {
     cr.save().unwrap();
     cr.new_path();
-    cr.set_line_width(1.6);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.arc(x, y, 6.0, now * 5.0, now * 5.0 + 4.3);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.65);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    menu_style::rounded(cr, cx - 4.5, cy - 1.0, 9.0, 7.5, 1.8);
+    let _ = cr.fill();
+    cr.new_path();
+    cr.set_line_width(1.5);
+    cr.arc(cx, cy - 1.5, 3.0, std::f64::consts::PI, 0.0);
     let _ = cr.stroke();
     cr.restore().unwrap();
 }
+
 fn symbol(cr: &Context, kind: Kind, x: f64, y: f64, scale: f64, alpha: f64) {
     cr.save().unwrap();
     cr.translate(x, y);
@@ -960,11 +906,11 @@ fn device_symbol(cr: &Context, icon: &str, x: f64, y: f64, alpha: f64) {
         cr.arc(x, y, 8.0, std::f64::consts::PI, std::f64::consts::TAU);
         let _ = cr.stroke();
         for dx in [-8.0, 8.0] {
-            rounded(cr, x + dx - 2.0, y - 1.0, 4.0, 9.0, 2.0);
+            menu_style::rounded(cr, x + dx - 2.0, y - 1.0, 4.0, 9.0, 2.0);
             let _ = cr.fill();
         }
     } else if icon.contains("keyboard") {
-        rounded(cr, x - 10.0, y - 6.0, 20.0, 13.0, 3.0);
+        menu_style::rounded(cr, x - 10.0, y - 6.0, 20.0, 13.0, 3.0);
         let _ = cr.stroke();
         for row in 0..2 {
             for col in 0..4 {
@@ -973,7 +919,7 @@ fn device_symbol(cr: &Context, icon: &str, x: f64, y: f64, alpha: f64) {
         }
         let _ = cr.fill();
     } else if icon.contains("mouse") {
-        rounded(cr, x - 6.0, y - 9.0, 12.0, 19.0, 6.0);
+        menu_style::rounded(cr, x - 6.0, y - 9.0, 12.0, 19.0, 6.0);
         let _ = cr.stroke();
         cr.move_to(x, y - 5.0);
         cr.line_to(x, y - 1.0);
@@ -1133,7 +1079,7 @@ mod tests {
             let x = 20.0 + (index % 2) as f64 * 500.0;
             let y = 12.0 + (index / 2) as f64 * 500.0;
             let height = p.height();
-            rounded(&cr, x, y, WIDTH, height, 30.0);
+            menu_style::rounded(&cr, x, y, WIDTH, height, 30.0);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             cr.fill().unwrap();
             p.draw(&cr, &renderer, x, y, height, 1.0, 11.0);

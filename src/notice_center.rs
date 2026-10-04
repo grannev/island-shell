@@ -14,14 +14,18 @@ use crate::anim::{Spring, Time, min_jerk};
 use crate::icons;
 use crate::iconload::Icons;
 use crate::island::{Font, Renderer};
+use crate::menu_style::{self, ButtonKind, RAIL};
 use crate::notify::Notification;
 
 pub const WIDTH: f64 = 480.0;
-pub const HEIGHT: f64 = 430.0;
+/// a full list and a notification's details share one height
+pub const HEIGHT: f64 = ROW_TOP + ROWS as f64 * ROW_H + LIST_BOTTOM;
 const LIMIT: usize = 50;
 const ROWS: usize = 4;
-const ROW_TOP: f64 = 72.0;
+const ROW_TOP: f64 = menu_style::CONTENT_TOP;
 const ROW_H: f64 = 72.0;
+/// below the last card: the sheet's bottom rail less the cards' own gap
+const LIST_BOTTOM: f64 = 16.0;
 const ROW_MOTION: Time = 0.42;
 const EXIT_MOTION: Time = 0.32;
 const VIEW_MOTION: Time = 0.28;
@@ -188,10 +192,10 @@ impl Center {
     }
 
     fn list_height(&self) -> f64 {
-        if self.entries.is_empty() { return ROW_TOP + ROW_H * 3.0 + 70.0; }
+        if self.entries.is_empty() { return ROW_TOP + ROW_H * 3.0 + LIST_BOTTOM; }
         let visible = self.leaving.iter().map(|row| row.row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
         let moving = self.row_from.values().map(|row| row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
-        ROW_TOP + ROW_H * self.rows().len().max(visible).max(moving).clamp(1, ROWS) as f64 + 70.0
+        ROW_TOP + ROW_H * self.rows().len().max(visible).max(moving).clamp(1, ROWS) as f64 + LIST_BOTTOM
     }
 
     fn rows(&self) -> Vec<ViewRow<'_>> {
@@ -523,20 +527,32 @@ impl Center {
 
     fn draw_view(&self, cr: &Context, renderer: &Renderer, media: &Icons,
         x: f64, y: f64, detail: Option<u64>, now: Time) {
-        let title = if detail.is_some() { "Уведомление" } else { "Уведомления" };
-        let title_x = if detail.is_some() { x + 121.0 } else { x + 22.0 };
-        label(cr, renderer, title, title_x, y + 22.0, WIDTH - (title_x - x) - 62.0, Font::Text, 1.0);
         if detail.is_some() {
-            button(cr, renderer, "Назад", x + 22.0, y + 13.0, 85.0, 38.0, 1.0, self.button_hover[1].value(now));
+            // a navigation bar: back on the left, the title centred
+            let back = self.button_hover[1].value(now);
+            menu_style::chevron(cr, x + RAIL + 5.0, y + menu_style::HEADER_MID, 7.0, std::f64::consts::PI,
+                (0.8 + 0.2 * back).min(1.0));
+            menu_style::text(cr, renderer, "Назад", x + RAIL + 16.0,
+                y + menu_style::HEADER_MID - menu_style::line_height(cr, renderer, Font::Body) / 2.0,
+                80.0, Font::Body, menu_style::BLUE, 0.85 + 0.15 * back);
+            menu_style::centred(cr, renderer, "Уведомление", (x + 110.0, y + menu_style::HEADER_MID - 12.0, WIDTH - 220.0, 24.0),
+                Font::Title, (1.0, 1.0, 1.0), 1.0);
         } else {
             let unread = self.unread();
-            let count = if unread > 0 { format!("{unread} новых") } else { format!("{} всего", self.len()) };
-            label(cr, renderer, &count, x + 22.0, y + 47.0, 200.0, Font::Small, 0.55);
+            let count = match (unread, self.len()) {
+                (0, 0) => "Нет уведомлений".to_string(),
+                (0, n) => format!("Всего {n}"),
+                (n, _) => format!("{n} новых"),
+            };
+            menu_style::header(cr, renderer, x, y, WIDTH, None, "Уведомления", Some(&count), 170.0, 1.0);
             if !self.entries.is_empty() {
-                button(cr, renderer, "Очистить", x + WIDTH - 156.0, y + 13.0, 94.0, 38.0, 1.0, self.button_hover[1].value(now));
+                menu_style::button(cr, renderer, "Очистить",
+                    (x + WIDTH - 154.0, y + menu_style::HEADER_MID - menu_style::SMALL_BUTTON_H / 2.0, 92.0, menu_style::SMALL_BUTTON_H),
+                    ButtonKind::Neutral, self.button_hover[1].value(now), 1.0);
             }
         }
-        button(cr, renderer, "×", x + WIDTH - 54.0, y + 16.0, 32.0, 32.0, 1.0, self.button_hover[0].value(now));
+        let (cx, cy, size) = menu_style::close_rect(WIDTH);
+        menu_style::close(cr, x + cx, y + cy, size, self.button_hover[0].value(now), 1.0);
         if let Some(serial) = detail {
             self.draw_detail(cr, renderer, media, x, y, 1.0, serial, now);
         } else {
@@ -553,23 +569,17 @@ impl Center {
                 min_jerk(((now - self.row_motion_at - 0.12) / 0.28).clamp(0.0, 1.0))
             };
             let a = alpha * appear;
-            rounded(cr, x + 22.0, y + 102.0, WIDTH - 44.0, 188.0, 18.0);
-            cr.set_source_rgba(0.13, 0.13, 0.14, a);
-            let _ = cr.fill();
-            rounded(cr, x + 22.5, y + 102.5, WIDTH - 45.0, 187.0, 17.5);
-            cr.set_line_width(1.0);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.065 * a);
-            let _ = cr.stroke();
-            cr.new_path();
-            cr.arc(x + WIDTH / 2.0, y + 162.0, 24.0, 0.0, std::f64::consts::TAU);
-            cr.set_source_rgba(0.29, 0.52, 0.69, 0.42 * a);
-            let _ = cr.fill();
+            let (top, h) = (y + ROW_TOP, ROW_H * 3.0 - 6.0);
+            menu_style::group(cr, x + RAIL, top, WIDTH - 2.0 * RAIL, h, 0.0, a);
+            let centre = top + h / 2.0;
+            menu_style::well(cr, x + WIDTH / 2.0, centre - 26.0, 22.0, Some(menu_style::RED), a);
             cr.save().unwrap();
-            cr.translate(x + WIDTH / 2.0, y + 162.0);
+            cr.translate(x + WIDTH / 2.0, centre - 27.0);
+            cr.scale(0.85, 0.85);
             cr.set_line_cap(cairo::LineCap::Round);
             cr.set_line_join(cairo::LineJoin::Round);
-            cr.set_line_width(2.0);
-            cr.set_source_rgba(0.72, 0.88, 1.0, a);
+            cr.set_line_width(2.2);
+            cr.set_source_rgba(1.0, 1.0, 1.0, a);
             cr.move_to(-8.0, 8.0);
             cr.curve_to(-6.0, 5.0, -6.0, -1.0, -6.0, -4.0);
             cr.arc(0.0, -4.0, 6.0, std::f64::consts::PI, 0.0);
@@ -580,8 +590,9 @@ impl Center {
             cr.arc(0.0, 11.0, 1.5, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
             cr.restore().unwrap();
-            centered_label(cr, renderer, "Пока пусто", x, y + 207.0, WIDTH, Font::Text, 0.9 * a);
-            centered_label(cr, renderer, "Новые сообщения появятся здесь", x, y + 239.0, WIDTH, Font::Small, 0.52 * a);
+            menu_style::centred(cr, renderer, "Пока пусто", (x, centre + 4.0, WIDTH, 22.0), Font::Headline, (1.0, 1.0, 1.0), a);
+            menu_style::centred(cr, renderer, "Новые уведомления появятся здесь", (x, centre + 26.0, WIDTH, 20.0),
+                Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * a);
         }
         cr.save().unwrap();
         cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
@@ -610,13 +621,17 @@ impl Center {
                 x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
         }
         cr.restore().unwrap();
-        if rows.is_empty() { return; }
         if rows.len() > ROWS {
-            let text = format!("{}–{} из {}  ·  прокрутка", self.offset + 1, (self.offset + ROWS).min(rows.len()), rows.len());
-            label(cr, renderer, &text, x + 22.0, y + height - 32.0, WIDTH - 44.0, Font::Small, alpha * 0.43);
-        } else {
-            label(cr, renderer, "Нажмите, чтобы открыть", x + 22.0, y + height - 32.0, WIDTH - 44.0, Font::Small, alpha * 0.43);
+            // an overlay scroll indicator, as in any Apple list
+            let track = ROW_H * ROWS as f64 - 18.0;
+            let thumb = (track * ROWS as f64 / rows.len() as f64).max(24.0);
+            let max = (rows.len() - ROWS) as f64;
+            let at = ((self.offset as f64 + self.scroll_fraction) / max).clamp(0.0, 1.0);
+            menu_style::rounded(cr, x + WIDTH - 13.0, y + ROW_TOP + 6.0 + (track - thumb) * at, 3.0, thumb, 1.5);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.28 * alpha);
+            let _ = cr.fill();
         }
+        let _ = height;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -632,52 +647,58 @@ impl Center {
         }
         let opacity = alpha;
         let alpha = 1.0;
-        let indent = if child { 17.0 } else { 0.0 };
-        rounded(cr, x + 22.0 + indent, top + 2.0, WIDTH - 44.0 - indent, ROW_H - 5.0, 15.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.075 + 0.085 * hover) * alpha);
-        let _ = cr.fill();
-        rounded(cr, x + 22.5 + indent, top + 2.5, WIDTH - 45.0 - indent, ROW_H - 6.0, 14.5);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, (0.055 + 0.08 * hover) * alpha);
-        let _ = cr.stroke();
-        if child {
-            cr.new_path();
-            cr.move_to(x + 24.5, top + 15.0);
-            cr.line_to(x + 24.5, top + ROW_H - 16.0);
-            cr.set_line_width(1.4);
-            cr.set_source_rgba(0.51, 0.78, 1.0, 0.27 * alpha);
-            let _ = cr.stroke();
-        }
+        let indent = if child { 18.0 } else { 0.0 };
+        let (card_x, card_w, card_h) = (x + RAIL + indent, WIDTH - 2.0 * RAIL - indent, ROW_H - 6.0);
+        menu_style::group(cr, card_x, top, card_w, card_h, hover, alpha);
+        let mid = top + card_h / 2.0;
+        let icon_cx = card_x + 12.0 + 18.0;
         if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
-            x + 49.0 + indent, top + 35.0, 39.0, renderer.scale(), alpha)) {
-            icons::draw(cr, entry.note.kind, x + 49.0 + indent, top + 35.0, 39.0, icon_elapsed.max(0.0), alpha);
+            icon_cx, mid, 36.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, icon_cx, mid, 36.0, icon_elapsed.max(0.0), alpha);
         }
-        if count > 1 {
-            let title = format!("{}  ·  {}", entry.note.app, count);
-            label(cr, renderer, &title, x + 76.0, top + 10.0, 264.0, Font::Caption, alpha * 0.94);
-            let description = format!("Последнее: {}", entry.note.message());
-            label(cr, renderer, &description, x + 76.0, top + 35.0, WIDTH - 176.0, Font::Small, alpha * 0.63);
-            let (start, end) = if self.expanded.contains(&entry.note.app) { (4.0, 0.0) } else { (0.0, 4.0) };
-            cr.new_path();
-            cr.move_to(x + WIDTH - 107.0, top + 30.0 + start);
-            cr.line_to(x + WIDTH - 102.0, top + 30.0 + end);
-            cr.line_to(x + WIDTH - 97.0, top + 30.0 + start);
-            cr.set_line_cap(cairo::LineCap::Round);
-            cr.set_line_join(cairo::LineJoin::Round);
-            cr.set_line_width(1.8);
-            cr.set_source_rgba(1.0, 1.0, 1.0, alpha * (0.5 + 0.4 * hover));
-            let _ = cr.stroke();
-        } else {
-            label(cr, renderer, &entry.note.app, x + 76.0 + indent, top + 10.0, 244.0 - indent, Font::Caption, alpha * 0.91);
-            label(cr, renderer, &entry.note.message(), x + 76.0 + indent, top + 35.0, WIDTH - 151.0 - indent, Font::Small, alpha * 0.63);
-        }
+        let text_x = card_x + 12.0 + 36.0 + 12.0;
+        let right = card_x + card_w - 14.0;
+        let title_h = menu_style::line_height(cr, renderer, Font::Headline);
+        let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+        let line1 = mid - (title_h + sub_h) / 2.0;
+        // the trailing column: when, and whether it is new; × under the pointer
+        let when = age(now_secs().saturating_sub(entry.received));
+        let when_w = renderer.layout(cr, &when, Font::Footnote).pixel_extents().1.width() as f64;
+        let rest = 1.0 - hover.clamp(0.0, 1.0);
+        let foot_h = menu_style::line_height(cr, renderer, Font::Footnote);
+        menu_style::label(cr, renderer, &when, right - when_w, line1 + (title_h - foot_h) / 2.0, when_w + 2.0,
+            Font::Footnote, menu_style::SECONDARY * alpha * rest);
         if unread > 0 {
             cr.new_path();
-            cr.arc(x + WIDTH - 72.0, top + 23.0, 3.0, 0.0, std::f64::consts::TAU);
-            cr.set_source_rgba(0.40, 0.82, 1.0, alpha);
+            cr.arc(right - when_w - 9.0, line1 + title_h / 2.0, 3.5, 0.0, std::f64::consts::TAU);
+            cr.set_source_rgba(menu_style::BLUE.0, menu_style::BLUE.1, menu_style::BLUE.2, alpha * rest);
             let _ = cr.fill();
         }
-        label(cr, renderer, "×", x + WIDTH - 47.0, top + 19.0, 24.0, Font::Text, alpha * (0.43 + 0.35 * hover));
+        if hover > 0.01 {
+            menu_style::close(cr, right - 22.0, mid - 11.0, 22.0, 0.0, alpha * hover);
+        }
+        let title_w = right - when_w - 22.0 - text_x;
+        if count > 1 {
+            let name_w = (renderer.layout(cr, &entry.note.app, Font::Headline).pixel_extents().1.width() as f64)
+                .min(title_w - 52.0);
+            menu_style::label(cr, renderer, &entry.note.app, text_x, line1, name_w + 2.0, Font::Headline, alpha);
+            let bw = menu_style::badge(cr, renderer, &count.to_string(), text_x + name_w + 8.0, line1 + title_h / 2.0,
+                menu_style::GRAY, alpha);
+            let open = self.expanded.contains(&entry.note.app);
+            menu_style::chevron(cr, text_x + name_w + 8.0 + bw + 11.0, line1 + title_h / 2.0, 4.5,
+                if open { -std::f64::consts::FRAC_PI_2 } else { std::f64::consts::FRAC_PI_2 },
+                alpha * (0.5 + 0.4 * hover));
+            menu_style::label(cr, renderer, &entry.note.message(), text_x, line1 + title_h, right - 28.0 - text_x,
+                Font::Subhead, menu_style::SECONDARY * alpha);
+        } else {
+            // sender first, the message below; the app's name only fills in
+            let note = &entry.note;
+            let title = if note.summary.is_empty() { note.app.as_str() } else { note.summary.as_str() };
+            let body = if !note.body.is_empty() { note.body.as_str() } else if !note.summary.is_empty() { note.app.as_str() } else { "" };
+            menu_style::label(cr, renderer, title, text_x, line1, title_w, Font::Headline, alpha);
+            menu_style::label(cr, renderer, body, text_x, line1 + title_h, right - 28.0 - text_x,
+                Font::Subhead, menu_style::SECONDARY * alpha);
+        }
         if grouped {
             cr.pop_group_to_source().unwrap();
             let _ = cr.paint_with_alpha(opacity);
@@ -687,38 +708,57 @@ impl Center {
 
     fn draw_detail(&self, cr: &Context, renderer: &Renderer, media: &Icons, x: f64, y: f64, alpha: f64, serial: u64, now: Time) {
         let Some(entry) = self.entries.iter().find(|e| e.serial == serial) else { return };
+        let top = y + menu_style::CONTENT_TOP;
         if !entry.note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, media, name,
-            x + 49.0, y + 102.0, 48.0, renderer.scale(), alpha)) {
-            icons::draw(cr, entry.note.kind, x + 49.0, y + 102.0, 48.0, (now - self.opened_at).max(0.0), alpha);
+            x + RAIL + 22.0, top + 22.0, 44.0, renderer.scale(), alpha)) {
+            icons::draw(cr, entry.note.kind, x + RAIL + 22.0, top + 22.0, 44.0, (now - self.opened_at).max(0.0), alpha);
         }
-        label(cr, renderer, &entry.note.app, x + 83.0, y + 77.0, WIDTH - 108.0, Font::Caption, alpha * 0.65);
-        label(cr, renderer, &entry.note.summary, x + 83.0, y + 103.0, WIDTH - 108.0, Font::Text, alpha);
-        rounded(cr, x + 22.0, y + 144.0, WIDTH - 44.0, 208.0, 16.0);
-        cr.set_source_rgba(0.14, 0.14, 0.15, alpha);
-        let _ = cr.fill();
-        rounded(cr, x + 22.5, y + 144.5, WIDTH - 45.0, 207.0, 15.5);
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.07 * alpha);
-        let _ = cr.stroke();
+        let tx = x + RAIL + 44.0 + 12.0;
+        let tw = WIDTH - RAIL - (tx - x);
+        let title_h = menu_style::line_height(cr, renderer, Font::Headline);
+        let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+        let line1 = top + 22.0 - (title_h + sub_h) / 2.0;
+        let when = age(now_secs().saturating_sub(entry.received));
+        menu_style::label(cr, renderer, &entry.note.summary, tx, line1, tw, Font::Headline, alpha);
+        menu_style::label(cr, renderer, &format!("{} · {}", entry.note.app, when), tx, line1 + title_h, tw,
+            Font::Subhead, menu_style::SECONDARY * alpha);
+        let body_top = top + 58.0;
+        let body_h = HEIGHT - menu_style::BUTTON_H - RAIL - 14.0 - body_top + y;
+        menu_style::group(cr, x + RAIL, body_top, WIDTH - 2.0 * RAIL, body_h, 0.0, alpha);
         cr.save().unwrap();
-        cr.rectangle(x + 35.0, y + 154.0, WIDTH - 70.0, 187.0);
+        cr.rectangle(x + RAIL + 14.0, body_top + 10.0, WIDTH - 2.0 * RAIL - 28.0, body_h - 20.0);
         cr.clip();
         let body_y = if let Some(image) = &entry.note.image {
             let _ = crate::notify::draw_media(cr, media, image, x + WIDTH / 2.0,
-                y + 211.0, 118.0, renderer.scale(), alpha);
-            278.0
-        } else { 161.0 };
-        let text = renderer.layout(cr, &entry.note.body, Font::Caption).copy();
-        text.set_width(((WIDTH - 70.0) * pango::SCALE as f64) as i32);
+                body_top + 70.0, 118.0, renderer.scale(), alpha);
+            body_top + 138.0
+        } else { body_top + 14.0 };
+        let text = renderer.layout(cr, &entry.note.body, Font::Body).copy();
+        text.set_width(((WIDTH - 2.0 * RAIL - 28.0) * pango::SCALE as f64) as i32);
         text.set_wrap(pango::WrapMode::WordChar);
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.78);
-        cr.move_to(renderer.snap(x + 35.0), renderer.snap(y + body_y - self.detail_scroll));
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.9);
+        cr.move_to(renderer.snap(x + RAIL + 14.0), renderer.snap(body_y - self.detail_scroll));
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
+        let by = y + HEIGHT - RAIL - menu_style::BUTTON_H;
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
-            button(cr, renderer, text, x + 22.0 + index as f64 * 154.0, y + HEIGHT - 62.0, 144.0, 42.0, alpha, self.button_hover[2 + index].value(now));
+            let kind = if index == 0 { ButtonKind::Primary } else { ButtonKind::Neutral };
+            menu_style::button(cr, renderer, text, (x + RAIL + index as f64 * 154.0, by, 144.0, menu_style::BUTTON_H),
+                kind, self.button_hover[2 + index].value(now), alpha);
         }
-        button(cr, renderer, "Удалить", x + WIDTH - 110.0, y + HEIGHT - 62.0, 88.0, 42.0, alpha, self.button_hover[4].value(now));
+        menu_style::button(cr, renderer, "Удалить", (x + WIDTH - 110.0, by, 88.0, menu_style::BUTTON_H),
+            ButtonKind::Destructive, self.button_hover[4].value(now), alpha);
+    }
+}
+
+/// How long ago, the way Notification Center says it.
+fn age(seconds: u64) -> String {
+    match seconds {
+        0..60 => "сейчас".into(),
+        60..3600 => format!("{} мин", seconds / 60),
+        3600..86400 => format!("{} ч", seconds / 3600),
+        86400..172800 => "вчера".into(),
+        _ => format!("{} дн.", seconds / 86400),
     }
 }
 
@@ -728,44 +768,9 @@ fn visible_actions(note: &Notification) -> Vec<&(String, String)> {
     actions
 }
 
-fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    cr.new_path();
-    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
-    cr.close_path();
-}
 
-fn label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, width: f64, font: Font, alpha: f64) {
-    let layout = renderer.layout(cr, text, font).copy();
-    layout.set_width((width * pango::SCALE as f64) as i32);
-    layout.set_ellipsize(pango::EllipsizeMode::End);
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.move_to(renderer.snap(x), renderer.snap(y));
-    pangocairo::functions::show_layout(cr, &layout);
-}
 
-fn centered_label(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, width: f64, font: Font, alpha: f64) {
-    let layout = renderer.layout(cr, text, font);
-    let (_, ext) = layout.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.move_to(renderer.snap(x + (width - ext.width() as f64) / 2.0 - ext.x() as f64), renderer.snap(y));
-    pangocairo::functions::show_layout(cr, &layout);
-}
 
-fn button(cr: &Context, renderer: &Renderer, text: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64, hover: f64) {
-    if text == "×" {
-        crate::menu_style::close(cr, x, y, w, hover, alpha);
-    } else {
-        let kind = match text {
-            "Назад" | "Очистить" => crate::menu_style::ButtonKind::Neutral,
-            "Удалить" => crate::menu_style::ButtonKind::Destructive,
-            _ => crate::menu_style::ButtonKind::Primary,
-        };
-        crate::menu_style::button(cr, renderer, text, (x, y, w, h), Font::Caption, kind, hover, alpha);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -822,7 +827,7 @@ mod tests {
         assert_eq!(rows[0].count, 2);
         assert_eq!(rows[0].unread, 2);
         assert_eq!(rows[1].entry.note.app, "Chat");
-        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + 70.0);
+        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + LIST_BOTTOM);
         assert_eq!(center.click(90.0, ROW_TOP + 12.0, 10.5), Action::None);
         assert_eq!(center.rows().len(), 4);
         assert_eq!(center.height(), HEIGHT);
@@ -839,7 +844,7 @@ mod tests {
         assert_eq!(center.height(), HEIGHT);
         assert_eq!(center.leaving.iter().filter(|row| row.child).count(), 2);
         center.advance(11.5 + ROW_MOTION + 0.01);
-        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + 70.0);
+        assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + LIST_BOTTOM);
     }
 
     #[test]
