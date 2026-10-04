@@ -320,12 +320,30 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
 
 ### Configuration
 
-`~/.config/island-shell/config`, `key = value` lines (`#` comments), read at
-start; `island-shell set key value` changes a value in the running island:
+`~/.config/island-shell/config`, `key = value` lines (`#` starts a comment
+at the beginning of a line or as a separate word), read at start;
+`island-shell set key value` changes a value in the running island and
+`island-shell status` shows the current ones:
 
-    smoothing = 0.6   # corner smoothing 0..1 (0 = circular arcs)
-    liquid = 1        # velocity stretch, 0 = rigid
-    hover = 1         # widen the box under the pointer
+    smoothing = 0.6       # corner smoothing 0..1 (0 = circular arcs)
+    liquid = 1            # velocity stretch, 0 = rigid
+    hover = 1             # widen the box under the pointer
+    output = auto         # auto | focused | a connector name (eDP-1, HDMI-A-1…)
+    clock = %a %b %-d  %-I:%M %p   # strftime(3); seconds tick every second
+    accent = #66D9FF      # equaliser, progress line, "now playing"
+    notice_hold = 3.5     # seconds a notification stays up
+    toast_hold = 4        # seconds the "now playing" toast stays up
+    silent_after = 15     # seconds of pause / mute before the bars fold away
+    dodge = 240           # px the island moves left for the ⋯ drawer
+
+Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
+else on the first output; `focused` follows sway's focused output; a
+connector name pins it there and falls back to `auto` while that output is
+unplugged. Hotplug, disabling an output and scale changes move or re-render
+the island without restarting it — everything it is showing carries on.
+Fullscreen auto-hide looks at the workspace visible on the island's own
+output, so a fullscreen video on the other monitor leaves it alone.
+Animation timings are not configurable: they are tuned together.
 
 ### Running as a service
 

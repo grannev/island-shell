@@ -128,33 +128,110 @@ pub struct Config {
     pub liquid: f64,
     /// React to the pointer over the box (padding 16 → 34 on a spring).
     pub hover: bool,
+    /// The monitor the island lives on: "auto" (the built-in panel, else
+    /// the first output), "focused" (follows sway's focused output) or a
+    /// connector name such as "eDP-1" (auto while it is unplugged).
+    pub output: String,
+    /// The clock, as a strftime(3) format.
+    pub clock: String,
+    /// The equaliser, the progress line and the "now playing" label.
+    pub accent: (f64, f64, f64),
+    /// Seconds a notification stays up.
+    pub notice_hold: f64,
+    /// Seconds the "now playing" toast stays up.
+    pub toast_hold: f64,
+    /// Seconds of silence (paused, muted, 0 %) before the bars fold away.
+    pub silent_after: f64,
+    /// How far the island moves left for the bar's ⋯ drawer, px.
+    pub dodge: f64,
 }
+
+pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
 
 impl Default for Config {
     fn default() -> Self {
-        Config { smoothing: 0.6, liquid: 1.0, hover: true }
+        Config {
+            smoothing: 0.6,
+            liquid: 1.0,
+            hover: true,
+            output: "auto".into(),
+            clock: CLOCK_FORMAT.into(),
+            accent: crate::player::EQ_COLOR,
+            notice_hold: NOTICE_HOLD,
+            toast_hold: TOAST_HOLD,
+            silent_after: SILENT_AFTER,
+            dodge: DODGE,
+        }
     }
 }
 
 impl Config {
+    pub const KEYS: [&'static str; 10] = [
+        "smoothing", "liquid", "hover", "output", "clock", "accent",
+        "notice_hold", "toast_hold", "silent_after", "dodge",
+    ];
+
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
-        let v: f64 = match value {
-            "on" | "true" => 1.0,
-            "off" | "false" => 0.0,
-            v => v.parse().map_err(|_| format!("bad value {value:?}"))?,
+        let value = value.trim();
+        let number = || -> Result<f64, String> {
+            match value {
+                "on" | "true" | "yes" => Ok(1.0),
+                "off" | "false" | "no" => Ok(0.0),
+                v => v.trim_end_matches('s').parse().map_err(|_| format!("bad value {value:?} for {key}")),
+            }
         };
         match key {
-            "smoothing" => self.smoothing = v.clamp(0.0, 1.0),
-            "liquid" => self.liquid = v.clamp(0.0, 4.0),
-            "hover" => self.hover = v != 0.0,
-            _ => return Err(format!("unknown setting {key:?}")),
+            "smoothing" => self.smoothing = number()?.clamp(0.0, 1.0),
+            "liquid" => self.liquid = number()?.clamp(0.0, 4.0),
+            "hover" => self.hover = number()? != 0.0,
+            "output" => {
+                if value.is_empty() || value.contains(char::is_whitespace) {
+                    return Err(format!("bad output {value:?}: auto, focused or a name like eDP-1"));
+                }
+                self.output = value.into();
+            }
+            "clock" => {
+                let value = value.trim_matches('"');
+                if strftime(value).trim().is_empty() {
+                    return Err(format!("clock format {value:?} gives an empty clock"));
+                }
+                self.clock = value.into();
+            }
+            "accent" => self.accent = parse_colour(value).ok_or_else(|| format!("bad colour {value:?}: #RRGGBB"))?,
+            "notice_hold" => self.notice_hold = number()?.clamp(1.0, 60.0),
+            "toast_hold" => self.toast_hold = number()?.clamp(1.0, 30.0),
+            "silent_after" => self.silent_after = number()?.clamp(1.0, 3600.0),
+            "dodge" => self.dodge = number()?.clamp(0.0, 1000.0),
+            _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
     }
 
     pub fn describe(&self) -> String {
-        format!("smoothing={} liquid={} hover={}", self.smoothing, self.liquid, self.hover as u8)
+        let (r, g, b) = self.accent;
+        let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!(
+            "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
+             notice_hold={} toast_hold={} silent_after={} dodge={}",
+            self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
+            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge,
+        )
     }
+
+    /// Does the clock show seconds (and so need a tick every second)?
+    pub fn clock_has_seconds(&self) -> bool {
+        ["%S", "%T", "%r", "%s", "%X", "%c", "%+"].iter().any(|spec| self.clock.contains(spec))
+    }
+}
+
+/// `#RRGGBB` / `RRGGBB` → 0..1 components.
+fn parse_colour(value: &str) -> Option<(f64, f64, f64)> {
+    let hex = value.trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|v| v as f64 / 255.0);
+    Some((channel(0)?, channel(2)?, channel(4)?))
 }
 
 /// Why the island is out of sight; several may hold at once and it comes back
@@ -209,8 +286,9 @@ impl Song {
         self.position_at = now;
     }
 
-    fn view<'a>(&'a self, eq: &'a [f64], pressed: Option<(player::Control, Time)>, scrub: Option<f64>, now: Time) -> player::View<'a> {
+    fn view<'a>(&'a self, eq: &'a [f64], accent: (f64, f64, f64), pressed: Option<(player::Control, Time)>, scrub: Option<f64>, now: Time) -> player::View<'a> {
         player::View {
+            accent,
             title: &self.now.title,
             artist: &self.now.artist,
             app: &self.now.app,
@@ -660,7 +738,7 @@ impl Island {
     }
 
     fn silent_expired(&self, now: Time) -> bool {
-        self.silent_since.is_some_and(|since| now - since >= SILENT_AFTER)
+        self.silent_since.is_some_and(|since| now - since >= self.config.silent_after)
     }
 
     /// Re-aim the movers after a state change.
@@ -765,7 +843,7 @@ impl Island {
         if self.connections_open() {
             if let Some(panel) = &mut self.network_panel { changed |= panel.advance(now); }
         }
-        if self.toast.is_some_and(|since| now - since >= TOAST_HOLD) {
+        if self.toast.is_some_and(|since| now - since >= self.config.toast_hold) {
             self.toast = None;
             changed = true;
         }
@@ -820,7 +898,7 @@ impl Island {
                 changed = true;
             }
         }
-        if self.notice.as_ref().is_some_and(|n| now - n.since >= NOTICE_HOLD) {
+        if self.notice.as_ref().is_some_and(|n| now - n.since >= self.config.notice_hold) {
             self.notice = None;
             self.notice_prev = None;
             changed = true;
@@ -854,7 +932,7 @@ impl Island {
             _ => {}
         }
         if let Some(n) = &self.notice {
-            consider(n.since + NOTICE_HOLD);
+            consider(n.since + self.config.notice_hold);
         }
         if let Some(a) = &self.activity {
             if a.event.hold().is_finite() {
@@ -878,11 +956,11 @@ impl Island {
             consider(l.next_caret(now));
         }
         if let Some(since) = self.toast {
-            consider(since + TOAST_HOLD);
+            consider(since + self.config.toast_hold);
         }
         if let Some(since) = self.silent_since {
-            if now - since < SILENT_AFTER && self.song.is_some() {
-                consider(since + SILENT_AFTER);
+            if now - since < self.config.silent_after && self.song.is_some() {
+                consider(since + self.config.silent_after);
             }
         }
         next
@@ -1598,7 +1676,7 @@ impl Island {
     }
 
     pub fn update_clock(&mut self) -> bool {
-        let text = clock_text();
+        let text = strftime(&self.config.clock);
         if text != self.clock {
             self.clock = text;
             true
@@ -1640,7 +1718,7 @@ impl Island {
         // the panel stands on its own: while it is open the island's own
         // hiding and dodging do not move it, so mod+d works with the island
         // parked above the edge and the panel folds back out of sight
-        let cx = cx - DODGE * dodge.x * (1.0 - p);
+        let cx = cx - self.config.dodge * dodge.x * (1.0 - p);
         let dy = -BOX_H * hide.x * (1.0 - p);
         if dy <= -(BOX_H + FILLET) && p <= 0.0 {
             return Frame::default();
@@ -1662,7 +1740,7 @@ impl Island {
         // proportion to its speed (px/s) and relaxes as it stops
         let liquid = self.config.liquid;
         let stretch_y = liquid * 0.02 * (hide.v * BOX_H).abs();
-        let stretch_x = liquid * 0.01 * (dodge.v * DODGE).abs();
+        let stretch_x = liquid * 0.01 * (dodge.v * self.config.dodge).abs();
 
         // --- the line: the clock, with the bars beating beside it while
         // something plays (the track's name lives in the toast and in the
@@ -1706,7 +1784,7 @@ impl Island {
         }));
         let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
         let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
-            let view = song.view(&self.eq, None, None, now);
+            let view = song.view(&self.eq, self.config.accent, None, None, now);
             (player::toast_width(cr, renderer, &view), player::TOAST_H)
         });
         let (w_target, h_target) = match (self.auth.is_some(), activity_size.or(notice_size).or(toast_size)) {
@@ -1844,7 +1922,7 @@ impl Island {
                 cr.save().unwrap();
                 cr.rectangle(bx, dy, BARS_W * reveal, line_h);
                 cr.clip();
-                player::bars(cr, renderer, &self.eq, bx, dy + (line_h - BARS_H) / 2.0, BARS_W, BARS_H, line_alpha * reveal);
+                player::bars(cr, renderer, &self.eq, self.config.accent, bx, dy + (line_h - BARS_H) / 2.0, BARS_W, BARS_H, line_alpha * reveal);
                 cr.restore().unwrap();
             }
             if unread_len > 0.0 {
@@ -1985,7 +2063,7 @@ impl Island {
                 );
             } else if let Some(since) = self.toast {
                 if let Some(song) = &self.song {
-                    let view = song.view(&self.eq, None, None, now);
+                    let view = song.view(&self.eq, self.config.accent, None, None, now);
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                     player::draw_toast(cr, renderer, &self.art, &view, x0, dy + climb, x1 - x0, bh, pill_alpha, since, now);
                 }
@@ -2014,7 +2092,7 @@ impl Island {
         }
         if pl > 0.0 {
             if let Some(song) = &self.song {
-                let mut view = song.view(&self.eq, self.pressed, self.scrub.map(|(f, _)| f), now);
+                let mut view = song.view(&self.eq, self.config.accent, self.pressed, self.scrub.map(|(f, _)| f), now);
                 view.track_grow = self.track_grow.state(now).x.max(0.0);
                 view.control_hover = std::array::from_fn(|i| self.control_hover[i].state(now).x.max(0.0));
                 let alpha = smoothstep((pl - 0.3) / 0.6);
@@ -2105,7 +2183,7 @@ impl Island {
             // a job reports how far it has got instead of how long the pill
             // still has to live
             Some(done) => icons::progress_ring(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, done, alpha * smoothstep(t / 0.3)),
-            None => icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / NOTICE_HOLD).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
+            None => icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / self.config.notice_hold).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
         }
 
         let (_, app_ext) = app.pixel_extents();
@@ -2506,7 +2584,7 @@ impl Island {
         let p = self.panel.state(now).x;
         let pl = self.player.state(now).x;
         let ed = self.editor_panel.state(now).x;
-        let cx = cx - DODGE * self.dodge.state(now).x * (1.0 - p);
+        let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - p);
         let w = launcher::PANEL_W * p + player::PLAYER_W * pl + editor::PANEL_W * ed;
         (cx - w / 2.0, -BOX_H * self.hide.state(now).x * (1.0 - p))
     }
@@ -2617,68 +2695,33 @@ impl Corner {
     }
 }
 
-/// `%a %b %-d  %-I:%M %p` in the local time zone, e.g. "Mon Sep 15  1:05 PM".
-pub fn clock_text() -> String {
-    let now = libc_localtime();
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let hour12 = match now.hour % 12 {
-        0 => 12,
-        h => h,
-    };
-    let ampm = if now.hour < 12 { "AM" } else { "PM" };
-    format!(
-        "{} {} {}  {}:{:02} {}",
-        DAYS[now.wday as usize], MONTHS[now.mon as usize], now.mday, hour12, now.min, ampm
-    )
-}
-
-pub struct LocalTime {
-    pub sec: u32,
-    pub min: u32,
-    pub hour: u32,
-    pub mday: u32,
-    pub mon: u32,
-    pub wday: u32,
-}
-
-/// Broken-down local time through libc (no chrono needed for one clock).
-pub fn libc_localtime() -> LocalTime {
+/// The local time through strftime(3), e.g. "Mon Sep 15  1:05 PM" for the
+/// default format. The process never calls setlocale, so names stay in the
+/// C locale like the old island's clock.
+pub fn strftime(format: &str) -> String {
+    #[repr(C)]
+    struct Tm {
+        tm_sec: i32, tm_min: i32, tm_hour: i32, tm_mday: i32, tm_mon: i32, tm_year: i32,
+        tm_wday: i32, tm_yday: i32, tm_isdst: i32, tm_gmtoff: i64, tm_zone: *const u8,
+    }
     unsafe extern "C" {
         fn time(t: *mut i64) -> i64;
         fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+        fn strftime(s: *mut u8, max: usize, format: *const std::ffi::c_char, tm: *const Tm) -> usize;
     }
-    #[repr(C)]
-    struct Tm {
-        tm_sec: i32,
-        tm_min: i32,
-        tm_hour: i32,
-        tm_mday: i32,
-        tm_mon: i32,
-        tm_year: i32,
-        tm_wday: i32,
-        tm_yday: i32,
-        tm_isdst: i32,
-        tm_gmtoff: i64,
-        tm_zone: *const u8,
-    }
+    let Ok(format) = std::ffi::CString::new(format) else { return String::new() };
     let mut t = 0i64;
     let mut tm = Tm {
         tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 1, tm_mon: 0, tm_year: 0,
         tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: std::ptr::null(),
     };
-    unsafe {
+    let mut out = [0u8; 256];
+    let len = unsafe {
         time(&mut t);
         localtime_r(&t, &mut tm);
-    }
-    LocalTime {
-        sec: tm.tm_sec as u32,
-        min: tm.tm_min as u32,
-        hour: tm.tm_hour as u32,
-        mday: tm.tm_mday as u32,
-        mon: tm.tm_mon as u32,
-        wday: tm.tm_wday as u32,
-    }
+        strftime(out.as_mut_ptr(), out.len(), format.as_ptr(), &tm)
+    };
+    String::from_utf8_lossy(&out[..len]).into_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2875,6 +2918,42 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn config_reads_every_key_and_rejects_nonsense() {
+        let mut config = Config::default();
+        assert_eq!(strftime(CLOCK_FORMAT), strftime(&config.clock));
+        config.set("clock", "%H:%M").unwrap();
+        assert_eq!(strftime(&config.clock).len(), 5);
+        assert!(!config.clock_has_seconds());
+        config.set("clock", "\"%H:%M:%S\"").unwrap();
+        assert_eq!(config.clock, "%H:%M:%S");
+        assert!(config.clock_has_seconds());
+        assert!(config.set("clock", "").is_err());
+        config.set("accent", "#FF9500").unwrap();
+        assert_eq!(config.accent, (1.0, 149.0 / 255.0, 0.0));
+        assert!(config.set("accent", "orange").is_err());
+        config.set("notice_hold", "6s").unwrap();
+        assert_eq!(config.notice_hold, 6.0);
+        config.set("silent_after", "0").unwrap();
+        assert_eq!(config.silent_after, 1.0);
+        config.set("output", "HDMI-A-1").unwrap();
+        assert!(config.set("output", "two words").is_err());
+        config.set("hover", "off").unwrap();
+        assert!(!config.hover);
+        assert!(config.set("nonsense", "1").unwrap_err().contains("known:"));
+        assert!(config.describe().contains("accent=#FF9500"));
+        assert!(config.describe().contains("clock=\"%H:%M:%S\""));
+    }
+
+    #[test]
+    fn silence_and_holds_follow_the_config() {
+        let mut island = Island::new(Config::default());
+        island.config.set("silent_after", "3").unwrap();
+        island.silent_since = Some(10.0);
+        assert!(!island.silent_expired(12.9));
+        assert!(island.silent_expired(13.0));
+    }
+
     use super::*;
 
     #[test]

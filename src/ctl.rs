@@ -58,6 +58,11 @@ impl Command {
         if let Some(json) = s.trim().strip_prefix("nvim ") {
             return Some(Command::Nvim(json.to_string()));
         }
+        // a value may hold spaces (a clock format): keep them as typed
+        if let Some((key, value)) = s.trim().strip_prefix("set ").and_then(|rest| rest.trim_start().split_once(char::is_whitespace)) {
+            let value = value.trim();
+            return (!value.is_empty()).then(|| Command::Set(key.to_string(), value.to_string()));
+        }
         if let Some(path) = s.trim().strip_prefix("screenshot ") {
             return (!path.is_empty()).then(|| Command::Activity(crate::activity::Event::Screenshot { path: PathBuf::from(path) }));
         }
@@ -70,7 +75,6 @@ impl Command {
             ["undodge"] => Command::Undodge,
             ["dodge-toggle"] => Command::DodgeToggle,
             ["status"] => Command::Status,
-            ["set", key, value] => Command::Set(key.to_string(), value.to_string()),
             ["dump", path] => Command::Dump(path.to_string()),
             ["demo", app, rest @ ..] => {
                 let rest = rest.join(" ");
@@ -210,6 +214,16 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_keeps_spaces_inside_the_value() {
+        assert!(matches!(
+            Command::parse("set clock %a %b %-d  %H:%M"),
+            Some(Command::Set(key, value)) if key == "clock" && value == "%a %b %-d  %H:%M"
+        ));
+        assert!(matches!(Command::parse("set hover 0"), Some(Command::Set(key, value)) if key == "hover" && value == "0"));
+        assert!(Command::parse("set hover").is_none());
+    }
 
     #[test]
     fn parses_live_activity_commands() {

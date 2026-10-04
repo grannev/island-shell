@@ -255,7 +255,14 @@ pub struct App {
     viewporter: WpViewporter,
     dismiss: Option<DismissSurface>,
     viewport: WpViewport,
-    _fractional: Option<WpFractionalScaleV1>,
+    fractional: Option<WpFractionalScaleV1>,
+    fractional_mgr: Option<WpFractionalScaleManagerV1>,
+    /// the output the island's surface was created on (None: not chosen yet,
+    /// or every output is gone)
+    bound_output: Option<wl_output::WlOutput>,
+    /// sway's focused output, for `output = focused`
+    focused_output: Option<String>,
+    clock_timer: Option<RegistrationToken>,
     qh: QueueHandle<App>,
     loop_handle: LoopHandle<'static, App>,
 
@@ -321,18 +328,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("island-shell: wp_fractional_scale_v1 not offered, rendering at scale 1");
     }
 
-    let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("island-shell"), None);
-    layer.set_anchor(Anchor::TOP);
-    layer.set_exclusive_zone(-1);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    layer.set_size(SURFACE_W, SURFACE_H);
-    let viewport = viewporter.get_viewport(layer.wl_surface(), &qh, ());
-    let fractional = fractional_mgr.map(|m| m.get_fractional_scale(layer.wl_surface(), &qh, ()));
-    // an empty input region until the first frame says where the box is
-    let empty = Region::new(&compositor)?;
-    layer.set_input_region(Some(empty.wl_region()));
-    layer.commit();
+    // no output yet: the outputs' names arrive with the first dispatch,
+    // and the island then moves to the one the config asks for
+    let (layer, viewport, fractional) = create_island_surface(
+        &compositor, &layer_shell, &viewporter, fractional_mgr.as_ref(), &qh, None, KeyboardInteractivity::None,
+    );
 
     let pool = SlotPool::new((SURFACE_W * SURFACE_H * 4 * 2) as usize, &shm)?;
 
@@ -383,7 +383,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         viewporter,
         dismiss: None,
         viewport,
-        _fractional: fractional,
+        fractional,
+        fractional_mgr,
+        bound_output: None,
+        focused_output: None,
+        clock_timer: None,
         qh: qh.clone(),
         loop_handle: loop_handle.clone(),
         scale: 1.0,
@@ -539,13 +543,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // the clock: fire just after every minute boundary
-    loop_handle.insert_source(Timer::from_duration(until_next_minute()), |_, _, app: &mut App| {
-        if app.island.update_clock() {
-            app.redraw();
-        }
-        TimeoutAction::ToDuration(until_next_minute())
-    })?;
+    app.arm_clock();
 
     while !app.exit {
         event_loop.dispatch(None, &mut app)?;
@@ -608,9 +606,60 @@ fn read_muted() -> bool {
     muted || zero
 }
 
-fn until_next_minute() -> Duration {
-    let t = crate::island::libc_localtime();
-    Duration::from_secs(60 - t.sec as u64) + Duration::from_millis(20)
+/// Just past the next second, or the next minute, boundary.
+fn until_next_tick(seconds: bool) -> Duration {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let to_second = Duration::from_secs(1) - Duration::from_nanos(since.subsec_nanos() as u64);
+    if seconds {
+        return to_second + Duration::from_millis(5);
+    }
+    let sec: u64 = crate::island::strftime("%S").parse().unwrap_or(0);
+    Duration::from_secs(59u64.saturating_sub(sec)) + to_second + Duration::from_millis(20)
+}
+
+/// The island's layer surface, its viewport and fractional-scale object, on
+/// `output` (None: the compositor's choice).
+fn create_island_surface(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    viewporter: &WpViewporter,
+    fractional_mgr: Option<&WpFractionalScaleManagerV1>,
+    qh: &QueueHandle<App>,
+    output: Option<&wl_output::WlOutput>,
+    keyboard: KeyboardInteractivity,
+) -> (LayerSurface, WpViewport, Option<WpFractionalScaleV1>) {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("island-shell"), output);
+    layer.set_anchor(Anchor::TOP);
+    layer.set_exclusive_zone(-1);
+    layer.set_keyboard_interactivity(keyboard);
+    layer.set_size(SURFACE_W, SURFACE_H);
+    let viewport = viewporter.get_viewport(layer.wl_surface(), qh, ());
+    let fractional = fractional_mgr.map(|m| m.get_fractional_scale(layer.wl_surface(), qh, ()));
+    // an empty input region until the first frame says where the box is
+    if let Ok(empty) = Region::new(compositor) {
+        layer.set_input_region(Some(empty.wl_region()));
+    }
+    layer.commit();
+    (layer, viewport, fractional)
+}
+
+/// Is this connector a laptop's own panel?
+fn is_builtin(name: &str) -> bool {
+    ["eDP", "LVDS", "DSI"].iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// The output `want` names among `outputs` (name, in announcement order):
+/// "focused" → `focused`, a connector name → that one; anything missing,
+/// and "auto", falls back to the built-in panel, else the first output.
+fn choose_output<'a>(outputs: &'a [String], want: &str, focused: Option<&str>) -> Option<&'a String> {
+    let named = |name: &str| outputs.iter().find(|n| n.as_str() == name);
+    let wanted = match want {
+        "auto" => None,
+        "focused" => focused.and_then(named),
+        name => named(name),
+    };
+    wanted.or_else(|| outputs.iter().find(|n| is_builtin(n))).or_else(|| outputs.first())
 }
 
 fn config_path() -> std::path::PathBuf {
@@ -620,12 +669,29 @@ fn config_path() -> std::path::PathBuf {
     base.join("island-shell").join("config")
 }
 
+/// A `#` starts a comment at the beginning of a line, or as a separate
+/// word after a value; `accent = #66D9FF` keeps its colour.
+fn strip_comment(line: &str) -> &str {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return "";
+    }
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate().skip(1) {
+        let separate = bytes[i - 1].is_ascii_whitespace() && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
+        if b == b'#' && separate {
+            return line[..i].trim_end();
+        }
+    }
+    line
+}
+
 /// `key = value` lines, `#` comments (see island::Config).
 fn load_config() -> Config {
     let mut config = Config::default();
     let Ok(text) = std::fs::read_to_string(config_path()) else { return config };
     for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
+        let line = strip_comment(line);
         if line.is_empty() {
             continue;
         }
@@ -664,9 +730,10 @@ impl App {
             }
             Command::Status => {
                 return format!(
-                    "{} {} scale={} {}x{} refresh={:.3}ms pipeline={} buffers={} dismiss={:?} {} {}",
+                    "{} {} on={} scale={} {}x{} refresh={:.3}ms pipeline={} buffers={} dismiss={:?} {} {}",
                     if self.island.is_hidden() { "hidden" } else { "shown" },
                     if self.island.dodged { "dodged" } else { "centred" },
+                    self.bound_output_name().unwrap_or_else(|| "-".into()),
                     self.scale,
                     self.width,
                     self.height,
@@ -681,6 +748,14 @@ impl App {
             Command::Set(key, value) => {
                 if let Err(e) = self.island.config.set(&key, &value) {
                     return format!("error: {e}");
+                }
+                match key.as_str() {
+                    "output" => self.outputs_changed(),
+                    "clock" => {
+                        self.island.update_clock();
+                        self.arm_clock();
+                    }
+                    _ => {}
                 }
             }
             Command::Launcher => {
@@ -845,9 +920,17 @@ impl App {
     }
 
     fn check_fullscreen(&mut self) {
+        let island_output = self.bound_output_name();
         let Some(q) = self.sway_query.as_mut() else { return };
-        match q.fullscreen_focused() {
-            Ok(fs) => {
+        match q.outputs(island_output.as_deref()) {
+            Ok((focused, fs)) => {
+                if focused != self.focused_output {
+                    self.focused_output = focused;
+                    if self.island.config.output == "focused" && self.rebind_output() {
+                        // a different output shows a different workspace
+                        return self.check_fullscreen();
+                    }
+                }
                 if fs != self.island.hidden.fullscreen {
                     let now = self.frame_time();
                     self.island.set_fullscreen(fs, now);
@@ -1227,6 +1310,123 @@ impl App {
         }
     }
 
+    /// (Re)start the clock's timer: every minute, or every second when the
+    /// format shows seconds.
+    fn arm_clock(&mut self) {
+        if let Some(token) = self.clock_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let seconds = self.island.config.clock_has_seconds();
+        self.clock_timer = self
+            .loop_handle
+            .insert_source(Timer::from_duration(until_next_tick(seconds)), |_, _, app: &mut App| {
+                if app.island.update_clock() {
+                    app.redraw();
+                }
+                TimeoutAction::ToDuration(until_next_tick(app.island.config.clock_has_seconds()))
+            })
+            .ok();
+    }
+
+    fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
+        self.output_state.info(output).and_then(|info| info.name)
+    }
+
+    fn bound_output_name(&self) -> Option<String> {
+        self.bound_output.as_ref().and_then(|output| self.output_name(output))
+    }
+
+    /// The output the config asks for among the ones that exist now, other
+    /// than `gone` (sctk still lists an output while reporting it destroyed).
+    fn pick_output(&self, gone: Option<&wl_output::WlOutput>) -> Option<wl_output::WlOutput> {
+        let outputs: Vec<(wl_output::WlOutput, String)> = self
+            .output_state
+            .outputs()
+            .filter(|output| Some(output) != gone)
+            .filter_map(|output| self.output_name(&output).map(|name| (output, name)))
+            .collect();
+        let names: Vec<String> = outputs.iter().map(|(_, name)| name.clone()).collect();
+        let chosen = choose_output(&names, &self.island.config.output, self.focused_output.as_deref())?;
+        outputs.into_iter().find(|(_, name)| name == chosen).map(|(output, _)| output)
+    }
+
+    /// Outputs came, went or changed, or the config names another one:
+    /// move the island if needed, then look at what that output shows.
+    fn outputs_changed(&mut self) {
+        self.outputs_changed_without(None);
+    }
+
+    fn outputs_changed_without(&mut self, gone: Option<&wl_output::WlOutput>) {
+        self.rebind_output_without(gone);
+        self.check_fullscreen();
+    }
+
+    /// Recreate the island's surface on the chosen output if it is not
+    /// there already. Everything the island shows lives in `Island`, so the
+    /// animations carry on; only the Wayland objects are new. Returns
+    /// whether it moved.
+    fn rebind_output(&mut self) -> bool {
+        self.rebind_output_without(None)
+    }
+
+    fn rebind_output_without(&mut self, gone: Option<&wl_output::WlOutput>) -> bool {
+        let target = self.pick_output(gone);
+        // with no outputs at all there is nowhere to go: wait for one
+        if target.is_none() || target == self.bound_output {
+            return false;
+        }
+        let (layer, viewport, fractional) = create_island_surface(
+            &self.compositor, &self.layer_shell, &self.viewporter, self.fractional_mgr.as_ref(),
+            &self.qh, target.as_ref(), self.kbd_interactivity,
+        );
+        self.viewport.destroy();
+        if let Some(old) = self.fractional.take() {
+            old.destroy();
+        }
+        self.layer = layer;
+        self.viewport = viewport;
+        self.fractional = fractional;
+        self.bound_output = target;
+        if self.island.config.output != "auto" || self.clock.debug {
+            eprintln!("island-shell: on output {}", self.bound_output_name().unwrap_or_default());
+        }
+        // the old surface's frame callback and buffers went with it
+        self.configured = false;
+        self.frame_pending = false;
+        self.last_frame = None;
+        self.drawn_for = None;
+        self.buffers.clear();
+        self.width = SURFACE_W;
+        self.height = SURFACE_H;
+        // no leave event arrives for a destroyed surface
+        if self.island.hovered {
+            self.pointer_left();
+        }
+        // the outside-click catcher covers the island's output
+        if self.dismiss.take().is_some() {
+            self.sync_dismiss_surface(true);
+        }
+        true
+    }
+
+    /// The pointer is no longer over the island (it left, or the surface
+    /// under it was replaced).
+    fn pointer_left(&mut self) {
+        let now = self.clock.predict(false);
+        self.island.hovered = false;
+        self.island.clear_timer_hover();
+        self.island.clear_network_hover(now);
+        self.island.set_quick_hover(-1.0, -1.0, now);
+        self.island.clear_center_hover(now);
+        self.island.set_notice_hover(-1.0, -1.0, now);
+        self.island.set_eq_hover(-1.0, -1.0, now);
+        self.island.set_editor_chip_hover(-1.0, -1.0, now);
+        self.island.set_editor_hover(None);
+        if !self.island.is_scrubbing() {
+            self.island.set_hovered_control(None);
+        }
+    }
+
     fn set_scale(&mut self, scale: f64) {
         if (scale - self.scale).abs() < 1e-6 {
             return;
@@ -1245,8 +1445,9 @@ impl App {
             return;
         }
         if self.dismiss.is_some() { return; }
-        let output = self.layer.wl_surface().data::<SurfaceData<()>>()
-            .and_then(|data| data.outputs().next());
+        let output = self.bound_output.clone().or_else(|| {
+            self.layer.wl_surface().data::<SurfaceData<()>>().and_then(|data| data.outputs().next())
+        });
         let surface = self.compositor.create_surface(&self.qh);
         let layer = self.layer_shell.create_layer_surface(
             &self.qh, surface, Layer::Overlay, Some("island-dismiss"), output.as_ref(),
@@ -1334,15 +1535,29 @@ impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.outputs_changed();
+    }
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.outputs_changed();
+    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        if self.bound_output.as_ref() == Some(&output) {
+            // the compositor closes the surface too; do not wait for it
+            self.bound_output = None;
+        }
+        self.outputs_changed_without(Some(&output));
+    }
 }
 
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         if layer.wl_surface() == self.layer.wl_surface() {
-            self.exit = true;
+            // its output went away (or was disabled): move to another one
+            // rather than exit, and wait for one if none is left
+            self.bound_output = None;
+            self.configured = false;
+            self.outputs_changed();
         } else if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
             self.dismiss_menus();
         }
@@ -1441,18 +1656,7 @@ impl PointerHandler for App {
                     changed = true;
                 }
                 PointerEventKind::Leave { .. } => {
-                    self.island.hovered = false;
-                    self.island.clear_timer_hover();
-                    self.island.clear_network_hover(self.clock.predict(false));
-                    self.island.set_quick_hover(-1.0, -1.0, self.clock.predict(false));
-                    self.island.clear_center_hover(self.clock.predict(false));
-                    self.island.set_notice_hover(-1.0, -1.0, self.clock.predict(false));
-                    self.island.set_eq_hover(-1.0, -1.0, self.clock.predict(false));
-                    self.island.set_editor_chip_hover(-1.0, -1.0, self.clock.predict(false));
-                    self.island.set_editor_hover(None);
-                    if !self.island.is_scrubbing() {
-                        self.island.set_hovered_control(None);
-                    }
+                    self.pointer_left();
                     changed = true;
                 }
                 PointerEventKind::Motion { .. } => {
@@ -1808,6 +2012,37 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_choice_prefers_the_config_then_the_builtin_panel() {
+        let outputs: Vec<String> = ["HDMI-A-1", "eDP-1", "DP-2"].map(String::from).to_vec();
+        let pick = |want: &str, focused: Option<&str>| choose_output(&outputs, want, focused).map(String::as_str);
+        assert_eq!(pick("auto", Some("DP-2")), Some("eDP-1"));
+        assert_eq!(pick("DP-2", None), Some("DP-2"));
+        // a named output that is unplugged falls back like auto
+        assert_eq!(pick("DP-9", None), Some("eDP-1"));
+        assert_eq!(pick("focused", Some("HDMI-A-1")), Some("HDMI-A-1"));
+        assert_eq!(pick("focused", None), Some("eDP-1"));
+        let external: Vec<String> = ["DP-2", "HDMI-A-1"].map(String::from).to_vec();
+        assert_eq!(choose_output(&external, "auto", None).map(String::as_str), Some("DP-2"));
+        assert_eq!(choose_output(&[], "auto", None), None);
+    }
+
+    #[test]
+    fn comments_leave_colours_alone() {
+        assert_eq!(strip_comment("# smoothing = 1"), "");
+        assert_eq!(strip_comment("#smoothing = 1"), "");
+        assert_eq!(strip_comment("liquid = 1   # stretch"), "liquid = 1");
+        assert_eq!(strip_comment("accent = #66D9FF  # cyan"), "accent = #66D9FF");
+        assert_eq!(strip_comment("accent = #66D9FF"), "accent = #66D9FF");
+        assert_eq!(strip_comment("clock = %H:%M #"), "clock = %H:%M");
+    }
+
+    #[test]
+    fn clock_tick_lands_just_past_a_boundary() {
+        assert!(until_next_tick(true) <= Duration::from_millis(1005));
+        assert!(until_next_tick(false) <= Duration::from_millis(60_020));
+    }
 
     #[test]
     fn music_buttons_are_scoped_to_the_music_area() {

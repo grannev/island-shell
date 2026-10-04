@@ -102,7 +102,9 @@ notifications living inside the island.
 4. Launcher (search, .desktop entries, icons, keyboard focus).
 5. Polish: multi-output, config file, idle CPU ~0.
 
-Status: steps 1–4 done; the old waybar island and its scripts are removed
+Status: steps 1–5 done (multi-output: `output = auto|focused|<name>`, the
+surface is recreated on hotplug / `closed`, never exits; config keys in
+island::Config, README "Configuration"); the old waybar island and its scripts are removed
 (backup: ~/.config/waybar/old-island-backup.tar.gz), island-shell runs as
 a systemd user service. Neovim integration lives in nvim/ and the iVim
 repository (~/it/coding/ivim).

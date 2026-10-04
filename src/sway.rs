@@ -1,6 +1,6 @@
 //! sway IPC: a subscription to window / workspace events (non-blocking, fed
 //! into the event loop) plus a second, blocking connection for queries — the
-//! island hides while a fullscreen window has the focus.
+//! island hides while its output shows a fullscreen window.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -65,18 +65,28 @@ impl Query {
         serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    /// Is there a fullscreen window on the focused workspace?
-    pub fn fullscreen_focused(&mut self) -> io::Result<bool> {
+    /// sway's focused output, and whether a fullscreen window covers the
+    /// workspace visible on `output` (the island's; None: the focused one).
+    pub fn outputs(&mut self, output: Option<&str>) -> io::Result<(Option<String>, bool)> {
         let workspaces = self.request(GET_WORKSPACES, "")?;
-        let focused_ws = workspaces
-            .as_array()
-            .and_then(|ws| ws.iter().find(|w| w["focused"] == Value::Bool(true)))
-            .and_then(|w| w["name"].as_str().map(str::to_string));
-        let Some(focused_ws) = focused_ws else { return Ok(false) };
+        let workspaces = workspaces.as_array().map(Vec::as_slice).unwrap_or_default();
+        let focused = workspaces.iter().find(|w| w["focused"] == Value::Bool(true));
+        let focused_output = focused.and_then(|w| w["output"].as_str().map(str::to_string));
+        let shown = match output {
+            Some(name) => workspaces
+                .iter()
+                .find(|w| w["visible"] == Value::Bool(true) && w["output"] == name)
+                .or(focused.filter(|w| w["output"] == name)),
+            None => focused,
+        };
+        let Some(shown) = shown.and_then(|w| w["name"].as_str().map(str::to_string)) else {
+            return Ok((focused_output, false));
+        };
         let tree = self.request(GET_TREE, "")?;
         // the workspace node itself reports fullscreen_mode 1: only its
         // descendants count
-        Ok(find_workspace(&tree, &focused_ws).is_some_and(|ws| children(ws).any(has_fullscreen)))
+        let fullscreen = find_workspace(&tree, &shown).is_some_and(|ws| children(ws).any(has_fullscreen));
+        Ok((focused_output, fullscreen))
     }
 }
 

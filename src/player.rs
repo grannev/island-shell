@@ -81,6 +81,8 @@ pub fn track_fraction(w: f64, x: f64) -> f64 {
 
 /// Everything the drawing needs about the track.
 pub struct View<'a> {
+    /// the equaliser / progress colour (config `accent`)
+    pub accent: (f64, f64, f64),
     pub title: &'a str,
     pub artist: &'a str,
     pub app: &'a str,
@@ -132,7 +134,7 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
 
     // the live equaliser, right of the text
     let (ba, _) = stage(0.1);
-    bars(cr, renderer, view.eq, x + w - PAD - bars_w, y + 30.0, bars_w, 22.0, ba);
+    bars(cr, renderer, view.eq, view.accent, x + w - PAD - bars_w, y + 30.0, bars_w, 22.0, ba);
 
     // the progress line: it swells under the pointer and swells further
     // while the playhead is being dragged, with a knob to hold on to
@@ -151,9 +153,9 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
         let lift = 0.18 * (grow - TRACK_HOVER).max(0.0) / (1.0 - TRACK_HOVER);
         rounded(cr, track_x, bar_y, track_w * done, bar_h, bar_h / 2.0);
         cr.set_source_rgba(
-            EQ_COLOR.0 + (1.0 - EQ_COLOR.0) * lift,
-            EQ_COLOR.1 + (1.0 - EQ_COLOR.1) * lift,
-            EQ_COLOR.2,
+            view.accent.0 + (1.0 - view.accent.0) * lift,
+            view.accent.1 + (1.0 - view.accent.1) * lift,
+            view.accent.2 + (1.0 - view.accent.2) * lift,
             0.95 * pa,
         );
         let _ = cr.fill();
@@ -266,14 +268,14 @@ fn note(cr: &Context, cx: f64, cy: f64, size: f64, alpha: f64) {
 
 /// Four bars, bottoms on a common line — the same shape the collapsed
 /// island shows beside the clock.
-pub fn bars(cr: &Context, renderer: &Renderer, levels: &[f64], x: f64, y: f64, w: f64, h: f64, alpha: f64) {
+pub fn bars(cr: &Context, renderer: &Renderer, levels: &[f64], accent: (f64, f64, f64), x: f64, y: f64, w: f64, h: f64, alpha: f64) {
     if alpha <= 0.003 {
         return;
     }
     let n = levels.len().max(1);
     let bar = 3.0;
     let step = (w - bar) / (n - 1).max(1) as f64;
-    cr.set_source_rgba(EQ_COLOR.0, EQ_COLOR.1, EQ_COLOR.2, alpha);
+    cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
     for (i, level) in levels.iter().enumerate() {
         let bh = (2.0 + (h - 2.0) * level.clamp(0.0, 1.0)).min(h);
         let bx = renderer.snap(x + i as f64 * step);
@@ -354,7 +356,7 @@ pub fn draw_toast(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: 
     let (_, t_ext) = title.pixel_extents();
     let total = l_ext.height() as f64 + 2.0 + t_ext.height() as f64;
     let top = y + (h - total) / 2.0;
-    cr.set_source_rgba(EQ_COLOR.0, EQ_COLOR.1, EQ_COLOR.2, ta);
+    cr.set_source_rgba(view.accent.0, view.accent.1, view.accent.2, ta);
     cr.move_to(renderer.snap(text_x + to), renderer.snap(top - l_ext.y() as f64));
     pangocairo::functions::show_layout(cr, &label);
     cr.set_source_rgba(1.0, 1.0, 1.0, ta);
@@ -362,7 +364,7 @@ pub fn draw_toast(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: 
     pangocairo::functions::show_layout(cr, &title);
 
     let (ba, _) = stage(0.12);
-    bars(cr, renderer, view.eq, x + w - TOAST_PAD - bars_w, y + h / 2.0 - 9.0, bars_w, 18.0, ba);
+    bars(cr, renderer, view.eq, view.accent, x + w - TOAST_PAD - bars_w, y + h / 2.0 - 9.0, bars_w, 18.0, ba);
 }
 
 /// The width a toast needs for this track.
