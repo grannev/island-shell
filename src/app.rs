@@ -606,6 +606,22 @@ fn read_muted() -> bool {
     muted || zero
 }
 
+/// Logical pixels a notch of the wheel scrolls a list: about one row, as
+/// GTK and browsers do for a list this size.
+const WHEEL_PX: f64 = 52.0;
+
+/// One axis event as a scroll distance in logical px: wheels by notch
+/// (high-resolution wheels in fractions of one), touchpads 1:1.
+fn wheel_pixels(discrete: i32, value120: i32, absolute: f64) -> f64 {
+    if value120 != 0 {
+        value120 as f64 / 120.0 * WHEEL_PX
+    } else if discrete != 0 {
+        discrete as f64 * WHEEL_PX
+    } else {
+        absolute
+    }
+}
+
 /// Just past the next second, or the next minute, boundary.
 fn until_next_tick(seconds: bool) -> Duration {
     let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
@@ -1829,12 +1845,17 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Axis { vertical, .. } => {
                     changed = true;
+                    // a notch is a push of WHEEL_PX; a touchpad moves 1:1
+                    let px = wheel_pixels(vertical.discrete, vertical.value120, vertical.absolute);
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
                     let now = self.clock.predict(false);
-                    if self.island.scroll_notification_center(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
+                    if self.island.scroll_notification_center(px / crate::notice_center::ROW_H, now) {
+                        // the card under a resting pointer changed
+                        let (x, y) = self.pointer_at;
+                        self.island.set_center_hover(x, y, now);
                         continue;
                     }
-                    if self.island.scroll_network(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
+                    if self.island.scroll_network(px / crate::connections::ROW_H, now) {
                         changed = true;
                         continue;
                     }
@@ -1845,8 +1866,7 @@ impl PointerHandler for App {
                     match self.island.launcher.as_mut() {
                         // inside the launcher the wheel scrolls the list
                         Some(l) => {
-                            let rows = if vertical.discrete != 0 { v } else { v / 40.0 };
-                            if l.scroll_by(rows, now) {
+                            if l.scroll_by(px / crate::launcher::ROW_H, now) {
                                 changed = true;
                             }
                         }

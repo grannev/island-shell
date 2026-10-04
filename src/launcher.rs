@@ -21,7 +21,7 @@ const FIELD_H: f64 = 46.0;
 const FIELD_PAD: f64 = 22.0;
 /// The list.
 const LIST_TOP: f64 = 98.0;
-const ROW_H: f64 = 56.0;
+pub const ROW_H: f64 = 56.0;
 const ROW_PAD: f64 = 14.0;
 const ICON: f64 = 38.0;
 const ICON_GAP: f64 = 16.0;
@@ -36,7 +36,9 @@ const SCROLL_MARGIN: f64 = 1.0;
 
 const ROW_SPRING: (f64, f64) = (0.34, 0.82);
 const SEL_SPRING: (f64, f64) = (0.28, 0.78);
-const SCROLL_SPRING: (f64, f64) = (0.3, 0.95);
+/// the list's glide (anim::Glide): the wheel pushes, keys glide a little longer
+const WHEEL_TAU: f64 = 0.08;
+const KEY_TAU: f64 = 0.1;
 const FADE: f64 = 0.22;
 /// the caret's blink (macOS runs at a bit under two a second)
 const CARET_HZ: f64 = 1.6;
@@ -96,7 +98,7 @@ pub struct Launcher {
     sel_slot: Spring,
     sel_alpha: Quintic,
     /// how far the list is scrolled, in rows
-    scroll: Spring,
+    scroll: crate::anim::Glide,
     close_hover: Spring,
     edge_pull: Option<EdgePull>,
     matches: usize,
@@ -118,7 +120,7 @@ impl Launcher {
             selected: String::new(),
             sel_slot: Spring::new(0.0, SEL_SPRING.0, SEL_SPRING.1),
             sel_alpha: Quintic::at_rest(0.0, FADE),
-            scroll: Spring::new(0.0, SCROLL_SPRING.0, SCROLL_SPRING.1),
+            scroll: crate::anim::Glide::new(0.0, KEY_TAU),
             close_hover: Spring::new(0.0, 0.24, 0.85),
             edge_pull: None,
             matches: 0,
@@ -255,7 +257,7 @@ impl Launcher {
         (self.matches as f64 - VISIBLE_ROWS as f64).max(0.0)
     }
 
-    /// Scroll by `rows` (the wheel).
+    /// Scroll by `rows` (the wheel; fractional — it glides, never steps).
     pub fn scroll_by(&mut self, rows: f64, now: Time) -> bool {
         if rows.abs() < 1e-6 { return false; }
         let wanted = self.scroll.target() + rows;
@@ -267,7 +269,7 @@ impl Launcher {
         if (target - self.scroll.target()).abs() < 1e-6 {
             return excess.abs() > 1e-6;
         }
-        self.scroll.set(target, now);
+        self.scroll.set_with(target, WHEEL_TAU, now);
         true
     }
 
@@ -307,7 +309,7 @@ impl Launcher {
         } else {
             return;
         };
-        self.scroll.set(target.clamp(0.0, self.max_scroll()), now);
+        self.scroll.set_with(target.clamp(0.0, self.max_scroll()), KEY_TAU, now);
     }
 
     fn sync_selection(&mut self, now: Time) {
@@ -417,7 +419,7 @@ impl Launcher {
         if rel < 0.0 || rel > VISIBLE_ROWS as f64 * ROW_H {
             return None;
         }
-        let index = (rel / ROW_H + self.scroll.state(now).x).floor();
+        let index = (rel / ROW_H + self.scroll.value(now)).floor();
         (index >= 0.0 && (index as usize) < self.matches).then_some(index as usize)
     }
 
@@ -478,7 +480,7 @@ impl Launcher {
 
         // the list scrolls inside its own viewport; there is no scrollbar,
         // the rows simply fade out at the top and bottom edges
-        let scroll = self.scroll.state(now).x;
+        let scroll = self.scroll.value(now);
         let view_top = y + LIST_TOP;
         let view_h = VISIBLE_ROWS as f64 * ROW_H;
         cr.save().unwrap();
@@ -492,11 +494,10 @@ impl Launcher {
         let sel_alpha = self.sel_alpha.state(now).x * alpha;
         if sel_alpha > 0.002 {
             let sy = view_top + (self.sel_slot.state(now).x - scroll) * ROW_H;
-            // Spotlight's selection: the system accent, solid
-            rounded(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0, 10.0);
-            let blue = crate::menu_style::BLUE;
-            cr.set_source_rgba(blue.0, blue.1, blue.2, 0.92 * sel_alpha);
-            let _ = cr.fill();
+            // a light card under the selection, the notification
+            // center's hover, gliding between rows
+            crate::menu_style::group(cr, x + FIELD_PAD - 6.0, sy + 2.0, w - 2.0 * (FIELD_PAD - 6.0), ROW_H - 4.0,
+                1.0, sel_alpha);
         }
 
         // the rows
@@ -579,8 +580,6 @@ impl Launcher {
 
         let text_x = renderer.snap(icon_x + ICON + ICON_GAP);
         let max_w = w - (text_x - x) - FIELD_PAD;
-        let selected = (1.0 - (row.slot.state(now).x - self.sel_slot.state(now).x).abs()).clamp(0.0, 1.0)
-            * self.sel_alpha.state(now).x;
         let name = renderer.layout_ellipsized(cr, row.entry.name(), Font::Headline, max_w, 1);
         let (_, n_ext) = name.pixel_extents();
         if row.entry.subtitle().is_empty() {
@@ -595,8 +594,7 @@ impl Launcher {
             cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
             cr.move_to(text_x, renderer.snap(top - n_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &name);
-            let sub_alpha = crate::menu_style::SECONDARY + (0.85 - crate::menu_style::SECONDARY) * selected;
-            cr.set_source_rgba(1.0, 1.0, 1.0, sub_alpha * alpha);
+            cr.set_source_rgba(1.0, 1.0, 1.0, crate::menu_style::SECONDARY * alpha);
             cr.move_to(text_x, renderer.snap(top + n_ext.height() as f64 + 1.0 - s_ext.y() as f64));
             pangocairo::functions::show_layout(cr, &sub);
         }

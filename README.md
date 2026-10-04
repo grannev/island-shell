@@ -131,7 +131,10 @@ Typing re-ranks the list and the rows *glide* to their new places on
 springs while the selection follows; rows entering and leaving fade.
 The list holds every match and scrolls — the wheel, or the selection
 walking past the edge — with no scrollbar: the rows simply fade into the
-top and bottom of the viewport.
+top and bottom of the viewport. The wheel glides rather than steps: each
+notch pushes the list about a row and eases out, quick notches merge into
+one motion, and a touchpad moves it 1:1. The selection is a light card,
+like a hovered notification.
 
 A left click on the ordinary compact body opens the four-button menu immediately.
 Left, right and middle clicks over the compact equaliser or the open music panel

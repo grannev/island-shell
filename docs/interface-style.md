@@ -52,7 +52,13 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   `Headline` title and a `Subhead` status line.
 - **Segmented controls, switches, fields** (`segmented`, `toggle`,
   `field`): the iOS shapes; focus is a blue ring, selection a grey thumb.
-- **Selection** in the launcher is the solid system blue, as in Spotlight.
+- **Selection and hover** are a light card (`group` at full hover), the
+  same in the launcher and the notification center; no solid fills.
+- **Scrolling** glides (`anim::Glide`): a wheel notch is a push of about
+  one row that starts at once and eases out, quick notches extend one
+  glide, a touchpad moves content 1:1. Lists scroll continuously (never
+  snapping to whole rows), dissolve into soft `edge_fades`, and show an
+  overlay indicator only while moving.
 
 ## Copy
 

@@ -189,6 +189,64 @@ impl Spring {
     }
 }
 
+/// A scroll position: an exponential approach to its target, the way a
+/// scroll view eases out. Unlike a spring from rest it starts moving at
+/// once, so every wheel notch reads as a push, not a step; notches that
+/// arrive while it is moving extend the same glide (the position never
+/// jumps, only the target moves on).
+#[derive(Clone, Debug)]
+pub struct Glide {
+    x0: f64,
+    target: f64,
+    start: Time,
+    tau: f64,
+}
+
+impl Glide {
+    /// `tau`: the time constant — 95 % of the way after 3 τ.
+    pub fn new(value: f64, tau: f64) -> Self {
+        Glide { x0: value, target: value, start: 0.0, tau }
+    }
+
+    pub fn target(&self) -> f64 {
+        self.target
+    }
+
+    pub fn value(&self, now: Time) -> f64 {
+        let t = (now - self.start).max(0.0);
+        self.target + (self.x0 - self.target) * (-t / self.tau).exp()
+    }
+
+    pub fn is_moving(&self, now: Time) -> bool {
+        (self.value(now) - self.target).abs() > 1e-3
+    }
+
+    /// Glide to `to` from wherever it is now.
+    pub fn set(&mut self, to: f64, now: Time) {
+        if self.target == to {
+            return;
+        }
+        self.x0 = self.value(now);
+        self.target = to;
+        self.start = now;
+    }
+
+    /// Glide to `to` with another time constant (keys glide a little
+    /// longer than the wheel).
+    pub fn set_with(&mut self, to: f64, tau: f64, now: Time) {
+        self.x0 = self.value(now);
+        self.target = to;
+        self.start = now;
+        self.tau = tau;
+    }
+
+    /// Jump without motion (a list that was rebuilt).
+    pub fn reset(&mut self, value: f64) {
+        self.x0 = value;
+        self.target = value;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +282,20 @@ mod tests {
         assert!((before.a - after.a).abs() < 1e-6);
         let end = q.state(0.35);
         assert!((end.x - 0.0).abs() < 1e-9 && end.v.abs() < 1e-9);
+    }
+
+    #[test]
+    fn glide_moves_at_once_and_accumulates_without_jumps() {
+        let mut g = Glide::new(0.0, 0.08);
+        g.set(1.0, 10.0);
+        // an ease-out: a third of the way after a fifth of the time
+        assert!(g.value(10.04) > 0.35);
+        let before = g.value(10.05);
+        g.set(g.target() + 1.0, 10.05);
+        assert!((g.value(10.05) - before).abs() < 1e-12);
+        assert!(g.value(10.06) > before);
+        assert!(!g.is_moving(11.0));
+        assert!((g.value(11.0) - 2.0).abs() < 1e-3);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Native Wi-Fi / Bluetooth sheets, including their interaction and motion.
 
-use crate::anim::{Spring, Time};
+use crate::anim::{Glide, Spring, Time};
 use crate::island::{Font, Renderer, smoothstep};
 use crate::menu_style::{self, ButtonKind, RAIL};
 use crate::network::{self, Action, Device, Input, Kind, Message, Snapshot, Update};
@@ -16,8 +16,9 @@ pub const WIDTH: f64 = 480.0;
 const TABS_Y: f64 = menu_style::CONTENT_TOP;
 const TABS_H: f64 = 32.0;
 const LIST_Y: f64 = TABS_Y + TABS_H + 12.0;
-const ROW_H: f64 = 52.0;
+pub const ROW_H: f64 = 52.0;
 const VISIBLE: usize = 5;
+const SCROLL_TAU: f64 = 0.08;
 /// below the list: a status line, the search button and the bottom rail
 const FOOTER: f64 = 24.0 + menu_style::BUTTON_H + RAIL;
 pub const HEIGHT: f64 = LIST_Y + VISIBLE as f64 * ROW_H + FOOTER;
@@ -60,7 +61,8 @@ pub struct Panel {
     error: Option<String>,
     tab: usize,
     tab_slide: Spring,
-    scroll: Spring,
+    /// the list position in rows; the wheel glides it (anim::Glide)
+    scroll: Glide,
     hovered: Option<Hit>,
     hover: HashMap<Hit, Spring>,
     slots: HashMap<String, Spring>,
@@ -127,7 +129,7 @@ impl Panel {
             error: None,
             tab: 0,
             tab_slide: Spring::new(0.0, 0.32, 0.86),
-            scroll: Spring::new(0.0, 0.3, 1.0),
+            scroll: Glide::new(0.0, SCROLL_TAU),
             hovered: None,
             hover: HashMap::new(),
             slots: HashMap::new(),
@@ -417,7 +419,7 @@ impl Panel {
                     self.changed = now;
                     self.tab = index;
                     self.tab_slide.set(index as f64, now);
-                    self.scroll = Spring::new(0.0, 0.3, 1.0);
+                    self.scroll = Glide::new(0.0, SCROLL_TAU);
                     self.slots.clear();
                     self.update_slots(now);
                     self.hover_at(None, now);
@@ -437,7 +439,7 @@ impl Panel {
                         self.changed = now;
                         self.tab = 1;
                         self.tab_slide.set(1.0, now);
-                        self.scroll = Spring::new(0.0, 0.3, 1.0);
+                        self.scroll = Glide::new(0.0, SCROLL_TAU);
                         self.slots.clear();
                         self.update_slots(now);
                     }

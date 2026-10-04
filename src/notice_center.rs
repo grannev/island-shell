@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cairo::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::anim::{Spring, Time, min_jerk};
+use crate::anim::{Glide, Spring, Time, min_jerk};
 use crate::icons;
 use crate::iconload::Icons;
 use crate::island::{Font, Renderer};
@@ -23,10 +23,13 @@ pub const HEIGHT: f64 = ROW_TOP + ROWS as f64 * ROW_H + LIST_BOTTOM;
 const LIMIT: usize = 50;
 const ROWS: usize = 4;
 const ROW_TOP: f64 = menu_style::CONTENT_TOP;
-const ROW_H: f64 = 72.0;
+pub const ROW_H: f64 = 72.0;
 /// below the last card: the sheet's bottom rail less the cards' own gap
 const LIST_BOTTOM: f64 = 16.0;
 const ROW_MOTION: Time = 0.42;
+/// the wheel's glide (see anim::Glide)
+const SCROLL_TAU: Time = 0.08;
+const INDICATOR_HOLD: Time = 0.8;
 const EXIT_MOTION: Time = 0.32;
 const VIEW_MOTION: Time = 0.28;
 
@@ -76,14 +79,16 @@ pub struct Center {
     next_serial: u64,
     pub open: bool,
     pub opened_at: Time,
-    offset: usize,
-    scroll_fraction: f64,
+    /// the list position in rows (fractional: the wheel glides, it does
+    /// not step); rows and leaving rows live in list coordinates
+    scroll: Glide,
+    scrolled_at: Time,
     detail: Option<u64>,
     view_transition: Option<(Option<u64>, Time)>,
     detail_scroll: f64,
     expanded: HashSet<String>,
     hovered: Option<Hit>,
-    row_hover: [Spring; ROWS],
+    row_hover: HashMap<RowKey, Spring>,
     button_hover: [Spring; 5],
     row_from: HashMap<RowKey, f64>,
     row_motion_at: Time,
@@ -170,9 +175,9 @@ impl Center {
     fn with_entries(entries: VecDeque<Entry>, writer: Option<mpsc::Sender<Vec<Entry>>>) -> Self {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
-            entries, next_serial, open: false, opened_at: 0.0, offset: 0, scroll_fraction: 0.0,
+            entries, next_serial, open: false, opened_at: 0.0, scroll: Glide::new(0.0, SCROLL_TAU), scrolled_at: f64::NEG_INFINITY,
             detail: None, view_transition: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
-            row_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
+            row_hover: HashMap::new(),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             row_from: HashMap::new(), row_motion_at: 0.0,
             born_at: HashMap::new(), leaving: Vec::new(),
@@ -193,8 +198,9 @@ impl Center {
 
     fn list_height(&self) -> f64 {
         if self.entries.is_empty() { return ROW_TOP + ROW_H * 3.0 + LIST_BOTTOM; }
-        let visible = self.leaving.iter().map(|row| row.row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
-        let moving = self.row_from.values().map(|row| row.ceil().max(0.0) as usize + 1).max().unwrap_or(0);
+        let top = self.scroll.target();
+        let visible = self.leaving.iter().map(|row| (row.row - top).ceil().max(0.0) as usize + 1).max().unwrap_or(0);
+        let moving = self.row_from.values().map(|row| (row - top).ceil().max(0.0) as usize + 1).max().unwrap_or(0);
         ROW_TOP + ROW_H * self.rows().len().max(visible).max(moving).clamp(1, ROWS) as f64 + LIST_BOTTOM
     }
 
@@ -226,9 +232,20 @@ impl Center {
         rows
     }
 
-    fn clamp_offset(&mut self) {
-        self.offset = self.offset.min(self.rows().len().saturating_sub(ROWS));
-        self.scroll_fraction = 0.0;
+    fn max_scroll(&self) -> f64 {
+        self.rows().len().saturating_sub(ROWS) as f64
+    }
+
+    /// Keep the list within its rows after it shrank, gliding back.
+    fn clamp_scroll(&mut self, now: Time) {
+        let max = self.max_scroll();
+        if self.scroll.target() > max { self.scroll.set(max, now); }
+    }
+
+    /// Is a row (in list coordinates) inside the viewport?
+    fn in_view(&self, row: f64) -> bool {
+        let top = self.scroll.target();
+        row > top - 1.0 && row < top + ROWS as f64
     }
 
     pub fn upsert(&mut self, mut note: Notification, now: Time) {
@@ -254,7 +271,7 @@ impl Center {
             self.next_serial = self.next_serial.saturating_add(1);
         }
         self.entries.truncate(LIMIT);
-        if self.open && reorder { self.offset = 0; } else { self.clamp_offset(); }
+        if self.open && reorder { self.scroll.set(0.0, now); } else { self.clamp_scroll(now); }
         self.persist();
     }
 
@@ -265,8 +282,7 @@ impl Center {
 
     fn capture_rows(&mut self, now: Time) {
         let positions: HashMap<_, _> = self.rows().iter().enumerate().map(|(i, row)| {
-            let target = i as f64 - self.offset as f64;
-            (row.key.clone(), self.row_position(&row.key, target, now))
+            (row.key.clone(), self.row_position(&row.key, i as f64, now))
         }).collect();
         self.row_from = positions;
         self.row_motion_at = now;
@@ -291,8 +307,8 @@ impl Center {
     pub fn open(&mut self, now: Time) {
         self.open = true;
         self.opened_at = now;
-        self.offset = 0;
-        self.scroll_fraction = 0.0;
+        self.scroll.reset(0.0);
+        self.row_hover.clear();
         self.detail = None;
         self.view_transition = None;
         self.expanded.clear();
@@ -308,7 +324,8 @@ impl Center {
     }
 
     pub fn is_animating(&self, now: Time) -> bool {
-        self.open && (now - self.opened_at < 0.5 || self.row_hover.iter().any(|s| s.is_moving(now))
+        self.open && (now - self.opened_at < 0.5 || self.row_hover.values().any(|s| s.is_moving(now))
+            || self.scroll.is_moving(now) || now - self.scrolled_at < INDICATOR_HOLD + 0.3
             || self.button_hover.iter().any(|s| s.is_moving(now))
             || !self.leaving.is_empty() || !self.born_at.is_empty()
             || !self.row_from.is_empty()
@@ -328,8 +345,11 @@ impl Center {
         }
         if x >= WIDTH - 156.0 && x < WIDTH - 62.0 && y < 58.0 { return Some(Hit::Clear); }
         if y >= ROW_TOP && y < ROW_TOP + ROW_H * ROWS as f64 {
-            let row = ((y - ROW_TOP) / ROW_H) as usize;
-            if self.rows().get(self.offset + row).is_some() {
+            let index = ((y - ROW_TOP) / ROW_H + self.scroll.target()).floor();
+            // the gap between two cards belongs to neither
+            let within = (y - ROW_TOP) / ROW_H + self.scroll.target() - index;
+            if index >= 0.0 && within * ROW_H < ROW_H - 6.0 && self.rows().get(index as usize).is_some() {
+                let row = index as usize;
                 return Some(if x >= WIDTH - 55.0 { Hit::Remove(row) } else { Hit::Row(row) });
             }
         }
@@ -340,9 +360,7 @@ impl Center {
         let hit = self.hit(x, y);
         if self.hovered == hit { return false; }
         self.hovered = hit;
-        for (i, spring) in self.row_hover.iter_mut().enumerate() {
-            spring.set(if matches!(hit, Some(Hit::Row(j) | Hit::Remove(j)) if i == j) { 1.0 } else { 0.0 }, now);
-        }
+        self.set_row_hover(now);
         for (i, spring) in self.button_hover.iter_mut().enumerate() {
             spring.set(if matches!((i, hit),
                 (0, Some(Hit::Close)) | (1, Some(Hit::Clear | Hit::Back))
@@ -352,21 +370,40 @@ impl Center {
         true
     }
 
+    /// Light the card under the pointer, whichever row it has scrolled to.
+    fn set_row_hover(&mut self, now: Time) {
+        let lit = match self.hovered {
+            Some(Hit::Row(index) | Hit::Remove(index)) => self.rows().get(index).map(|view| view.key.clone()),
+            _ => None,
+        };
+        for (key, spring) in self.row_hover.iter_mut() {
+            if Some(key) != lit.as_ref() { spring.set(0.0, now); }
+        }
+        if let Some(key) = lit {
+            self.row_hover.entry(key).or_insert_with(|| Spring::new(0.0, 0.22, 0.85)).set(1.0, now);
+        }
+        self.row_hover.retain(|_, spring| spring.target() > 0.0 || spring.is_moving(now));
+    }
+
+    /// The scroll indicator's opacity: up while scrolling, gone a moment
+    /// after the list comes to rest.
+    fn indicator(&self, now: Time) -> f64 {
+        let since = now - self.scrolled_at;
+        if self.scroll.is_moving(now) || since < INDICATOR_HOLD { 1.0 }
+        else { 1.0 - ((since - INDICATOR_HOLD) / 0.3).clamp(0.0, 1.0) }
+    }
+
+    /// Scroll by `rows` (fractional): the list glides, it does not step.
     pub fn scroll(&mut self, rows: f64, now: Time) -> bool {
         if self.detail.is_some() {
             let old = self.detail_scroll;
-            self.detail_scroll = (old + rows * 32.0).clamp(0.0, 600.0);
+            self.detail_scroll = (old + rows * ROW_H).clamp(0.0, 600.0);
             return old != self.detail_scroll;
         }
-        let limit = self.rows().len().saturating_sub(ROWS) as f64;
-        let position = (self.offset as f64 + self.scroll_fraction + rows).clamp(0.0, limit);
-        let next = position.round() as usize;
-        self.scroll_fraction = position - next as f64;
-        if next == self.offset { return false; }
-        self.capture_rows(now);
-        self.offset = next;
-        self.born_at.clear();
-        self.leaving.clear();
+        let next = (self.scroll.target() + rows).clamp(0.0, self.max_scroll());
+        if (next - self.scroll.target()).abs() < 1e-9 { return false; }
+        self.scroll.set_with(next, SCROLL_TAU, now);
+        self.scrolled_at = now;
         true
     }
 
@@ -378,13 +415,13 @@ impl Center {
                 self.capture_rows(now);
                 let leaving: Vec<_> = self.rows().iter().filter_map(|view| {
                     let row = *self.row_from.get(&view.key)?;
-                    (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+                    self.in_view(row).then(|| Leaving {
                         entry: view.entry.clone(), count: view.count, unread: view.unread,
                         child: view.child, row, since: now,
                     })
                 }).collect();
                 self.leaving.extend(leaving);
-                self.entries.clear(); self.offset = 0; self.scroll_fraction = 0.0; self.persist(); Action::DismissMany(ids)
+                self.entries.clear(); self.scroll.set(0.0, now); self.persist(); Action::DismissMany(ids)
             }
             Some(Hit::Back) => {
                 self.view_transition = Some((self.detail, now));
@@ -393,7 +430,7 @@ impl Center {
                 Action::None
             }
             Some(Hit::Row(row)) => {
-                if let Some(view) = self.rows().get(self.offset + row) {
+                if let Some(view) = self.rows().get(row) {
                     if view.count > 1 {
                         let app = view.entry.note.app.clone();
                         self.capture_rows(now);
@@ -401,7 +438,7 @@ impl Center {
                             let leaving: Vec<_> = self.rows().iter().filter(|view| view.child && view.entry.note.app == app)
                                 .filter_map(|view| {
                                     let row = *self.row_from.get(&view.key)?;
-                                    (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+                                    self.in_view(row).then(|| Leaving {
                                         entry: view.entry.clone(), count: 1, unread: view.unread,
                                         child: true, row, since: now,
                                     })
@@ -414,7 +451,7 @@ impl Center {
                                 self.born_at.insert(entry.serial, now);
                             }
                         }
-                        self.clamp_offset();
+                        self.clamp_scroll(now);
                         return Action::None;
                     }
                     let serial = view.entry.serial;
@@ -430,7 +467,7 @@ impl Center {
             }
             Some(Hit::Remove(row)) => {
                 let rows = self.rows();
-                let Some(view) = rows.get(self.offset + row) else { return Action::None };
+                let Some(view) = rows.get(row) else { return Action::None };
                 if view.count > 1 { self.remove_group(&view.entry.note.app.clone(), now) }
                 else { self.remove_serial(view.entry.serial, now) }
             }
@@ -459,13 +496,13 @@ impl Center {
         let Some(entry) = self.entries.remove(index) else { return Action::None };
         if self.open && self.detail.is_none() {
             if let Some((_, count, unread, child, Some(row))) = view {
-                if (0.0..ROWS as f64).contains(&row) {
+                if self.in_view(row) {
                     self.leaving.push(Leaving { entry: entry.clone(), count, unread, child, row, since: now });
                 }
             }
         }
         self.born_at.remove(&entry.serial);
-        self.clamp_offset();
+        self.clamp_scroll(now);
         self.persist();
         if entry.active { Action::Dismiss(entry.note.id) } else { Action::None }
     }
@@ -479,7 +516,7 @@ impl Center {
         self.capture_rows(now);
         let leaving: Vec<_> = self.rows().iter().filter(|view| view.entry.note.app == app).filter_map(|view| {
             let row = *self.row_from.get(&view.key)?;
-            (0.0..ROWS as f64).contains(&row).then(|| Leaving {
+            self.in_view(row).then(|| Leaving {
                 entry: view.entry.clone(), count: view.count, unread: view.unread,
                 child: view.child, row, since: now,
             })
@@ -489,7 +526,7 @@ impl Center {
             .map(|entry| entry.note.id).collect();
         self.entries.retain(|entry| entry.note.app != app);
         self.expanded.remove(app);
-        self.clamp_offset();
+        self.clamp_scroll(now);
         self.persist();
         Action::DismissMany(ids)
     }
@@ -595,40 +632,43 @@ impl Center {
                 Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * a);
         }
         cr.save().unwrap();
-        cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
+        // the viewport ends where the last card does (cards keep a 6 px gap)
+        cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64 - 6.0);
         cr.clip();
+        let scroll = self.scroll.value(now);
         for (index, view) in rows.iter().enumerate() {
-            let row = index as isize - self.offset as isize;
-            let target = row as f64;
-            let position = self.row_position(&view.key, target, now);
+            let position = self.row_position(&view.key, index as f64, now) - scroll;
             if position < -1.0 || position > ROWS as f64 { continue; }
-            let delay = target.clamp(0.0, ROWS as f64 - 1.0) * 0.04;
+            let delay = (index as f64 - self.scroll.target()).clamp(0.0, ROWS as f64 - 1.0) * 0.04;
             let opening = min_jerk(((now - self.opened_at - delay) / 0.38).clamp(0.0, 1.0));
             let born = if view.count > 1 { None } else { self.born_at.get(&view.entry.serial).copied() };
             let entrance = born.map_or(1.0, |since| min_jerk(((now - since) / ROW_MOTION).clamp(0.0, 1.0)));
             let fade = born.map_or(1.0, |since| min_jerk(((now - since) / 0.26).clamp(0.0, 1.0)));
             let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
             let opacity = alpha * opening * fade;
-            let hover = usize::try_from(row).ok().and_then(|row| self.row_hover.get(row))
-                .map_or(0.0, |spring| spring.value(now));
+            let hover = self.row_hover.get(&view.key).map_or(0.0, |spring| spring.value(now));
             self.draw_row(cr, renderer, media, view.entry, view.count, view.unread, view.child,
                 x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
         }
         for leaving in &self.leaving {
             let k = min_jerk(((now - leaving.since) / EXIT_MOTION).clamp(0.0, 1.0));
-            let top = y + ROW_TOP + leaving.row * ROW_H - k * 9.0;
+            let top = y + ROW_TOP + (leaving.row - scroll) * ROW_H - k * 9.0;
             self.draw_row(cr, renderer, media, &leaving.entry, leaving.count, leaving.unread, leaving.child,
                 x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
         }
+        // cards slide under soft edges where there is more to scroll to
+        let max = self.max_scroll();
+        menu_style::edge_fades(cr, x, y + ROW_TOP, WIDTH, ROW_H * ROWS as f64 - 6.0,
+            (scroll / 0.4).clamp(0.0, 1.0), ((max - scroll) / 0.4).clamp(0.0, 1.0), 22.0);
         cr.restore().unwrap();
-        if rows.len() > ROWS {
-            // an overlay scroll indicator, as in any Apple list
+        let shown = self.indicator(now);
+        if rows.len() > ROWS && shown > 0.0 {
+            // an overlay scroll indicator, shown while the list moves
             let track = ROW_H * ROWS as f64 - 18.0;
             let thumb = (track * ROWS as f64 / rows.len() as f64).max(24.0);
-            let max = (rows.len() - ROWS) as f64;
-            let at = ((self.offset as f64 + self.scroll_fraction) / max).clamp(0.0, 1.0);
+            let at = (scroll / max).clamp(0.0, 1.0);
             menu_style::rounded(cr, x + WIDTH - 13.0, y + ROW_TOP + 6.0 + (track - thumb) * at, 3.0, thumb, 1.5);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.28 * alpha);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.35 * alpha * shown);
             let _ = cr.fill();
         }
         let _ = height;
@@ -858,13 +898,15 @@ mod tests {
         center.open(10.0);
         assert_eq!(center.click(90.0, ROW_TOP + 12.0, 10.5), Action::None);
         assert_eq!(center.rows().len(), 6);
-        assert_eq!(center.offset, 0);
-        assert!(!center.scroll(0.25, 11.0));
-        assert!(center.scroll(0.25, 11.1));
-        assert_eq!(center.offset, 1);
-        for step in 2..=8 { center.scroll(0.25, 11.0 + step as f64 * 0.1); }
-        assert_eq!(center.offset, 2);
-        assert_eq!(center.rows()[center.offset + ROWS - 1].entry.note.summary, "Message 1");
+        // a quarter of a row is a quarter of a row: no rounding to steps
+        assert!(center.scroll(0.25, 11.0));
+        assert_eq!(center.scroll.target(), 0.25);
+        let early = center.scroll.value(11.02);
+        assert!(early > 0.05 && early < 0.25, "the glide starts at once: {early}");
+        for step in 2..=12 { center.scroll(0.25, 11.0 + step as f64 * 0.02); }
+        assert_eq!(center.scroll.target(), 2.0, "clamped at the end of the list");
+        assert!(!center.scroll(0.25, 11.4));
+        assert_eq!(center.rows()[2 + ROWS - 1].entry.note.summary, "Message 1");
         assert_eq!(center.click(90.0, ROW_TOP + (ROWS as f64 - 1.0) * ROW_H + 12.0, 12.0), Action::None);
         assert_eq!(center.detail.and_then(|serial| center.entries.iter().find(|entry| entry.serial == serial))
             .map(|entry| entry.note.summary.as_str()), Some("Message 1"));

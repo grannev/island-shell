@@ -3087,6 +3087,19 @@ mod tests {
         }
         island.open_notification_center(10.0);
         gallery_shot("09-notification-center", &mut island, 10.0);
+        {
+            let mut scrolled = gallery_island();
+            for n in 0..7 {
+                let apps = ["Telegram", "Firefox", "Discord", "notify-send", "Thunderbird", "Slack", "Steam"];
+                let mut note = crate::notify::fabricate(apps[n as usize], &format!("Message {n}"), "Body text");
+                note.id = 100 + n;
+                scrolled.center.upsert(note, 5.0);
+            }
+            scrolled.open_notification_center(10.0);
+            gallery_shot_after("09c-notification-scroll-settled", &mut scrolled, 10.0, 1.0);
+            scrolled.center.scroll(1.5, 11.0);
+            gallery_shot_after("09d-notification-scroll-moving", &mut scrolled, 11.0, 0.06);
+        }
         island.center.click(90.0, menu_style_top() + 12.0, 13.0);
         gallery_shot("09b-notification-detail", &mut island, 13.0);
 

@@ -344,3 +344,21 @@ pub fn spinner(cr: &Context, cx: f64, cy: f64, r: f64, now: f64, alpha: f64) {
     let _ = cr.stroke();
     cr.restore().unwrap();
 }
+
+/// Black gradients over the island's own black at the top and bottom of a
+/// scrolling viewport, so content dissolves into its edges; `top` and
+/// `bottom` (0..1) say how much there is to scroll to on each side.
+#[allow(clippy::too_many_arguments)]
+pub fn edge_fades(cr: &Context, x: f64, y: f64, w: f64, h: f64, top: f64, bottom: f64, depth: f64) {
+    for (amount, from, to) in [(top, y, y + depth), (bottom, y + h, y + h - depth)] {
+        if amount <= 0.0 {
+            continue;
+        }
+        let g = cairo::LinearGradient::new(0.0, from, 0.0, to);
+        g.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, amount.clamp(0.0, 1.0));
+        g.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 0.0);
+        let _ = cr.set_source(&g);
+        cr.rectangle(x, from.min(to), w, depth);
+        let _ = cr.fill();
+    }
+}
