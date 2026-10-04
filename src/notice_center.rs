@@ -73,6 +73,7 @@ pub struct Center {
     pub open: bool,
     pub opened_at: Time,
     offset: usize,
+    scroll_fraction: f64,
     detail: Option<u64>,
     view_transition: Option<(Option<u64>, Time)>,
     detail_scroll: f64,
@@ -165,7 +166,7 @@ impl Center {
     fn with_entries(entries: VecDeque<Entry>, writer: Option<mpsc::Sender<Vec<Entry>>>) -> Self {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
-            entries, next_serial, open: false, opened_at: 0.0, offset: 0,
+            entries, next_serial, open: false, opened_at: 0.0, offset: 0, scroll_fraction: 0.0,
             detail: None, view_transition: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
             row_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
@@ -223,6 +224,7 @@ impl Center {
 
     fn clamp_offset(&mut self) {
         self.offset = self.offset.min(self.rows().len().saturating_sub(ROWS));
+        self.scroll_fraction = 0.0;
     }
 
     pub fn upsert(&mut self, mut note: Notification, now: Time) {
@@ -286,6 +288,7 @@ impl Center {
         self.open = true;
         self.opened_at = now;
         self.offset = 0;
+        self.scroll_fraction = 0.0;
         self.detail = None;
         self.view_transition = None;
         self.expanded.clear();
@@ -345,16 +348,22 @@ impl Center {
         true
     }
 
-    pub fn scroll(&mut self, rows: f64) -> bool {
+    pub fn scroll(&mut self, rows: f64, now: Time) -> bool {
         if self.detail.is_some() {
             let old = self.detail_scroll;
             self.detail_scroll = (old + rows * 32.0).clamp(0.0, 600.0);
             return old != self.detail_scroll;
         }
-        let old = self.offset;
-        self.offset = (self.offset as f64 + rows).round().clamp(0.0, self.rows().len().saturating_sub(ROWS) as f64) as usize;
-        if old != self.offset { self.row_from.clear(); self.born_at.clear(); self.leaving.clear(); }
-        old != self.offset
+        let limit = self.rows().len().saturating_sub(ROWS) as f64;
+        let position = (self.offset as f64 + self.scroll_fraction + rows).clamp(0.0, limit);
+        let next = position.round() as usize;
+        self.scroll_fraction = position - next as f64;
+        if next == self.offset { return false; }
+        self.capture_rows(now);
+        self.offset = next;
+        self.born_at.clear();
+        self.leaving.clear();
+        true
     }
 
     pub fn click(&mut self, x: f64, y: f64, now: Time) -> Action {
@@ -371,7 +380,7 @@ impl Center {
                     })
                 }).collect();
                 self.leaving.extend(leaving);
-                self.entries.clear(); self.offset = 0; self.persist(); Action::DismissMany(ids)
+                self.entries.clear(); self.offset = 0; self.scroll_fraction = 0.0; self.persist(); Action::DismissMany(ids)
             }
             Some(Hit::Back) => {
                 self.view_transition = Some((self.detail, now));
@@ -577,16 +586,20 @@ impl Center {
         cr.save().unwrap();
         cr.rectangle(x + 14.0, y + ROW_TOP, WIDTH - 28.0, ROW_H * ROWS as f64);
         cr.clip();
-        for (row, view) in rows.iter().skip(self.offset).take(ROWS).enumerate() {
-            let delay = row as f64 * 0.04;
+        for (index, view) in rows.iter().enumerate() {
+            let row = index as isize - self.offset as isize;
+            let target = row as f64;
+            let position = self.row_position(&view.key, target, now);
+            if position < -1.0 || position > ROWS as f64 { continue; }
+            let delay = target.clamp(0.0, ROWS as f64 - 1.0) * 0.04;
             let opening = min_jerk(((now - self.opened_at - delay) / 0.38).clamp(0.0, 1.0));
             let born = if view.count > 1 { None } else { self.born_at.get(&view.entry.serial).copied() };
             let entrance = born.map_or(1.0, |since| min_jerk(((now - since) / ROW_MOTION).clamp(0.0, 1.0)));
             let fade = born.map_or(1.0, |since| min_jerk(((now - since) / 0.26).clamp(0.0, 1.0)));
-            let position = self.row_position(&view.key, row as f64, now);
             let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
             let opacity = alpha * opening * fade;
-            let hover = self.row_hover[row].value(now);
+            let hover = usize::try_from(row).ok().and_then(|row| self.row_hover.get(row))
+                .map_or(0.0, |spring| spring.value(now));
             self.draw_row(cr, renderer, media, view.entry, view.count, view.unread, view.child,
                 x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
         }
@@ -827,6 +840,29 @@ mod tests {
         assert_eq!(center.leaving.iter().filter(|row| row.child).count(), 2);
         center.advance(11.5 + ROW_MOTION + 0.01);
         assert_eq!(center.height(), ROW_TOP + 2.0 * ROW_H + 70.0);
+    }
+
+    #[test]
+    fn fractional_wheel_reaches_the_last_child_of_an_expanded_group() {
+        let mut center = center();
+        for id in 1..=5 {
+            let mut note = crate::notify::fabricate("Telegram", &format!("Message {id}"), "body");
+            note.id = id;
+            center.upsert(note, id as f64);
+        }
+        center.open(10.0);
+        assert_eq!(center.click(90.0, ROW_TOP + 12.0, 10.5), Action::None);
+        assert_eq!(center.rows().len(), 6);
+        assert_eq!(center.offset, 0);
+        assert!(!center.scroll(0.25, 11.0));
+        assert!(center.scroll(0.25, 11.1));
+        assert_eq!(center.offset, 1);
+        for step in 2..=8 { center.scroll(0.25, 11.0 + step as f64 * 0.1); }
+        assert_eq!(center.offset, 2);
+        assert_eq!(center.rows()[center.offset + ROWS - 1].entry.note.summary, "Message 1");
+        assert_eq!(center.click(90.0, ROW_TOP + (ROWS as f64 - 1.0) * ROW_H + 12.0, 12.0), Action::None);
+        assert_eq!(center.detail.and_then(|serial| center.entries.iter().find(|entry| entry.serial == serial))
+            .map(|entry| entry.note.summary.as_str()), Some("Message 1"));
     }
 
     #[test]

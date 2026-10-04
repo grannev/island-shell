@@ -1627,7 +1627,7 @@ impl PointerHandler for App {
                     changed = true;
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
                     let now = self.clock.predict(false);
-                    if self.island.scroll_notification_center(if vertical.discrete != 0 { v } else { v / 40.0 }) {
+                    if self.island.scroll_notification_center(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {
                         continue;
                     }
                     if self.island.scroll_network(if vertical.discrete != 0 { v } else { v / 40.0 }, now) {

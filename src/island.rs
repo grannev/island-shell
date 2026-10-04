@@ -2261,8 +2261,10 @@ impl Island {
         Some(action)
     }
 
-    pub fn scroll_notification_center(&mut self, rows: f64) -> bool {
-        self.center.open && self.center.scroll(rows)
+    pub fn scroll_notification_center(&mut self, rows: f64, now: Time) -> bool {
+        if !self.center.open { return false; }
+        self.center.scroll(rows, now);
+        true
     }
 
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
