@@ -120,8 +120,11 @@ pub fn scan() -> Vec<App> {
             .then_with(|| b.subtitle.is_empty().cmp(&a.subtitle.is_empty()))
     });
     // the same program often arrives twice (Telegram ships both
-    // telegram-desktop.desktop and its reverse-DNS twin): one row each
-    apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    // telegram-desktop.desktop and its reverse-DNS twin): one row each.
+    // The ranking puts the twins apart once one of them has been used, so
+    // keep the first of every name rather than only adjacent repeats.
+    let mut names = std::collections::HashSet::new();
+    apps.retain(|app| names.insert(app.name.to_lowercase()));
     apps
 }
 
