@@ -22,22 +22,16 @@ impl Cava {
     pub fn start(tx: Sender<[f32; BANDS]>) -> std::io::Result<Cava> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let conf = dir.join("island-shell-cava.conf");
-        // cava's "auto" source is the default *source* (the microphone
-        // here): name the default sink explicitly so it captures what is
-        // being played
-        let sink = Command::new("pactl")
-            .arg("get-default-sink")
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "auto".into());
+        // With `method = pipewire`, cava 0.10's "auto" captures the default
+        // sink's monitor and follows it when the default sink changes. An
+        // explicit node name (the sink or "<sink>.monitor") does not resolve
+        // and silently falls back to the default source: the microphone.
         let mut f = std::fs::File::create(&conf)?;
         write!(
             f,
             "[general]\nbars = {BANDS}\nframerate = {FRAMERATE}\nautosens = 1\nsensitivity = 250\n\
              lower_cutoff_freq = 50\nhigher_cutoff_freq = 10000\nsleep_timer = 3\n\
-             [input]\nmethod = pipewire\nsource = {sink}\n\
+             [input]\nmethod = pipewire\nsource = auto\n\
              [output]\nmethod = raw\nraw_target = /dev/stdout\ndata_format = ascii\n\
              ascii_max_range = {MAX_RANGE}\nbar_delimiter = 59\nchannels = mono\nmono_option = average\n\
              [smoothing]\nnoise_reduction = 60\n"
