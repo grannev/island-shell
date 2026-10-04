@@ -318,8 +318,11 @@ impl Center {
         self.leaving.clear();
     }
 
+    /// Close; the view stays as it was (the list or a notification's
+    /// details) so the island can fade it out with the fold. `open`
+    /// starts from the list again.
     pub fn close(&mut self) {
-        self.open = false; self.detail = None; self.view_transition = None; self.hovered = None;
+        self.open = false; self.view_transition = None; self.hovered = None;
         self.row_from.clear(); self.born_at.clear(); self.leaving.clear();
     }
 

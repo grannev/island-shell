@@ -449,6 +449,13 @@ pub struct Island {
     quick_hover_springs: [Spring; 6],
     quick_close_hover: Spring,
     quick_retiring_at: Option<Time>,
+    /// the notification center was just closed: its content fades with the
+    /// fold (or crossfades into the sheet that replaced it)
+    center_retiring_at: Option<Time>,
+    center_was_open: bool,
+    /// the pill was last a sheet (30 px corners) rather than a capsule;
+    /// remembered so a closing sheet keeps its corners while it folds
+    sheet_corners: bool,
     quick_returned_at: Option<Time>,
     eq_rect: Option<Rect>,
     player_rect: Option<Rect>,
@@ -606,6 +613,9 @@ impl Island {
             quick_hover_springs: std::array::from_fn(|_| Spring::new(0.0, 0.24, 0.83)),
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
             quick_retiring_at: None,
+            center_retiring_at: None,
+            center_was_open: false,
+            sheet_corners: false,
             quick_returned_at: None,
             eq_rect: None,
             player_rect: None,
@@ -669,6 +679,7 @@ impl Island {
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
             || self.quick_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
+            || self.center_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.quick_returned_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.notice_action_hover.iter().any(|spring| spring.is_moving(now))
             || self.center.is_animating(now)
@@ -849,6 +860,12 @@ impl Island {
         }
         if self.quick_retiring_at.is_some_and(|since| now - since >= SHEET_SWAP) {
             self.quick_retiring_at = None;
+            changed = true;
+        }
+        if self.center_retiring_at.is_some_and(|since| now - since >= SHEET_SWAP && self.center_swapped())
+            || self.center_retiring_at.is_some() && self.pill.state(now).x <= 0.0
+        {
+            self.center_retiring_at = None;
             changed = true;
         }
         if self.quick_returned_at.is_some_and(|since| now - since >= SHEET_SWAP) {
@@ -1725,11 +1742,21 @@ impl Island {
         }
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
-        let pill_radius = if self.quick_open || self.center.open || self.visible_activity().is_some_and(|a| activity::takes_keyboard(&a.event)) {
-            30.0
-        } else {
-            self.pill_h.state(now).x / 2.0
-        };
+        if self.center.open {
+            self.center_retiring_at = None;
+        } else if self.center_was_open {
+            self.center_retiring_at = Some(now);
+        }
+        self.center_was_open = self.center.open;
+        // a sheet keeps its 30 px corners until another kind of pill takes
+        // the box; switching to a capsule's radius the instant a sheet
+        // closed ballooned the folding sheet into an oval
+        if self.quick_open || self.center.open || self.visible_activity().is_some_and(|a| activity::takes_keyboard(&a.event)) {
+            self.sheet_corners = true;
+        } else if self.auth.is_some() || self.notice.is_some() || self.toast.is_some() || self.visible_activity().is_some() {
+            self.sheet_corners = false;
+        }
+        let pill_radius = if self.sheet_corners { 30.0 } else { self.pill_h.state(now).x / 2.0 };
         let radius = radius
             + (pill_radius - radius) * q
             + (PLAYER_R - radius) * pl
@@ -1857,8 +1884,15 @@ impl Island {
         // below the box): a pixel-aligned rectangle, which cairo clips for
         // free, is enough — the content never reaches the corners
         cr.save().unwrap();
-        let (cx0, cy0) = (renderer.floor(x0), renderer.floor(dy));
-        cr.rectangle(cx0, cy0, renderer.ceil(x1) - cx0, renderer.ceil(y1) - cy0);
+        if q > 0.001 && q < 0.999 {
+            // while the pill morphs, its content may still be larger than
+            // the box: clip to the real outline so nothing pokes past the
+            // rounded corners (a mask only for these few frames)
+            self.trace_notch(cr, x0, x1, dy, y1, r);
+        } else {
+            let (cx0, cy0) = (renderer.floor(x0), renderer.floor(dy));
+            cr.rectangle(cx0, cy0, renderer.ceil(x1) - cx0, renderer.ceil(y1) - cy0);
+        }
         cr.clip();
 
         // the line's content rides at the top of the box and dissolves
@@ -2090,6 +2124,19 @@ impl Island {
             quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
                 pill_alpha * (1.0 - sheet_k), [0.0; 6], 0.0, self.quick_status(now));
         }
+        if let Some(since) = self.center_retiring_at.filter(|_| pill_alpha > 0.0) {
+            // closing: the content sinks and fades with the fold, the mirror
+            // of its arrival; replaced by another sheet: a short crossfade
+            let (alpha, shift) = if self.center_swapped() {
+                let k = min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0));
+                (pill_alpha * (1.0 - k), -8.0 * k)
+            } else {
+                (pill_alpha, (1.0 - pill_alpha) * PILL_CLIMB)
+            };
+            if alpha > 0.002 {
+                self.center.draw(cr, renderer, &self.launcher_icons, cx - notice_center::WIDTH / 2.0, dy + shift, alpha, now);
+            }
+        }
         if pl > 0.0 {
             if let Some(song) = &self.song {
                 let mut view = song.view(&self.eq, self.config.accent, self.pressed, self.scrub.map(|(f, _)| f), now);
@@ -2250,6 +2297,12 @@ impl Island {
 
     pub fn quick_menu_open(&self) -> bool { self.quick_open }
 
+    /// Has another sheet taken the box from the closing notification
+    /// center (a crossfade rather than a fold)?
+    fn center_swapped(&self) -> bool {
+        self.quick_open || self.launcher.is_some() || self.activity.is_some() || self.notice.is_some() || self.auth.is_some()
+    }
+
     fn quick_status(&self, now: Time) -> quick::Status {
         quick::Status {
             unread: self.center.unread(),
@@ -2364,8 +2417,13 @@ impl Island {
     pub fn open_quick_menu_shortcut(&mut self, now: Time) -> bool {
         if self.auth.is_some() { return false; }
         self.launcher = None;
+        let from_center = self.center.open;
         self.center.close();
         self.show_quick_menu(now);
+        if from_center {
+            // crossfade with the notification center as it leaves
+            self.quick_returned_at = Some(now);
+        }
         true
     }
 
@@ -3009,6 +3067,59 @@ mod tests {
         island.clock = "Mon Oct 5  9:41 AM".into();
         island.sync(10.0);
         island
+    }
+
+    /// Frames of `island` from `t` every `step` seconds, side by side, into
+    /// target/gallery/<name>.png (motion review).
+    fn filmstrip(name: &str, island: &mut Island, t: Time, frames: usize, step: f64) {
+        let scale = 1.0;
+        let renderer = Renderer::new(scale);
+        let (cw, ch) = (520.0, 420.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, (cw * frames as f64) as i32, ch as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.set_source_rgb(0.18, 0.30, 0.36);
+        cr.paint().unwrap();
+        for n in 0..frames {
+            let now = t + n as f64 * step;
+            island.advance(now);
+            cr.save().unwrap();
+            cr.rectangle(n as f64 * cw, 0.0, cw, ch);
+            cr.clip();
+            island.draw(&cr, &renderer, n as f64 * cw + cw / 2.0, now);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        std::fs::create_dir_all("target/gallery").unwrap();
+        surface.write_to_png(&mut std::fs::File::create(format!("target/gallery/{name}.png")).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/close-*.png; set ISLAND_GALLERY=1"]
+    fn close_filmstrips() {
+        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
+        let mut island = gallery_island();
+        for n in 0..3u32 {
+            let mut note = crate::notify::fabricate(["Telegram", "Firefox", "notify-send"][n as usize], "Message", "Body");
+            note.id = n + 1;
+            island.center.upsert(note, 5.0);
+        }
+        island.open_notification_center(10.0);
+        gallery_shot_after("close-center-open", &mut island, 10.0, 1.0);
+        island.close_activity_panel(11.0);
+        filmstrip("close-center", &mut island, 11.0, 12, 2.0 / 60.0);
+
+        let mut island = gallery_island();
+        island.open_quick_menu(10.0);
+        gallery_shot_after("close-quick-open", &mut island, 10.0, 1.0);
+        island.close_activity_panel(11.0);
+        filmstrip("close-quick", &mut island, 11.0, 12, 2.0 / 60.0);
+
+        let mut island = gallery_island();
+        island.open_notification_center(10.0);
+        filmstrip("open-center", &mut island, 10.0, 12, 2.0 / 60.0);
+        island.advance(11.0);
+        island.open_quick_menu_shortcut(11.0);
+        filmstrip("swap-center-quick", &mut island, 11.0, 12, 2.0 / 60.0);
     }
 
     /// Every inner surface, settled, at the display's 1.5 scale:
