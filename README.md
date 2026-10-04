@@ -47,8 +47,13 @@ Click the ordinary compact island to open the **Control Center**: modules
 for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
 a Display and a Sound module with Control Center sliders (press anywhere
 on a slider to jump there, drag to adjust; moving the volume unmutes); the
-sound module's output button opens a page listing the audio outputs
-(unplugged HDMI ports are hidden) and switches the default sink; below,
+sound module's output button opens the **Sound** page: the audio outputs
+(unplugged HDMI ports hidden; a click switches the default sink), every
+application playing with its own level slider (all of an application's
+streams move together; notification chimes are left out), and the default
+microphone with its level and a mute button on its symbol (struck through
+and red while muted); the page re-reads the applications once a second
+while it is open. Below the modules,
 the keyboard layout (click for the next one), Lock (`loginctl
 lock-session`), Sleep (`systemctl suspend`) and Log out (sway `exit`,
 only on a second press within three seconds — the button turns red and
