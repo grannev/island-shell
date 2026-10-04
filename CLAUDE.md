@@ -80,8 +80,10 @@ Semibold 16 px white, padding 16, content-sized width; clock text
   hidden island shows the panel temporarily and an open drawer closes first.
 - Lock screen (hyprlock) is separate and stays as is.
 
-The island's four-shortcut menu (Wi-Fi, Bluetooth, Timer, Launcher) opens from
-a normal left click on the ordinary compact body. mod+d still opens the
+The island's Control Center (shortcut modules, Display/Sound sliders, audio
+output page, keyboard layout, Lock/Sleep/Log out with a confirming second
+press) opens from a normal left click on the ordinary compact body;
+`src/control.rs` is its environment worker (never block the UI on it). mod+d still opens the
 launcher directly. Music controls are scoped to the equaliser on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,

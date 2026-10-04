@@ -10,6 +10,8 @@ use std::process::Command;
 use serde_json::Value;
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
+const RUN_COMMAND: u32 = 0;
+const GET_INPUTS: u32 = 100;
 const GET_WORKSPACES: u32 = 1;
 const SUBSCRIBE: u32 = 2;
 const GET_TREE: u32 = 4;
@@ -63,6 +65,28 @@ impl Query {
         write_msg(&mut self.stream, kind, payload.as_bytes())?;
         let (_, body) = read_msg(&mut self.stream)?;
         serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// Run a sway command (as `swaymsg` would).
+    pub fn command(&mut self, command: &str) -> io::Result<()> {
+        let reply = self.request(RUN_COMMAND, command)?;
+        let ok = reply.as_array().is_some_and(|all| all.iter().all(|r| r["success"] == Value::Bool(true)));
+        if ok { Ok(()) } else { Err(io::Error::other(format!("sway: {reply}"))) }
+    }
+
+    /// The active layout of the keyboard that has a choice of layouts
+    /// (sway keeps them in step across keyboards).
+    pub fn keyboard_layout(&mut self) -> io::Result<Option<String>> {
+        let inputs = self.request(GET_INPUTS, "")?;
+        let keyboards: Vec<&Value> = inputs.as_array().map(|all| {
+            all.iter()
+                .filter(|i| i["type"] == "keyboard")
+                .filter(|i| i["xkb_layout_names"].as_array().is_some_and(|names| names.len() > 1))
+                .collect()
+        }).unwrap_or_default();
+        let keyboard = keyboards.iter().find(|i| i["identifier"].as_str().is_some_and(|id| id.to_lowercase().contains("keyboard")))
+            .or(keyboards.first());
+        Ok(keyboard.and_then(|k| k["xkb_active_layout_name"].as_str().map(str::to_string)))
     }
 
     /// sway's focused output, and whether a fullscreen window covers the

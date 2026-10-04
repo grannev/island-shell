@@ -43,15 +43,22 @@ preview the activities without changing hardware state:
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
 
-Click the ordinary compact island to open a four-button menu for Wi-Fi, Bluetooth,
-Timer and Launcher. Click a button or select it with the arrow keys and Enter;
-Escape, × or a click outside closes the menu. `island-shell quick` opens the
-same menu from a script; `mod+m` opens it directly. The Waybar's ⋯ drawer
-now contains only disk, CPU and memory information, with no separate network
-or timer buttons.
-`mod+d` still opens the launcher directly.
-Inside a shortcut sheet, × returns to the quick menu; Escape and a click
-outside dismiss it entirely.
+Click the ordinary compact island to open the **Control Center**: modules
+for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
+a Display and a Sound module with Control Center sliders (press anywhere
+on a slider to jump there, drag to adjust; moving the volume unmutes); the
+sound module's output button opens a page listing the audio outputs
+(unplugged HDMI ports are hidden) and switches the default sink; below,
+the keyboard layout (click for the next one), Lock (`loginctl
+lock-session`), Sleep (`systemctl suspend`) and Log out (sway `exit`,
+only on a second press within three seconds — the button turns red and
+asks «Точно?»). While the menu is open, volume and brightness keys move its
+sliders instead of raising an OSD. A worker thread (`src/control.rs`) does
+all reading and writing — `wpctl`, `pactl`, the backlight in sysfs (the
+video group may write it), sway IPC — and coalesces slider drags to the
+latest value. Switching the keyboard layout anywhere flashes a short
+«Раскладка» pill (`layout_osd = 0` turns it off). Arrow keys and Enter walk
+every control on the page; Escape, × or a click outside closes the menu.
 
 The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
 Pomodoro shortcut); click a preset to start. While running, a compact ring
@@ -343,6 +350,7 @@ at the beginning of a line or as a separate word), read at start;
     toast_hold = 4        # seconds the "now playing" toast stays up
     silent_after = 15     # seconds of pause / mute before the bars fold away
     dodge = 240           # px the island moves left for the ⋯ drawer
+    layout_osd = 1        # flash the keyboard layout when it switches
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a

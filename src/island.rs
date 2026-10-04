@@ -116,6 +116,10 @@ const DODGE_DUR: f64 = 0.25;
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
 const HOVER_RESPONSE: f64 = 0.4;
 const HOVER_DAMPING: f64 = 0.6;
+/// how quickly a Control Center slider follows its value
+const SLIDER_SPRING: f64 = 0.16;
+/// the window for the logout button's confirming second press
+const LOGOUT_CONFIRM: f64 = 3.0;
 
 /// Tunables (config file / `island-shell set`).
 #[derive(Clone, Debug)]
@@ -144,6 +148,8 @@ pub struct Config {
     pub silent_after: f64,
     /// How far the island moves left for the bar's ⋯ drawer, px.
     pub dodge: f64,
+    /// Flash the new keyboard layout when it switches.
+    pub layout_osd: bool,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -161,14 +167,15 @@ impl Default for Config {
             toast_hold: TOAST_HOLD,
             silent_after: SILENT_AFTER,
             dodge: DODGE,
+            layout_osd: true,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 10] = [
+    pub const KEYS: [&'static str; 11] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge",
+        "notice_hold", "toast_hold", "silent_after", "dodge", "layout_osd",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -202,6 +209,7 @@ impl Config {
             "toast_hold" => self.toast_hold = number()?.clamp(1.0, 30.0),
             "silent_after" => self.silent_after = number()?.clamp(1.0, 3600.0),
             "dodge" => self.dodge = number()?.clamp(0.0, 1000.0),
+            "layout_osd" => self.layout_osd = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -212,9 +220,9 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} layout_osd={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
-            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge,
+            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.layout_osd as u8,
         )
     }
 
@@ -446,7 +454,18 @@ pub struct Island {
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
     quick_selected: usize,
-    quick_hover_springs: [Spring; 6],
+    quick_hover_springs: HashMap<quick::Action, Spring>,
+    /// the Control Center's page, and the page it is crossfading from
+    quick_view: quick::View,
+    quick_view_from: Option<(quick::View, Time)>,
+    /// the environment the Control Center shows (volume, brightness,
+    /// outputs, layout), with eased slider positions
+    pub controls: quick::Controls,
+    volume_shown: Spring,
+    brightness_shown: Spring,
+    /// the slider held by the pointer
+    quick_drag: Option<activity::SliderKind>,
+    logout_armed_at: Option<Time>,
     quick_close_hover: Spring,
     quick_retiring_at: Option<Time>,
     /// the notification center was just closed: its content fades with the
@@ -610,7 +629,14 @@ impl Island {
             quick_rect: None,
             quick_hover: None,
             quick_selected: 0,
-            quick_hover_springs: std::array::from_fn(|_| Spring::new(0.0, 0.24, 0.83)),
+            quick_hover_springs: HashMap::new(),
+            quick_view: quick::View::Main,
+            quick_view_from: None,
+            controls: quick::Controls::default(),
+            volume_shown: Spring::new(0.0, SLIDER_SPRING, 1.0),
+            brightness_shown: Spring::new(0.0, SLIDER_SPRING, 1.0),
+            quick_drag: None,
+            logout_armed_at: None,
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
             quick_retiring_at: None,
             center_retiring_at: None,
@@ -675,7 +701,9 @@ impl Island {
             || self.pill_h.is_moving(now)
             || self.activity_value.is_moving(now) && self.activity.is_some()
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
-            || self.quick_hover_springs.iter().any(|s| s.is_moving(now))
+            || self.quick_hover_springs.values().any(|s| s.is_moving(now))
+            || self.quick_open && (self.volume_shown.is_moving(now) || self.brightness_shown.is_moving(now))
+            || self.quick_view_from.is_some_and(|(_, since)| now - since < SHEET_SWAP)
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
             || self.quick_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
@@ -793,9 +821,13 @@ impl Island {
             self.timer_button_hover[i].set(if enabled && self.timer_menu_hover == Some(command) { 1.0 } else { 0.0 }, now);
             self.timer_button_enabled[i].set(if enabled { 1.0 } else { 0.0 }, now);
         }
-        for (i, spring) in self.quick_hover_springs.iter_mut().enumerate() {
-            spring.set(if self.quick_hover == Some(quick::ACTIONS[i]) { 1.0 } else { 0.0 }, now);
+        for (action, spring) in self.quick_hover_springs.iter_mut() {
+            if self.quick_hover != Some(*action) { spring.set(0.0, now); }
         }
+        if let Some(action) = self.quick_hover.filter(|a| *a != quick::Action::Close) {
+            self.quick_hover_springs.entry(action).or_insert_with(|| Spring::new(0.0, 0.24, 0.83)).set(1.0, now);
+        }
+        self.quick_hover_springs.retain(|_, s| s.target() > 0.0 || s.is_moving(now));
         self.quick_close_hover.set(if self.quick_hover == Some(quick::Action::Close) { 1.0 } else { 0.0 }, now);
         if !self.connections_open() {
             if let Some(panel) = &mut self.network_panel { panel.close(); }
@@ -866,6 +898,14 @@ impl Island {
             || self.center_retiring_at.is_some() && self.pill.state(now).x <= 0.0
         {
             self.center_retiring_at = None;
+            changed = true;
+        }
+        if self.logout_armed_at.is_some_and(|since| now - since >= LOGOUT_CONFIRM) {
+            self.logout_armed_at = None;
+            changed = true;
+        }
+        if self.quick_view_from.is_some_and(|(_, since)| now - since >= SHEET_SWAP) {
+            self.quick_view_from = None;
             changed = true;
         }
         if self.quick_returned_at.is_some_and(|since| now - since >= SHEET_SWAP) {
@@ -943,6 +983,7 @@ impl Island {
             consider(self.output_until.max(now + 0.01));
         }
         if self.nvim.as_ref().is_some_and(|e| e.cmdline.is_some()) { consider(self.command_seen + 0.81); }
+        if let Some(since) = self.logout_armed_at { consider(since + LOGOUT_CONFIRM); }
         match self.auth {
             Some(Auth::Ok(since)) => consider(since + AUTH_OK_HOLD),
             Some(Auth::Fail(since)) => consider(since + AUTH_FAIL_HOLD),
@@ -1393,6 +1434,18 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
+        // with the Control Center open its sliders show the change; no OSD
+        // over it and none queued for after it closes
+        if let activity::Event::Slider { kind, value, muted } = &event {
+            if self.quick_open {
+                if self.quick_drag != Some(*kind) {
+                    self.set_control_level(*kind, *value, now);
+                    if *kind == activity::SliderKind::Volume { self.controls.muted = *muted; }
+                }
+                self.sync(now);
+                return;
+            }
+        }
         if self.auth.is_some() || self.launcher.is_some() || self.center.open {
             self.activity_queued = Some(event);
             return;
@@ -1804,7 +1857,7 @@ impl Island {
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
-            .or_else(|| self.quick_open.then_some((quick::WIDTH, quick::HEIGHT))).or_else(|| self.visible_activity().map(|a| {
+            .or_else(|| self.quick_open.then_some((quick::WIDTH, quick::height(self.quick_view, &self.controls)))).or_else(|| self.visible_activity().map(|a| {
             if matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
             } else { a.event.size() }
@@ -2055,10 +2108,30 @@ impl Island {
                 let arrive = self.quick_returned_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
                 let enter = 8.0 * (1.0 - arrive);
                 if pill_alpha > 0.95 && arrive > 0.9 {
-                    self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb + enter, w: quick::WIDTH, h: quick::HEIGHT });
+                    self.quick_rect = Some(Rect { x: cx - quick::WIDTH / 2.0, y: dy + climb + enter, w: quick::WIDTH,
+                        h: quick::height(self.quick_view, &self.controls) });
                 }
-                quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy + climb + enter, pill_alpha * arrive,
-                    std::array::from_fn(|i| self.quick_hover_springs[i].value(now)), self.quick_close_hover.value(now), self.quick_status(now));
+                let springs = &self.quick_hover_springs;
+                let hover = |action: quick::Action| springs.get(&action).map_or(0.0, |s| s.value(now));
+                let frame = quick::Frame {
+                    status: self.quick_status(now),
+                    controls: &self.controls,
+                    volume: self.volume_shown.value(now).clamp(0.0, 1.0),
+                    brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
+                    hover: &hover,
+                    logout_armed: self.logout_armed_at.is_some(),
+                };
+                let (qx, qy) = (cx - quick::WIDTH / 2.0, dy + climb + enter);
+                let close = self.quick_close_hover.value(now);
+                match self.quick_view_from {
+                    // a page switch: the old page lifts away as the new one settles
+                    Some((from, since)) if now - since < SHEET_SWAP => {
+                        let k = min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0));
+                        quick::draw(cr, renderer, qx, qy - 8.0 * k, pill_alpha * arrive * (1.0 - k), from, close, &frame);
+                        quick::draw(cr, renderer, qx, qy + 8.0 * (1.0 - k), pill_alpha * arrive * k, self.quick_view, close, &frame);
+                    }
+                    _ => quick::draw(cr, renderer, qx, qy, pill_alpha * arrive, self.quick_view, close, &frame),
+                }
             } else if let Some(activity) = self.visible_activity().cloned() {
                 let climb = (1.0 - pill_alpha) * PILL_CLIMB;
                 let enter = 8.0 * (1.0 - sheet_k);
@@ -2121,8 +2194,17 @@ impl Island {
             }
         }
         if sheet_k < 1.0 && pill_alpha > 0.0 {
+            let hover = |_: quick::Action| 0.0;
+            let frame = quick::Frame {
+                status: self.quick_status(now),
+                controls: &self.controls,
+                volume: self.volume_shown.value(now).clamp(0.0, 1.0),
+                brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
+                hover: &hover,
+                logout_armed: false,
+            };
             quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
-                pill_alpha * (1.0 - sheet_k), [0.0; 6], 0.0, self.quick_status(now));
+                pill_alpha * (1.0 - sheet_k), self.quick_view, 0.0, &frame);
         }
         if let Some(since) = self.center_retiring_at.filter(|_| pill_alpha > 0.0) {
             // closing: the content sinks and fades with the fold, the mirror
@@ -2432,6 +2514,10 @@ impl Island {
         self.quick_retiring_at = None;
         self.quick_hover = None;
         self.quick_selected = 0;
+        self.quick_view = quick::View::Main;
+        self.quick_view_from = None;
+        self.quick_drag = None;
+        self.logout_armed_at = None;
         self.eq_hovered = false;
         self.editor_chip_hovered = false;
         self.notice = None;
@@ -2463,19 +2549,122 @@ impl Island {
         }
     }
 
+    fn quick_hit(&self, px: f64, py: f64) -> Option<quick::Hit> {
+        self.quick_rect.and_then(|r| quick::hit(self.quick_view, &self.controls, px - r.x, py - r.y))
+    }
+
     pub fn quick_action_at(&self, px: f64, py: f64) -> Option<quick::Action> {
-        self.quick_rect.and_then(|r| quick::hit(px - r.x, py - r.y))
+        match self.quick_hit(px, py)? {
+            quick::Hit::Action(action) => Some(action),
+            quick::Hit::Slider(..) => None,
+        }
+    }
+
+    /// A press in the Control Center: an action, or a slider grabbed at
+    /// the pointer (its value jumps there, as in macOS).
+    pub fn quick_press(&mut self, px: f64, py: f64, now: Time) -> Option<quick::Hit> {
+        let hit = self.quick_hit(px, py)?;
+        if let quick::Hit::Slider(kind, value) = hit {
+            self.quick_drag = Some(kind);
+            self.set_control_level(kind, value, now);
+        }
+        Some(hit)
+    }
+
+    /// The held slider follows the pointer, even outside the menu.
+    pub fn quick_drag_to(&mut self, px: f64, now: Time) -> Option<(activity::SliderKind, f64)> {
+        let kind = self.quick_drag?;
+        let rect = self.quick_rect?;
+        let value = quick::slider_fraction(px - rect.x);
+        self.set_control_level(kind, value, now);
+        Some((kind, value))
+    }
+
+    pub fn quick_release(&mut self) -> bool {
+        self.quick_drag.take().is_some()
+    }
+
+    fn set_control_level(&mut self, kind: activity::SliderKind, value: f64, now: Time) {
+        match kind {
+            activity::SliderKind::Volume => {
+                self.controls.volume = Some(value);
+                self.controls.muted = false;
+                self.volume_shown.set(value, now);
+            }
+            activity::SliderKind::Brightness => {
+                self.controls.brightness = Some(value);
+                self.brightness_shown.set(value, now);
+            }
+        }
+    }
+
+    /// A fresh reading of the environment for the Control Center.
+    pub fn set_controls(&mut self, snapshot: crate::control::Snapshot, now: Time) {
+        // the held slider is the truth until it is let go
+        if self.quick_drag != Some(activity::SliderKind::Volume) {
+            if let Some((value, muted)) = snapshot.volume {
+                self.controls.muted = muted;
+                self.set_control_level(activity::SliderKind::Volume, value, now);
+                self.controls.muted = muted;
+            } else {
+                self.controls.volume = None;
+            }
+        }
+        if self.quick_drag != Some(activity::SliderKind::Brightness) {
+            match snapshot.brightness {
+                Some(value) => self.set_control_level(activity::SliderKind::Brightness, value, now),
+                None => self.controls.brightness = None,
+            }
+        }
+        self.controls.sinks = snapshot.sinks;
+        self.controls.default_sink = snapshot.default_sink;
+        if snapshot.layout.is_some() { self.controls.layout = snapshot.layout; }
+        self.sync(now);
+    }
+
+    /// Switch the Control Center's page with a short crossfade.
+    pub fn quick_show(&mut self, view: quick::View, now: Time) {
+        if self.quick_view == view { return; }
+        self.quick_view_from = Some((self.quick_view, now));
+        self.quick_view = view;
+        self.quick_hover = None;
+        self.quick_selected = 0;
+        self.sync(now);
+    }
+
+    /// Logging out takes a second press within a few seconds; returns
+    /// whether this press confirms it.
+    pub fn arm_logout(&mut self, now: Time) -> bool {
+        if self.logout_armed_at.is_some_and(|since| now - since < LOGOUT_CONFIRM) {
+            self.logout_armed_at = None;
+            return true;
+        }
+        self.logout_armed_at = Some(now);
+        self.sync(now);
+        false
+    }
+
+    /// The actions the keyboard walks through on the current page.
+    fn quick_keys(&self) -> Vec<quick::Action> {
+        match self.quick_view {
+            quick::View::Main => quick::ACTIONS.iter().copied()
+                .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty()).collect(),
+            quick::View::Outputs => (0..self.controls.sinks.len()).map(quick::Action::Sink).collect(),
+        }
     }
 
     pub fn quick_key(&mut self, key: &str, now: Time) -> Option<quick::Action> {
         if !self.quick_open { return None; }
+        let keys = self.quick_keys();
+        if keys.is_empty() { return None; }
+        self.quick_selected = self.quick_selected.min(keys.len() - 1);
         match key {
-            "next" => self.quick_selected = (self.quick_selected + 1) % quick::ACTIONS.len(),
-            "prev" => self.quick_selected = (self.quick_selected + quick::ACTIONS.len() - 1) % quick::ACTIONS.len(),
-            "enter" => return Some(quick::ACTIONS[self.quick_selected]),
+            "next" => self.quick_selected = (self.quick_selected + 1) % keys.len(),
+            "prev" => self.quick_selected = (self.quick_selected + keys.len() - 1) % keys.len(),
+            "enter" => return Some(keys[self.quick_selected]),
             _ => {}
         }
-        self.quick_hover = Some(quick::ACTIONS[self.quick_selected]);
+        self.quick_hover = Some(keys[self.quick_selected]);
         self.sync(now);
         None
     }
@@ -2485,7 +2674,7 @@ impl Island {
         if self.quick_hover == hovered { return false; }
         self.quick_hover = hovered;
         if let Some(action) = hovered {
-            if let Some(i) = quick::ACTIONS.iter().position(|a| *a == action) { self.quick_selected = i; }
+            if let Some(i) = self.quick_keys().iter().position(|a| *a == action) { self.quick_selected = i; }
         }
         self.sync(now);
         true
@@ -3140,9 +3329,31 @@ mod tests {
         island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
         gallery_shot("01-compact-music", &mut island, 10.0);
 
+        let controls = crate::control::Snapshot {
+            volume: Some((0.45, false)),
+            brightness: Some(0.7),
+            sinks: vec![
+                crate::control::Sink { name: "spk".into(), label: "Динамики".into(), kind: crate::control::SinkKind::Speaker },
+                crate::control::Sink { name: "bt".into(), label: "AirPods Pro".into(), kind: crate::control::SinkKind::Bluetooth },
+                crate::control::Sink { name: "hdmi".into(), label: "HDMI / DisplayPort 1".into(), kind: crate::control::SinkKind::Display },
+            ],
+            default_sink: "bt".into(),
+            layout: Some("Russian".into()),
+        };
         let mut island = gallery_island();
         island.open_quick_menu(10.0);
+        island.set_controls(controls.clone(), 10.0);
         gallery_shot("02-quick-menu", &mut island, 10.0);
+        island.arm_logout(12.0);
+        island.quick_hover = Some(quick::Action::Sleep);
+        island.sync(12.0);
+        gallery_shot_after("02b-quick-menu-armed", &mut island, 12.0, 0.6);
+        island.quick_show(quick::View::Outputs, 13.0);
+        gallery_shot("02c-quick-outputs", &mut island, 13.0);
+
+        let mut island = gallery_island();
+        island.live_activity(activity::Event::Keyboard { name: "Русская".into() }, 10.0);
+        gallery_shot_after("13b-layout", &mut island, 10.0, 0.8);
 
         let mut island = gallery_island();
         island.timer_command("menu", 10.0).unwrap();
@@ -3441,13 +3652,15 @@ mod tests {
         assert!(island.keyboard_panel_open());
         island.draw(&cr, &renderer, 490.0, 10.7);
         let r = island.quick_rect.expect("menu should accept pointer input after unfolding");
-        for (i, action) in quick::ACTIONS.iter().enumerate() {
-            let x = r.x + 38.0 + (i % 2) as f64 * 207.0;
-            let y = r.y + 84.0 + (i / 2) as f64 * 80.0;
+        let tiles = [quick::Action::Wifi, quick::Action::Bluetooth, quick::Action::Timer,
+            quick::Action::Launcher, quick::Action::Notifications, quick::Action::Dnd];
+        for (i, action) in tiles.iter().enumerate() {
+            let x = r.x + 38.0 + (i % 2) as f64 * 202.0;
+            let y = r.y + 90.0 + (i / 2) as f64 * 64.0;
             assert_eq!(island.quick_action_at(x, y), Some(*action));
         }
-        island.set_quick_hover(r.x + 38.0, r.y + 84.0, 10.7);
-        assert!(island.quick_hover_springs[0].value(10.8) > 0.0);
+        island.set_quick_hover(r.x + 38.0, r.y + 90.0, 10.7);
+        assert!(island.quick_hover_springs[&quick::Action::Wifi].value(10.8) > 0.0);
         island.close_quick_menu(10.8);
         assert!(!island.keyboard_panel_open());
         assert_eq!(island.quick_action_at(r.x + 38.0, r.y + 84.0), None);

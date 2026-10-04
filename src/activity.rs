@@ -32,6 +32,8 @@ pub enum Event {
     BatteryLow { percent: u8 },
     Bluetooth { name: String, battery: Option<u8> },
     Wifi { ssid: String },
+    /// the keyboard layout switched (its display name)
+    Keyboard { name: String },
     Screenshot { path: PathBuf },
     TimerDone,
     TimerMenu,
@@ -47,6 +49,7 @@ impl Event {
             Event::BatteryLow { .. } => (310.0, PILL_H),
             Event::Bluetooth { .. } => (370.0, PILL_H),
             Event::Wifi { .. } => (390.0, PILL_H),
+            Event::Keyboard { .. } => (280.0, PILL_H),
             Event::Screenshot { .. } => (390.0, 106.0),
             Event::TimerDone => (270.0, PILL_H),
             Event::TimerMenu => (TIMER_MENU_W, 176.0),
@@ -60,6 +63,7 @@ impl Event {
             Event::Charging { .. } => 2.8,
             Event::BatteryLow { .. } => 5.0,
             Event::Bluetooth { .. } | Event::Wifi { .. } => 3.2,
+            Event::Keyboard { .. } => 1.2,
             Event::Screenshot { .. } => 4.0,
             Event::TimerDone => 4.0,
             Event::TimerMenu => f64::INFINITY,
@@ -111,7 +115,7 @@ fn spawn_audio(tx: Sender<Event>) {
     });
 }
 
-fn read_volume() -> Option<(f64, bool)> {
+pub fn read_volume() -> Option<(f64, bool)> {
     let out = Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SINK@"]).output().ok()?;
     if !out.status.success() {
         return None;
@@ -179,7 +183,7 @@ fn read_trim(path: &Path) -> Option<String> {
     Some(std::fs::read_to_string(path).ok()?.trim().to_string())
 }
 
-fn read_backlight(path: &Path) -> Option<f64> {
+pub fn read_backlight(path: &Path) -> Option<f64> {
     let current = read_trim(&path.join("brightness"))?.parse::<f64>().ok()?;
     let max = read_trim(&path.join("max_brightness"))?.parse::<f64>().ok()?;
     (max > 0.0).then_some((current / max).clamp(0.0, 1.0))
@@ -541,6 +545,10 @@ pub fn draw_pill(
             let detail = battery.map_or_else(|| "Подключено".to_string(), |p| format!("Подключено · {p}%"));
             draw_two_lines(cr, renderer, name, &detail, x0 + 88.0, cy, enter, crate::menu_style::BLUE);
         }
+        Event::Keyboard { name } => {
+            draw_keyboard(cr, x0 + 52.0, cy, enter);
+            draw_two_lines(cr, renderer, "Раскладка", name, x0 + 92.0, cy, enter, crate::menu_style::BLUE);
+        }
         Event::Wifi { ssid } => {
             draw_wifi(cr, x0 + 48.0, cy, enter);
             draw_two_lines(cr, renderer, "Wi-Fi", ssid, x0 + 88.0, cy, enter, crate::menu_style::TEAL);
@@ -749,6 +757,24 @@ fn draw_wifi(cr: &Context, cx: f64, cy: f64, alpha: f64) {
     let _ = cr.fill();
 }
 
+/// keyboard.fill, drawn: a rounded key bed with two rows of keys and a
+/// space bar cut out of it
+fn draw_keyboard(cr: &Context, cx: f64, cy: f64, alpha: f64) {
+    let blue = crate::menu_style::BLUE;
+    cr.new_path();
+    cr.set_fill_rule(cairo::FillRule::EvenOdd);
+    crate::menu_style::rounded(cr, cx - 22.0, cy - 14.0, 44.0, 28.0, 6.0);
+    for row in 0..2 {
+        for col in 0..5 {
+            cr.rectangle(cx - 16.5 + col as f64 * 7.0, cy - 9.0 + row as f64 * 7.0, 5.0, 4.5);
+        }
+    }
+    cr.rectangle(cx - 10.0, cy + 6.0, 20.0, 3.5);
+    cr.set_source_rgba(blue.0, blue.1, blue.2, alpha);
+    let _ = cr.fill();
+    cr.set_fill_rule(cairo::FillRule::Winding);
+}
+
 fn draw_clock(cr: &Context, cx: f64, cy: f64, alpha: f64) {
     cr.new_path();
     cr.set_source_rgba(1.0, 0.62, 0.12, alpha);
@@ -813,6 +839,7 @@ mod tests {
             Event::BatteryLow { percent: 10 },
             Event::Bluetooth { name: "Headphones".into(), battery: Some(84) },
             Event::Wifi { ssid: "Island".into() },
+            Event::Keyboard { name: "Русская".into() },
             Event::Screenshot { path: PathBuf::from("/does/not/exist.png") },
             Event::TimerDone,
         ];

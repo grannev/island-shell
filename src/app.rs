@@ -310,6 +310,10 @@ pub struct App {
     network_tx: channel::Sender<crate::network::Message>,
     notification_commands: std::sync::mpsc::Sender<crate::notification_server::Command>,
     notification_dnd: Arc<AtomicBool>,
+    /// the Control Center's worker (volume, brightness, outputs, layout,
+    /// session) and whether the menu was open at the last change
+    controls: std::sync::mpsc::Sender<crate::control::Request>,
+    quick_was_open: bool,
     pub exit: bool,
 }
 
@@ -351,6 +355,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (activity_tx, activity_rx) = channel::channel::<activity::Event>();
     activity::spawn_watchers(activity_tx.clone());
     let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
+    let (control_tx, control_rx) = channel::channel::<crate::control::Snapshot>();
+    let controls = crate::control::spawn(control_tx);
 
     let mut island = Island::new(load_config());
     island.update_clock();
@@ -423,6 +429,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         network_tx,
         notification_commands,
         notification_dnd,
+        controls,
+        quick_was_open: false,
         exit: false,
     };
 
@@ -494,6 +502,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
+    loop_handle.insert_source(control_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(snapshot) = event {
+            let now = app.frame_time();
+            app.island.set_controls(snapshot, now);
+            app.after_change();
+        }
+    })?;
+    if let Some(layout) = app.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) {
+        app.island.controls.layout = Some(layout);
+    }
+
     loop_handle.insert_source(network_rx, |event, _, app: &mut App| {
         if let channel::Event::Msg(message) = event {
             let now = app.frame_time();
@@ -513,7 +532,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // sway events: hide behind a fullscreen window
     if app.sway_query.is_some() {
-        match sway::Events::subscribe(&["window", "workspace"]) {
+        match sway::Events::subscribe(&["window", "workspace", "input"]) {
             Ok(events) => {
                 loop_handle.insert_source(
                     Generic::new(events, Interest::READ, Mode::Level),
@@ -527,6 +546,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                                 if relevant {
                                     app.check_fullscreen();
+                                }
+                                if list.iter().any(|(_, change)| change == "xkb_layout") {
+                                    app.layout_changed();
                                 }
                                 Ok(PostAction::Continue)
                             }
@@ -1062,7 +1084,29 @@ impl App {
     /// After the island's state changed: keep the helpers in step (cava
     /// and the mute poll while a song is shown), arm the timer for the
     /// next time-driven change, and draw.
+    /// The keyboard layout may have changed (sway reports it once per
+    /// keyboard): show the new one once.
+    fn layout_changed(&mut self) {
+        let Some(layout) = self.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) else { return };
+        if self.island.controls.layout.as_deref() == Some(layout.as_str()) {
+            return;
+        }
+        let now = self.frame_time();
+        let known = self.island.controls.layout.replace(layout.clone()).is_some();
+        if known && self.island.config.layout_osd {
+            self.island.live_activity(activity::Event::Keyboard { name: crate::control::layout_label(&layout) }, now);
+        }
+        self.island.sync(now);
+        self.after_change();
+    }
+
     fn after_change(&mut self) {
+        // the Control Center reads the environment each time it opens
+        let quick = self.island.quick_menu_open();
+        if quick && !self.quick_was_open {
+            let _ = self.controls.send(crate::control::Request::Refresh);
+        }
+        self.quick_was_open = quick;
         // whoever closed the launcher (a key, Touch ID, the compositor),
         // the keyboard goes back when it is gone
         let wants_keyboard = self.island.launcher.is_some()
@@ -1702,6 +1746,12 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     let now = self.clock.predict(false);
+                    // a Control Center slider in the hand follows the pointer
+                    if let Some((kind, value)) = self.island.quick_drag_to(event.position.0, now) {
+                        self.set_level(kind, value);
+                        changed = true;
+                        continue;
+                    }
                     // dragging the playhead: the pointer keeps its grab
                     // even when it wanders off the island
                     if self.island.is_scrubbing() {
@@ -1722,6 +1772,9 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Release { button, .. } => {
+                    if button == BTN_LEFT && self.island.quick_release() {
+                        changed = true;
+                    }
                     if button == BTN_LEFT && self.island.is_scrubbing() {
                         let now = self.clock.predict(false);
                         if let Some((bus, track, command)) = self.island.end_scrub(now) {
@@ -1757,8 +1810,10 @@ impl PointerHandler for App {
                     }
                     if self.island.quick_menu_open() {
                         if button == BTN_LEFT {
-                            if let Some(action) = self.island.quick_action_at(event.position.0, event.position.1) {
-                                self.activate_quick_action(action, now);
+                            match self.island.quick_press(event.position.0, event.position.1, now) {
+                                Some(crate::quick::Hit::Action(action)) => self.activate_quick_action(action, now),
+                                Some(crate::quick::Hit::Slider(kind, value)) => self.set_level(kind, value),
+                                None => {}
                             }
                         }
                         changed = true;
@@ -1906,20 +1961,58 @@ impl App {
     }
 
     fn activate_quick_action(&mut self, action: crate::quick::Action, now: Time) {
-        if action != crate::quick::Action::Dnd { self.island.close_quick_menu(now); }
+        use crate::control::Request;
+        use crate::quick::{Action, View};
+        // shortcuts to other sheets and the session leave the menu; its own
+        // controls (Do Not Disturb, the layout, the output page) keep it open
+        if matches!(action, Action::Wifi | Action::Bluetooth | Action::Timer | Action::Launcher
+            | Action::Notifications | Action::Lock | Action::Sleep | Action::Close)
+        {
+            self.island.close_quick_menu(now);
+        }
         match action {
-            crate::quick::Action::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
-            crate::quick::Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
-            crate::quick::Action::Timer => { let _ = self.island.timer_command("menu", now); }
-            crate::quick::Action::Launcher => { self.island.toggle_launcher(now); }
-            crate::quick::Action::Notifications => { self.island.open_notification_center(now); }
-            crate::quick::Action::Dnd => {
+            Action::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
+            Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
+            Action::Timer => { let _ = self.island.timer_command("menu", now); }
+            Action::Launcher => { self.island.toggle_launcher(now); }
+            Action::Notifications => { self.island.open_notification_center(now); }
+            Action::Dnd => {
                 let enabled = !self.island.dnd;
                 self.island.set_dnd(enabled, now);
                 self.notification_dnd.store(enabled, Ordering::Relaxed);
             }
-            crate::quick::Action::Close => {}
+            Action::Outputs => {
+                self.island.quick_show(View::Outputs, now);
+                let _ = self.controls.send(Request::Refresh);
+            }
+            Action::Back => self.island.quick_show(View::Main, now),
+            Action::Sink(index) => {
+                if let Some(sink) = self.island.controls.sinks.get(index).cloned() {
+                    self.island.controls.default_sink = sink.name.clone();
+                    let _ = self.controls.send(Request::Sink(sink.name));
+                }
+                self.island.quick_show(View::Main, now);
+            }
+            Action::Layout => { let _ = self.controls.send(Request::NextLayout); }
+            Action::Lock => { let _ = self.controls.send(Request::Lock); }
+            Action::Sleep => { let _ = self.controls.send(Request::Suspend); }
+            Action::Logout => {
+                if self.island.arm_logout(now) {
+                    self.island.close_quick_menu(now);
+                    let _ = self.controls.send(Request::Logout);
+                }
+            }
+            Action::Close => {}
         }
+    }
+
+    /// Send a slider's new value to the worker (it keeps only the latest).
+    fn set_level(&self, kind: activity::SliderKind, value: f64) {
+        let request = match kind {
+            activity::SliderKind::Volume => crate::control::Request::Volume(value),
+            activity::SliderKind::Brightness => crate::control::Request::Brightness(value),
+        };
+        let _ = self.controls.send(request);
     }
 
     fn handle_notification_action(&mut self, action: crate::notice_center::Action, now: Time) {

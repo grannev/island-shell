@@ -26,6 +26,7 @@ mod notification_server;
 mod nvim;
 mod network;
 mod connections;
+mod control;
 mod player;
 mod quick;
 mod notify_kinds;
