@@ -188,6 +188,17 @@ pub fn well(cr: &Context, cx: f64, cy: f64, r: f64, colour: Option<Rgb>, alpha: 
     let _ = cr.fill();
 }
 
+/// A sheet header whose subtitle animates its changes (motion.rs) under
+/// `key` (include the sheet's instance so a fresh sheet does not animate).
+#[allow(clippy::too_many_arguments)]
+pub fn header_keyed(
+    cr: &Context, renderer: &Renderer, x: f64, y: f64, width: f64,
+    icon: Option<(Rgb, &dyn Fn(&Context, f64, f64))>, title: &str, subtitle: Option<&str>,
+    reserve: f64, alpha: f64, key: &str,
+) {
+    header_with(cr, renderer, x, y, width, icon, title, subtitle, reserve, alpha, Some(key));
+}
+
 /// A sheet header: optional icon tile (its glyph drawn by `glyph` at the
 /// tile's centre), title, optional subtitle, all on HEADER_MID; `reserve`
 /// is the width kept free on the right for controls and the close button.
@@ -196,6 +207,15 @@ pub fn header(
     cr: &Context, renderer: &Renderer, x: f64, y: f64, width: f64,
     icon: Option<(Rgb, &dyn Fn(&Context, f64, f64))>, title: &str, subtitle: Option<&str>,
     reserve: f64, alpha: f64,
+) {
+    header_with(cr, renderer, x, y, width, icon, title, subtitle, reserve, alpha, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn header_with(
+    cr: &Context, renderer: &Renderer, x: f64, y: f64, width: f64,
+    icon: Option<(Rgb, &dyn Fn(&Context, f64, f64))>, title: &str, subtitle: Option<&str>,
+    reserve: f64, alpha: f64, key: Option<&str>,
 ) {
     let mut tx = x + RAIL;
     if let Some((colour, glyph)) = icon {
@@ -212,7 +232,11 @@ pub fn header(
             let sub_h = line_height(cr, renderer, Font::Subhead);
             let top = y + HEADER_MID - (title_h + sub_h) / 2.0;
             label(cr, renderer, title, tx, top, w, Font::Title, PRIMARY * alpha);
-            label(cr, renderer, sub, tx, top + title_h, w, Font::Subhead, SECONDARY * alpha);
+            match key {
+                Some(key) => crate::motion::text(cr, renderer, key, sub, tx, top + title_h, w, 0.0, Font::Subhead,
+                    (1.0, 1.0, 1.0), SECONDARY * alpha),
+                None => label(cr, renderer, sub, tx, top + title_h, w, Font::Subhead, SECONDARY * alpha),
+            }
         }
         None => label(cr, renderer, title, tx, y + HEADER_MID - title_h / 2.0, w, Font::Title, PRIMARY * alpha),
     }
@@ -361,4 +385,49 @@ pub fn edge_fades(cr: &Context, x: f64, y: f64, w: f64, h: f64, top: f64, bottom
         cr.rectangle(x, from.min(to), w, depth);
         let _ = cr.fill();
     }
+}
+
+/// A press: the control dips and springs back past rest (iOS's tap
+/// feedback); `t` seconds since the press, 1 when it is over.
+pub fn press_scale(t: f64) -> f64 {
+    const DEPTH: f64 = 0.05;
+    if !(0.0..0.7).contains(&t) {
+        1.0
+    } else if t < 0.08 {
+        1.0 - DEPTH * crate::anim::min_jerk(t / 0.08)
+    } else {
+        let t = t - 0.08;
+        1.0 - DEPTH * (-t / 0.09).exp() * (std::f64::consts::TAU * t / 0.5).cos()
+    }
+}
+
+/// SF Symbols' bounce: the symbol swells and settles.
+pub fn bounce_scale(t: f64) -> f64 {
+    if !(0.0..0.9).contains(&t) {
+        return 1.0;
+    }
+    1.0 + 0.3 * (-t / 0.13).exp() * (std::f64::consts::TAU * t / 0.34).sin()
+}
+
+/// SF Symbols' wiggle: a rotation (radians) that shakes out.
+pub fn wiggle_angle(t: f64) -> f64 {
+    if !(0.0..1.0).contains(&t) {
+        return 0.0;
+    }
+    0.2 * (-t / 0.22).exp() * (std::f64::consts::TAU * t / 0.16).sin()
+}
+
+/// Scale (and turn) whatever `draw` paints about (cx, cy).
+pub fn transformed(cr: &Context, cx: f64, cy: f64, scale: f64, angle: f64, draw: impl FnOnce()) {
+    if (scale - 1.0).abs() < 1e-4 && angle.abs() < 1e-4 {
+        draw();
+        return;
+    }
+    cr.save().unwrap();
+    cr.translate(cx, cy);
+    cr.rotate(angle);
+    cr.scale(scale, scale);
+    cr.translate(-cx, -cy);
+    draw();
+    cr.restore().unwrap();
 }

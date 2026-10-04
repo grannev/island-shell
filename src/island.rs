@@ -116,6 +116,13 @@ const DODGE_DUR: f64 = 0.25;
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
 const HOVER_RESPONSE: f64 = 0.4;
 const HOVER_DAMPING: f64 = 0.6;
+fn slider_index(kind: activity::SliderKind) -> usize {
+    match kind {
+        activity::SliderKind::Brightness => 0,
+        activity::SliderKind::Volume => 1,
+    }
+}
+
 /// how quickly a Control Center slider follows its value
 const SLIDER_SPRING: f64 = 0.16;
 /// the window for the logout button's confirming second press
@@ -148,8 +155,6 @@ pub struct Config {
     pub silent_after: f64,
     /// How far the island moves left for the bar's ⋯ drawer, px.
     pub dodge: f64,
-    /// Flash the new keyboard layout when it switches.
-    pub layout_osd: bool,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -167,15 +172,14 @@ impl Default for Config {
             toast_hold: TOAST_HOLD,
             silent_after: SILENT_AFTER,
             dodge: DODGE,
-            layout_osd: true,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 11] = [
+    pub const KEYS: [&'static str; 10] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge", "layout_osd",
+        "notice_hold", "toast_hold", "silent_after", "dodge",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -209,7 +213,6 @@ impl Config {
             "toast_hold" => self.toast_hold = number()?.clamp(1.0, 30.0),
             "silent_after" => self.silent_after = number()?.clamp(1.0, 3600.0),
             "dodge" => self.dodge = number()?.clamp(0.0, 1000.0),
-            "layout_osd" => self.layout_osd = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -220,9 +223,9 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} layout_osd={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
-            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.layout_osd as u8,
+            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge,
         )
     }
 
@@ -466,6 +469,13 @@ pub struct Island {
     /// the slider held by the pointer
     quick_drag: Option<activity::SliderKind>,
     logout_armed_at: Option<Time>,
+    /// when the Control Center opened (its rows arrive in a wave), when
+    /// each control was last pressed and when its symbol last bounced
+    quick_opened_at: Time,
+    quick_pressed: HashMap<quick::Action, Time>,
+    quick_bounced: HashMap<quick::Action, Time>,
+    /// the sliders swell while held (brightness, volume)
+    slider_grow: [Spring; 2],
     quick_close_hover: Spring,
     quick_retiring_at: Option<Time>,
     /// the notification center was just closed: its content fades with the
@@ -495,6 +505,8 @@ pub struct Island {
     nvim_saved: Option<Time>,
     chip: Quintic,
     chip_w: f64,
+    /// the clock's width, eased so the box follows its digits rolling
+    clock_w: Option<Spring>,
     editor_panel: Quintic,
     editor_opened: Time,
     editor_diagnostics: bool,
@@ -637,6 +649,10 @@ impl Island {
             brightness_shown: Spring::new(0.0, SLIDER_SPRING, 1.0),
             quick_drag: None,
             logout_armed_at: None,
+            quick_opened_at: f64::NEG_INFINITY,
+            quick_pressed: HashMap::new(),
+            quick_bounced: HashMap::new(),
+            slider_grow: std::array::from_fn(|_| Spring::new(0.0, 0.3, 0.62)),
             quick_close_hover: Spring::new(0.0, 0.24, 0.83),
             quick_retiring_at: None,
             center_retiring_at: None,
@@ -658,6 +674,7 @@ impl Island {
             nvim_saved: None,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
+            clock_w: None,
             editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
             editor_diagnostics: false,
             editor_command: None,
@@ -703,6 +720,9 @@ impl Island {
             || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
             || self.quick_hover_springs.values().any(|s| s.is_moving(now))
             || self.quick_open && (self.volume_shown.is_moving(now) || self.brightness_shown.is_moving(now))
+            || self.quick_open && (now - self.quick_opened_at < 0.6
+                || self.quick_pressed.values().chain(self.quick_bounced.values()).any(|t| now - t < 1.0)
+                || self.slider_grow.iter().any(|s| s.is_moving(now)))
             || self.quick_view_from.is_some_and(|(_, since)| now - since < SHEET_SWAP)
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
@@ -715,6 +735,7 @@ impl Island {
             || self.timer_chip.is_moving(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
+            || self.clock_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.editor_panel.is_moving(now)
             || self.launcher.as_ref().is_some_and(|l| l.is_animating(now))
             // a macro being recorded keeps its dot breathing
@@ -1758,6 +1779,7 @@ impl Island {
     /// Draw one frame on `cr` (already scaled to logical px), the island
     /// centred on `cx`, for the instant `now` (when the frame will be shown).
     pub fn draw(&mut self, cr: &Context, renderer: &Renderer, cx: f64, now: Time) -> Frame {
+        renderer.motion.set_time(now);
         // equaliser easing: quick to follow the music, slow to sink when
         // paused
         let dt = (now - self.eq_t).clamp(0.0, 0.5);
@@ -1827,7 +1849,17 @@ impl Island {
         // player now, not here) ---
         let clock = renderer.layout(cr, &self.clock, Font::Text);
         let (_, clock_ext) = clock.pixel_extents();
-        let clock_w = clock_ext.width() as f64;
+        let clock_target = clock_ext.width() as f64;
+        let clock_w = match &mut self.clock_w {
+            Some(spring) => {
+                spring.set(clock_target, now);
+                spring.value(now)
+            }
+            None => {
+                self.clock_w = Some(Spring::new(clock_target, crate::motion::DURATION, 1.0));
+                clock_target
+            }
+        };
         let clock_h = clock_ext.height() as f64;
         let bars_len = reveal * (BARS_GAP + BARS_W);
         // Neovim's mode chip grows out on the other side of the clock
@@ -1974,9 +2006,8 @@ impl Island {
             }
             let clock_x = renderer.snap(content_x + chip_len - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
-            cr.set_source_rgba(1.0, 1.0, 1.0, line_alpha);
-            cr.move_to(clock_x, ty);
-            pangocairo::functions::show_layout(cr, &clock);
+            crate::motion::text(cr, renderer, "clock", &self.clock, clock_x, ty,
+                clock_w.max(clock_target) + clock_ext.x() as f64 + 8.0, 0.0, Font::Text, (1.0, 1.0, 1.0), line_alpha);
             let mut after_clock = clock_x + clock_ext.x() as f64 + clock_w;
             if timer_len > 0.5 {
                 if self.timer.is_some() && line_alpha > 0.95 && timer_k > 0.95 && !self.pill_open() {
@@ -2113,6 +2144,9 @@ impl Island {
                 }
                 let springs = &self.quick_hover_springs;
                 let hover = |action: quick::Action| springs.get(&action).map_or(0.0, |s| s.value(now));
+                let (pressed_at, bounced_at) = (&self.quick_pressed, &self.quick_bounced);
+                let pressed = |action: quick::Action| pressed_at.get(&action).map_or(f64::INFINITY, |t| now - t);
+                let bounced = |action: quick::Action| bounced_at.get(&action).map_or(f64::INFINITY, |t| now - t);
                 let frame = quick::Frame {
                     status: self.quick_status(now),
                     controls: &self.controls,
@@ -2120,6 +2154,11 @@ impl Island {
                     brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
                     hover: &hover,
                     logout_armed: self.logout_armed_at.is_some(),
+                    now,
+                    opened: self.quick_opened_at,
+                    pressed: &pressed,
+                    bounced: &bounced,
+                    grow: (self.slider_grow[0].value(now), self.slider_grow[1].value(now)),
                 };
                 let (qx, qy) = (cx - quick::WIDTH / 2.0, dy + climb + enter);
                 let close = self.quick_close_hover.value(now);
@@ -2195,6 +2234,7 @@ impl Island {
         }
         if sheet_k < 1.0 && pill_alpha > 0.0 {
             let hover = |_: quick::Action| 0.0;
+            let never = |_: quick::Action| f64::INFINITY;
             let frame = quick::Frame {
                 status: self.quick_status(now),
                 controls: &self.controls,
@@ -2202,6 +2242,11 @@ impl Island {
                 brightness: self.brightness_shown.value(now).clamp(0.0, 1.0),
                 hover: &hover,
                 logout_armed: false,
+                now,
+                opened: self.quick_opened_at,
+                pressed: &never,
+                bounced: &never,
+                grow: (0.0, 0.0),
             };
             quick::draw(cr, renderer, cx - quick::WIDTH / 2.0, dy - 8.0 * sheet_k,
                 pill_alpha * (1.0 - sheet_k), self.quick_view, 0.0, &frame);
@@ -2399,6 +2444,8 @@ impl Island {
         if self.dnd == enabled { return; }
         self.dnd = enabled;
         self.dnd_glow.set(f64::from(enabled), now);
+        // the moon bounces as Focus switches
+        self.quick_bounced.insert(quick::Action::Dnd, now);
         notice_center::save_dnd(enabled);
         if enabled && self.notice.as_ref().is_some_and(|notice| !notice.note.critical) {
             self.notice = None;
@@ -2518,6 +2565,9 @@ impl Island {
         self.quick_view_from = None;
         self.quick_drag = None;
         self.logout_armed_at = None;
+        self.quick_opened_at = now;
+        self.quick_pressed.clear();
+        self.quick_bounced.clear();
         self.eq_hovered = false;
         self.editor_chip_hovered = false;
         self.notice = None;
@@ -2564,9 +2614,13 @@ impl Island {
     /// the pointer (its value jumps there, as in macOS).
     pub fn quick_press(&mut self, px: f64, py: f64, now: Time) -> Option<quick::Hit> {
         let hit = self.quick_hit(px, py)?;
-        if let quick::Hit::Slider(kind, value) = hit {
-            self.quick_drag = Some(kind);
-            self.set_control_level(kind, value, now);
+        match hit {
+            quick::Hit::Slider(kind, value) => {
+                self.quick_drag = Some(kind);
+                self.slider_grow[slider_index(kind)].set(1.0, now);
+                self.set_control_level(kind, value, now);
+            }
+            quick::Hit::Action(action) => self.tap(action, now),
         }
         Some(hit)
     }
@@ -2580,8 +2634,27 @@ impl Island {
         Some((kind, value))
     }
 
-    pub fn quick_release(&mut self) -> bool {
-        self.quick_drag.take().is_some()
+    pub fn quick_release(&mut self, now: Time) -> bool {
+        let Some(kind) = self.quick_drag.take() else { return false };
+        self.slider_grow[slider_index(kind)].set(0.0, now);
+        true
+    }
+
+    /// A control was pressed: it dips; toggles bounce their symbol.
+    fn tap(&mut self, action: quick::Action, now: Time) {
+        self.quick_pressed.insert(action, now);
+        if matches!(action, quick::Action::Layout) {
+            self.quick_bounced.insert(action, now);
+        }
+    }
+
+    /// The keyboard layout changed (from the menu or anywhere else).
+    pub fn set_layout(&mut self, layout: String, now: Time) {
+        if self.controls.layout.as_deref() == Some(layout.as_str()) { return; }
+        let known = self.controls.layout.is_some();
+        self.controls.layout = Some(layout);
+        if known { self.quick_bounced.insert(quick::Action::Layout, now); }
+        self.sync(now);
     }
 
     fn set_control_level(&mut self, kind: activity::SliderKind, value: f64, now: Time) {
@@ -2618,7 +2691,7 @@ impl Island {
         }
         self.controls.sinks = snapshot.sinks;
         self.controls.default_sink = snapshot.default_sink;
-        if snapshot.layout.is_some() { self.controls.layout = snapshot.layout; }
+        if let Some(layout) = snapshot.layout { self.set_layout(layout, now); }
         self.sync(now);
     }
 
@@ -2640,6 +2713,7 @@ impl Island {
             return true;
         }
         self.logout_armed_at = Some(now);
+        self.quick_bounced.insert(quick::Action::Logout, now);
         self.sync(now);
         false
     }
@@ -2661,7 +2735,11 @@ impl Island {
         match key {
             "next" => self.quick_selected = (self.quick_selected + 1) % keys.len(),
             "prev" => self.quick_selected = (self.quick_selected + keys.len() - 1) % keys.len(),
-            "enter" => return Some(keys[self.quick_selected]),
+            "enter" => {
+                let action = keys[self.quick_selected];
+                self.tap(action, now);
+                return Some(action);
+            }
             _ => {}
         }
         self.quick_hover = Some(keys[self.quick_selected]);
@@ -3039,6 +3117,8 @@ pub struct Renderer {
     fonts: Vec<pango::FontDescription>,
     ctx: pango::Context,
     cache: RefCell<LayoutCache>,
+    /// labels whose text changes animate (motion.rs)
+    pub motion: crate::motion::Registry,
 }
 
 type LayoutKey = (Font, String, i32, i32);
@@ -3090,7 +3170,7 @@ impl Renderer {
         opts.set_antialias(cairo::Antialias::Gray);
         pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
         ctx.set_round_glyph_positions(true);
-        let renderer = Renderer { scale, fonts, ctx, cache: RefCell::new(LayoutCache::default()) };
+        let renderer = Renderer { scale, fonts, ctx, cache: RefCell::new(LayoutCache::default()), motion: Default::default() };
         // Resolve common font faces at startup/scale changes, not on the
         // first visible frame of a newly opened panel.
         for font in Font::ALL {
@@ -3261,9 +3341,11 @@ mod tests {
     /// Frames of `island` from `t` every `step` seconds, side by side, into
     /// target/gallery/<name>.png (motion review).
     fn filmstrip(name: &str, island: &mut Island, t: Time, frames: usize, step: f64) {
-        let scale = 1.0;
-        let renderer = Renderer::new(scale);
-        let (cw, ch) = (520.0, 420.0);
+        filmstrip_with(name, island, &Renderer::new(1.0), t, frames, step);
+    }
+
+    fn filmstrip_with(name: &str, island: &mut Island, renderer: &Renderer, t: Time, frames: usize, step: f64) {
+        let (cw, ch) = (520.0, 560.0);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, (cw * frames as f64) as i32, ch as i32).unwrap();
         let cr = Context::new(&surface).unwrap();
         cr.set_source_rgb(0.18, 0.30, 0.36);
@@ -3274,12 +3356,36 @@ mod tests {
             cr.save().unwrap();
             cr.rectangle(n as f64 * cw, 0.0, cw, ch);
             cr.clip();
-            island.draw(&cr, &renderer, n as f64 * cw + cw / 2.0, now);
+            island.draw(&cr, renderer, n as f64 * cw + cw / 2.0, now);
             cr.restore().unwrap();
         }
         drop(cr);
         std::fs::create_dir_all("target/gallery").unwrap();
         surface.write_to_png(&mut std::fs::File::create(format!("target/gallery/{name}.png")).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/motion-*.png; set ISLAND_GALLERY=1"]
+    fn text_motion_filmstrips() {
+        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
+        let mut island = gallery_island();
+        island.clock = "Mon Oct 5  9:59 AM".into();
+        island.sync(10.0);
+        let renderer = Renderer::new(1.0);
+        filmstrip_with("motion-clock-before", &mut island, &renderer, 10.0, 1, 0.0);
+        island.clock = "Mon Oct 5  10:00 AM".into();
+        filmstrip_with("motion-clock", &mut island, &renderer, 10.5, 10, 0.045);
+
+        let mut island = gallery_island();
+        island.open_quick_menu(10.0);
+        island.set_controls(crate::control::Snapshot {
+            volume: Some((0.45, false)), brightness: Some(0.7), sinks: vec![], default_sink: String::new(),
+            layout: Some("Russian".into()),
+        }, 10.0);
+        filmstrip("motion-quick-open", &mut island, 10.0, 10, 0.05);
+        island.set_dnd(true, 11.0);
+        island.set_layout("English (US)".into(), 11.0);
+        filmstrip("motion-quick-toggle", &mut island, 11.0, 10, 0.045);
     }
 
     #[test]
@@ -3351,9 +3457,6 @@ mod tests {
         island.quick_show(quick::View::Outputs, 13.0);
         gallery_shot("02c-quick-outputs", &mut island, 13.0);
 
-        let mut island = gallery_island();
-        island.live_activity(activity::Event::Keyboard { name: "Русская".into() }, 10.0);
-        gallery_shot_after("13b-layout", &mut island, 10.0, 0.8);
 
         let mut island = gallery_island();
         island.timer_command("menu", 10.0).unwrap();

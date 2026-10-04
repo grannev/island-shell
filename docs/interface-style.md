@@ -60,6 +60,24 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   snapping to whole rows), dissolve into soft `edge_fades`, and show an
   overlay indicator only while moving.
 
+## Motion
+
+- **Changing text** goes through `motion::text` with a key that includes
+  the sheet's instance (its opening time, an OSD's entrance) — a label
+  seen for the first time just appears. Digits (and a time's `:`/`.`)
+  that changed roll: up as a number grows, down as it shrinks (a
+  countdown); the rest of the label stays and its tail slides to the new
+  width. Changed words lift away as the new word rises in. The compact
+  clock's width eases with its digits.
+- **Presses**: a pressed tile or button dips about 5 % and springs back
+  past rest (`press_scale`).
+- **Symbols**: a toggled or changed symbol bounces (`bounce_scale`: Do
+  Not Disturb's moon, the keyboard on a layout switch); a control asking
+  for confirmation wiggles (`wiggle_angle`).
+- **Sliders** swell slightly while held.
+- **Arrival**: the Control Center's rows arrive in a wave, each a beat
+  after the one above, rising a few points as they fade in.
+
 ## Copy
 
 Interface text is Russian; product names (Wi-Fi, Bluetooth, Touch ID) and

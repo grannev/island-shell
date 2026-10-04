@@ -75,6 +75,29 @@ pub struct Frame<'a> {
     pub hover: &'a dyn Fn(Action) -> f64,
     /// the logout button is waiting for its confirming second press
     pub logout_armed: bool,
+    /// the frame's time and when the menu opened (rows arrive in a wave)
+    pub now: f64,
+    pub opened: f64,
+    /// seconds since a control was pressed (it dips and springs back) and
+    /// since its symbol last bounced
+    pub pressed: &'a dyn Fn(Action) -> f64,
+    pub bounced: &'a dyn Fn(Action) -> f64,
+    /// how far each slider has swollen in the hand (brightness, volume)
+    pub grow: (f64, f64),
+}
+
+impl Frame<'_> {
+    /// A row of the main page arriving: its opacity and how far below its
+    /// place it still is.
+    fn arrival(&self, row: usize, alpha: f64) -> (f64, f64) {
+        let k = crate::island::smoothstep((self.now - self.opened - 0.035 * row as f64) / 0.3);
+        (alpha * k, 10.0 * (1.0 - k))
+    }
+
+    /// Keys for this opening's labels: a fresh menu just shows its text.
+    fn key(&self, name: &str) -> String {
+        format!("quick{:.4}:{name}", self.opened)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -392,7 +415,10 @@ fn sink_glyph(kind: SinkKind) -> &'static str {
 /// Control Center's slider: a thick capsule whose white fill is the level,
 /// with the symbol riding inside at the left.
 #[allow(clippy::too_many_arguments)]
-fn slider(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, symbol: &str, level: f64, alpha: f64) {
+fn slider(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, symbol: &str, level: f64, alpha: f64, grow: f64) {
+    // held, it swells a little about its centre line
+    let swell = 6.0 * grow.clamp(0.0, 1.2);
+    let (x, y, w, h) = (x - swell * 0.5, y - swell * 0.5, w + swell, h + swell);
     menu_style::rounded(cr, x, y, w, h, h / 2.0);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha);
     let _ = cr.fill();
@@ -405,6 +431,9 @@ fn slider(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, symbol: &str
 }
 
 fn module(cr: &Context, renderer: &Renderer, title: &str, x: f64, y: f64, alpha: f64) {
+    if alpha <= 0.002 {
+        return;
+    }
     menu_style::group(cr, x + RAIL, y, INNER, MODULE_H, 0.0, alpha);
     menu_style::label(cr, renderer, title, x + RAIL + 12.0, y + 8.0, 160.0, Font::Label, alpha);
 }
@@ -429,10 +458,20 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
     let status = frame.status;
     let controls = frame.controls;
     let dnd = status.dnd.clamp(0.0, 1.0);
+    let base_alpha = alpha;
     for (i, action) in TILES.iter().enumerate() {
+        let (alpha, rise) = frame.arrival(i / 2, base_alpha);
+        if alpha <= 0.002 {
+            continue;
+        }
         let (tx, ty) = tile(i);
-        let (tx, ty) = (x + tx, y + ty);
+        let (tx, ty) = (x + tx, y + ty + rise);
         let h = (frame.hover)(*action).clamp(0.0, 1.0);
+        let press = menu_style::press_scale((frame.pressed)(*action));
+        cr.save().unwrap();
+        cr.translate(tx + TILE_W / 2.0, ty + TILE_H / 2.0);
+        cr.scale(press, press);
+        cr.translate(-(tx + TILE_W / 2.0), -(ty + TILE_H / 2.0));
         menu_style::group(cr, tx, ty, TILE_W, TILE_H, h, alpha);
         let accent = match action {
             Action::Wifi | Action::Bluetooth => Some(menu_style::BLUE),
@@ -445,7 +484,8 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         if *action == Action::Dnd && dnd > 0.0 {
             menu_style::well(cr, wx, wy, 16.0, Some(menu_style::PURPLE), alpha * dnd);
         }
-        icon(cr, *action, wx, wy, alpha, 0.7 + 0.03 * h);
+        let bounce = menu_style::bounce_scale((frame.bounced)(*action));
+        icon(cr, *action, wx, wy, alpha, (0.7 + 0.03 * h) * bounce);
         let (title, subtitle) = match action {
             Action::Wifi => ("Wi-Fi", "Сети".to_string()),
             Action::Bluetooth => ("Bluetooth", "Устройства".to_string()),
@@ -462,16 +502,21 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
             Action::Dnd => ("Тишина", if dnd > 0.5 { "Вкл.".to_string() } else { "Выкл.".to_string() }),
             _ => unreachable!(),
         };
-        two_lines(cr, renderer, title, &subtitle, tx + 56.0, ty, TILE_W - 64.0, TILE_H, alpha);
+        two_lines(cr, renderer, title, &subtitle, tx + 56.0, ty, TILE_W - 64.0, TILE_H, alpha,
+            &frame.key(&format!("{action:?}")));
+        cr.restore().unwrap();
     }
 
     // Display
-    module(cr, renderer, "Дисплей", x, y + DISPLAY_Y, alpha);
+    let (alpha, rise) = frame.arrival(3, base_alpha);
+    module(cr, renderer, "Дисплей", x, y + DISPLAY_Y + rise, alpha);
     let present = controls.brightness.is_some();
-    slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY, SLIDER_W, SLIDER_H, frame.brightness, "sun", 1.0,
-        alpha * if present { 1.0 } else { 0.35 });
+    slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, frame.brightness, "sun", 1.0,
+        alpha * if present { 1.0 } else { 0.35 }, frame.grow.0);
 
     // Sound, with the output it plays through
+    let (alpha, rise) = frame.arrival(4, base_alpha);
+    let y = y + rise;
     module(cr, renderer, "Звук", x, y + SOUND_Y, alpha);
     if let Some(sink) = controls.current_sink() {
         let (bx, by, bw, bh) = outputs_button();
@@ -480,23 +525,31 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         let text_w = label_w.min(bw - 30.0);
         let right = x + bx + bw;
         menu_style::chevron(cr, right - 5.0, y + by + bh / 2.0, 4.0, 0.0, alpha * (0.55 + 0.45 * lit));
-        menu_style::label(cr, renderer, &sink.label, right - 16.0 - text_w,
-            y + by + (bh - menu_style::line_height(cr, renderer, Font::Subhead)) / 2.0, text_w + 2.0, Font::Subhead,
-            alpha * (menu_style::SECONDARY + (1.0 - menu_style::SECONDARY) * lit));
+        crate::motion::text(cr, renderer, &frame.key("sink"), &sink.label, right - 16.0 - (bw - 30.0),
+            y + by + (bh - menu_style::line_height(cr, renderer, Font::Subhead)) / 2.0, bw - 30.0, 1.0, Font::Subhead,
+            (1.0, 1.0, 1.0), alpha * (menu_style::SECONDARY + (1.0 - menu_style::SECONDARY) * lit));
         glyph(cr, sink_glyph(sink.kind), right - 30.0 - text_w, y + by + bh / 2.0, 1.0,
             (1.0, 1.0, 1.0, alpha * (menu_style::SECONDARY + 0.4 * lit)));
     }
     let present = controls.volume.is_some();
     let symbol = if controls.muted { "speaker-muted" } else { "speaker" };
     slider(cr, x + SLIDER_X, y + SOUND_Y + SLIDER_DY, SLIDER_W, SLIDER_H,
-        if controls.muted { 0.0 } else { frame.volume }, symbol, frame.volume, alpha * if present { 1.0 } else { 0.35 });
+        if controls.muted { 0.0 } else { frame.volume }, symbol, frame.volume, alpha * if present { 1.0 } else { 0.35 },
+        frame.grow.1);
+    let y = y - rise;
 
     // the keyboard layout and the session
+    let (alpha, rise) = frame.arrival(5, base_alpha);
     for (i, action) in SMALL.iter().enumerate() {
         let sx = x + small(i);
-        let sy = y + BOTTOM_Y;
+        let sy = y + BOTTOM_Y + rise;
         let h = (frame.hover)(*action).clamp(0.0, 1.0);
         let armed = *action == Action::Logout && frame.logout_armed;
+        let press = menu_style::press_scale((frame.pressed)(*action));
+        cr.save().unwrap();
+        cr.translate(sx + SMALL_W / 2.0, sy + BOTTOM_H / 2.0);
+        cr.scale(press, press);
+        cr.translate(-(sx + SMALL_W / 2.0), -(sy + BOTTOM_H / 2.0));
         menu_style::group(cr, sx, sy, SMALL_W, BOTTOM_H, h, alpha);
         let (name, label) = match action {
             Action::Layout => ("keyboard", controls.layout.as_deref().map(crate::control::layout_label)
@@ -506,20 +559,32 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
             _ => ("logout", if armed { "Точно?".into() } else { "Выйти".into() }),
         };
         let wy = sy + 25.0;
-        menu_style::well(cr, sx + SMALL_W / 2.0, wy, 16.0, armed.then_some(menu_style::RED), alpha);
-        glyph(cr, name, sx + SMALL_W / 2.0, wy, 1.0, (1.0, 1.0, 1.0, alpha));
+        let since = (frame.bounced)(*action);
+        let (scale, angle) = match action {
+            // asking to confirm, the symbol shakes its head
+            Action::Logout => (1.0, menu_style::wiggle_angle(since)),
+            _ => (menu_style::bounce_scale(since), 0.0),
+        };
+        menu_style::transformed(cr, sx + SMALL_W / 2.0, wy, scale, angle, || {
+            menu_style::well(cr, sx + SMALL_W / 2.0, wy, 16.0, armed.then_some(menu_style::RED), alpha);
+            glyph(cr, name, sx + SMALL_W / 2.0, wy, 1.0, (1.0, 1.0, 1.0, alpha));
+        });
         let colour = if armed { menu_style::RED } else { (1.0, 1.0, 1.0) };
-        menu_style::centred(cr, renderer, &label, (sx, sy + 44.0, SMALL_W, 18.0), Font::Footnote, colour,
-            alpha * if armed { 1.0 } else { 0.85 });
+        let lh = menu_style::line_height(cr, renderer, Font::Footnote);
+        crate::motion::text(cr, renderer, &frame.key(&format!("small{i}")), &label, sx + 4.0, sy + 44.0 + (18.0 - lh) / 2.0,
+            SMALL_W - 8.0, 0.5, Font::Footnote, colour, alpha * if armed { 1.0 } else { 0.85 });
+        cr.restore().unwrap();
     }
 }
 
-fn two_lines(cr: &Context, renderer: &Renderer, title: &str, subtitle: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64) {
+#[allow(clippy::too_many_arguments)]
+fn two_lines(cr: &Context, renderer: &Renderer, title: &str, subtitle: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64, key: &str) {
     let title_h = menu_style::line_height(cr, renderer, Font::Headline);
     let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
     let top = y + (h - title_h - sub_h) / 2.0;
     menu_style::label(cr, renderer, title, x, top, w, Font::Headline, alpha);
-    menu_style::label(cr, renderer, subtitle, x, top + title_h, w, Font::Subhead, menu_style::SECONDARY * alpha);
+    crate::motion::text(cr, renderer, key, subtitle, x, top + title_h, w, 0.0, Font::Subhead, (1.0, 1.0, 1.0),
+        menu_style::SECONDARY * alpha);
 }
 
 fn draw_outputs(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame) {

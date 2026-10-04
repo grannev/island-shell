@@ -584,7 +584,8 @@ impl Center {
                 (0, n) => format!("Всего {n}"),
                 (n, _) => format!("{n} новых"),
             };
-            menu_style::header(cr, renderer, x, y, WIDTH, None, "Уведомления", Some(&count), 170.0, 1.0);
+            menu_style::header_keyed(cr, renderer, x, y, WIDTH, None, "Уведомления", Some(&count), 170.0, 1.0,
+                &format!("center{:.4}:count", self.opened_at));
             if !self.entries.is_empty() {
                 menu_style::button(cr, renderer, "Очистить",
                     (x + WIDTH - 154.0, y + menu_style::HEADER_MID - menu_style::SMALL_BUTTON_H / 2.0, 92.0, menu_style::SMALL_BUTTON_H),

@@ -32,8 +32,6 @@ pub enum Event {
     BatteryLow { percent: u8 },
     Bluetooth { name: String, battery: Option<u8> },
     Wifi { ssid: String },
-    /// the keyboard layout switched (its display name)
-    Keyboard { name: String },
     Screenshot { path: PathBuf },
     TimerDone,
     TimerMenu,
@@ -49,7 +47,6 @@ impl Event {
             Event::BatteryLow { .. } => (310.0, PILL_H),
             Event::Bluetooth { .. } => (370.0, PILL_H),
             Event::Wifi { .. } => (390.0, PILL_H),
-            Event::Keyboard { .. } => (280.0, PILL_H),
             Event::Screenshot { .. } => (390.0, 106.0),
             Event::TimerDone => (270.0, PILL_H),
             Event::TimerMenu => (TIMER_MENU_W, 176.0),
@@ -63,7 +60,6 @@ impl Event {
             Event::Charging { .. } => 2.8,
             Event::BatteryLow { .. } => 5.0,
             Event::Bluetooth { .. } | Event::Wifi { .. } => 3.2,
-            Event::Keyboard { .. } => 1.2,
             Event::Screenshot { .. } => 4.0,
             Event::TimerDone => 4.0,
             Event::TimerMenu => f64::INFINITY,
@@ -388,8 +384,8 @@ pub fn draw_timer_menu(
         None => "Выберите время · Помодоро — 25 мин".into(),
     };
     let glyph = |cr: &Context, cx: f64, cy: f64| stopwatch(cr, cx, cy, 1.0);
-    menu_style::header(cr, renderer, x, y + heading_y, TIMER_MENU_W, Some((menu_style::ORANGE, &glyph)),
-        "Таймер", Some(&subtitle), 60.0, alpha * heading_k);
+    menu_style::header_keyed(cr, renderer, x, y + heading_y, TIMER_MENU_W, Some((menu_style::ORANGE, &glyph)),
+        "Таймер", Some(&subtitle), 60.0, alpha * heading_k, &format!("timer-menu{since:.4}"));
     let paused = timer.is_some_and(|(_, running)| !running);
     for (index, (command, label, bx, by, bw)) in TIMER_BUTTONS.into_iter().enumerate() {
         let k = smoothstep((now - since - 0.05 - index as f64 * 0.035) / 0.23);
@@ -448,14 +444,13 @@ pub fn draw_timer(
         }
         let _ = cr.stroke();
     }
-    let text = renderer.layout(cr, &timer_text(remaining), Font::Small);
+    // the seconds roll down as they count down
+    let label = timer_text(remaining);
+    let text = renderer.layout(cr, &label, Font::Small);
     let (_, ext) = text.pixel_extents();
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.92 * alpha);
-    cr.move_to(
-        renderer.snap(x + 30.0 - ext.x() as f64),
-        renderer.snap(cy - ext.height() as f64 / 2.0 - ext.y() as f64),
-    );
-    pangocairo::functions::show_layout(cr, &text);
+    crate::motion::text(cr, renderer, "timer", &label, x + 30.0 - ext.x() as f64,
+        cy - ext.height() as f64 / 2.0 - ext.y() as f64, ext.width() as f64 + 30.0, 0.0, Font::Small,
+        (1.0, 1.0, 1.0), 0.92 * alpha);
     cr.restore().unwrap();
 }
 
@@ -498,11 +493,9 @@ pub fn draw_pill(
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.94 * enter);
             cr.move_to(renderer.snap(x0 + 57.0), renderer.snap(y0 + 19.0));
             pangocairo::functions::show_layout(cr, &title);
-            let percent = renderer.layout(cr, &format!("{}%", (target * 100.0).round()), Font::Small);
-            let (_, pe) = percent.pixel_extents();
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.62 * enter);
-            cr.move_to(renderer.snap(x0 + w - 26.0 - pe.width() as f64), renderer.snap(y0 + 20.0));
-            pangocairo::functions::show_layout(cr, &percent);
+            // the percentage counts like Control Center's: its digits roll
+            crate::motion::text(cr, renderer, &format!("osd{since:.4}"), &format!("{}%", (target * 100.0).round()),
+                x0 + 26.0, y0 + 20.0, w - 52.0, 1.0, Font::Small, (1.0, 1.0, 1.0), 0.62 * enter);
             let (sx, sy, sw, sh) = (x0 + 26.0, y0 + 53.0, w - 52.0, 6.0);
             round_rect(cr, sx, sy, sw, sh, sh / 2.0);
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.18 * enter);
@@ -544,10 +537,6 @@ pub fn draw_pill(
             draw_headphones(cr, x0 + 49.0, cy, enter);
             let detail = battery.map_or_else(|| "Подключено".to_string(), |p| format!("Подключено · {p}%"));
             draw_two_lines(cr, renderer, name, &detail, x0 + 88.0, cy, enter, crate::menu_style::BLUE);
-        }
-        Event::Keyboard { name } => {
-            draw_keyboard(cr, x0 + 52.0, cy, enter);
-            draw_two_lines(cr, renderer, "Раскладка", name, x0 + 92.0, cy, enter, crate::menu_style::BLUE);
         }
         Event::Wifi { ssid } => {
             draw_wifi(cr, x0 + 48.0, cy, enter);
@@ -757,24 +746,6 @@ fn draw_wifi(cr: &Context, cx: f64, cy: f64, alpha: f64) {
     let _ = cr.fill();
 }
 
-/// keyboard.fill, drawn: a rounded key bed with two rows of keys and a
-/// space bar cut out of it
-fn draw_keyboard(cr: &Context, cx: f64, cy: f64, alpha: f64) {
-    let blue = crate::menu_style::BLUE;
-    cr.new_path();
-    cr.set_fill_rule(cairo::FillRule::EvenOdd);
-    crate::menu_style::rounded(cr, cx - 22.0, cy - 14.0, 44.0, 28.0, 6.0);
-    for row in 0..2 {
-        for col in 0..5 {
-            cr.rectangle(cx - 16.5 + col as f64 * 7.0, cy - 9.0 + row as f64 * 7.0, 5.0, 4.5);
-        }
-    }
-    cr.rectangle(cx - 10.0, cy + 6.0, 20.0, 3.5);
-    cr.set_source_rgba(blue.0, blue.1, blue.2, alpha);
-    let _ = cr.fill();
-    cr.set_fill_rule(cairo::FillRule::Winding);
-}
-
 fn draw_clock(cr: &Context, cx: f64, cy: f64, alpha: f64) {
     cr.new_path();
     cr.set_source_rgba(1.0, 0.62, 0.12, alpha);
@@ -839,7 +810,6 @@ mod tests {
             Event::BatteryLow { percent: 10 },
             Event::Bluetooth { name: "Headphones".into(), battery: Some(84) },
             Event::Wifi { ssid: "Island".into() },
-            Event::Keyboard { name: "Русская".into() },
             Event::Screenshot { path: PathBuf::from("/does/not/exist.png") },
             Event::TimerDone,
         ];

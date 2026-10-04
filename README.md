@@ -56,9 +56,14 @@ asks «Точно?»). While the menu is open, volume and brightness keys move i
 sliders instead of raising an OSD. A worker thread (`src/control.rs`) does
 all reading and writing — `wpctl`, `pactl`, the backlight in sysfs (the
 video group may write it), sway IPC — and coalesces slider drags to the
-latest value. Switching the keyboard layout anywhere flashes a short
-«Раскладка» pill (`layout_osd = 0` turns it off). Arrow keys and Enter walk
-every control on the page; Escape, × or a click outside closes the menu.
+latest value. Arrow keys and Enter walk
+every control on the page; Escape, × or a click outside closes the menu. Changing text animates the
+Apple way (`src/motion.rs`): digits roll — the clock's minutes, the
+countdown, percentages, counts — and changed words lift away as the new
+one rises in («Вкл.» ↔ «Выкл.», the layout's name). Pressed controls dip
+and spring back, toggled symbols bounce, the logout button wiggles while
+it waits for confirmation, held sliders swell, and the menu's rows arrive
+in a wave.
 
 The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
 Pomodoro shortcut); click a preset to start. While running, a compact ring
@@ -350,7 +355,6 @@ at the beginning of a line or as a separate word), read at start;
     toast_hold = 4        # seconds the "now playing" toast stays up
     silent_after = 15     # seconds of pause / mute before the bars fold away
     dodge = 240           # px the island moves left for the ⋯ drawer
-    layout_osd = 1        # flash the keyboard layout when it switches
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a

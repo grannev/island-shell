@@ -1085,18 +1085,14 @@ impl App {
     /// and the mute poll while a song is shown), arm the timer for the
     /// next time-driven change, and draw.
     /// The keyboard layout may have changed (sway reports it once per
-    /// keyboard): show the new one once.
+    /// keyboard): the Control Center's layout button follows it.
     fn layout_changed(&mut self) {
         let Some(layout) = self.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) else { return };
         if self.island.controls.layout.as_deref() == Some(layout.as_str()) {
             return;
         }
         let now = self.frame_time();
-        let known = self.island.controls.layout.replace(layout.clone()).is_some();
-        if known && self.island.config.layout_osd {
-            self.island.live_activity(activity::Event::Keyboard { name: crate::control::layout_label(&layout) }, now);
-        }
-        self.island.sync(now);
+        self.island.set_layout(layout, now);
         self.after_change();
     }
 
@@ -1355,7 +1351,7 @@ impl App {
 
         self.viewport.set_source(0.0, 0.0, bw as f64, bh as f64);
         self.viewport.set_destination(self.width as i32, self.height as i32);
-        if self.island.is_animating(t) {
+        if self.island.is_animating(t) || self.renderer.motion.moving(t) {
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             self.frame_pending = true;
         }
@@ -1772,7 +1768,7 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Release { button, .. } => {
-                    if button == BTN_LEFT && self.island.quick_release() {
+                    if button == BTN_LEFT && self.island.quick_release(self.clock.predict(false)) {
                         changed = true;
                     }
                     if button == BTN_LEFT && self.island.is_scrubbing() {

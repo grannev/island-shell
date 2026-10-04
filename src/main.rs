@@ -19,6 +19,7 @@ mod files;
 mod island;
 mod launcher;
 mod menu_style;
+mod motion;
 mod launch;
 mod notify;
 mod notice_center;

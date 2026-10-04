@@ -583,8 +583,9 @@ impl Panel {
         };
         let kind = self.kind;
         let glyph = move |cr: &Context, cx: f64, cy: f64| symbol(cr, kind, cx, cy + 0.5, 1.05, 1.0);
-        menu_style::header(cr, renderer, 0.0, 0.0, WIDTH, Some((menu_style::BLUE, &glyph)),
-            if self.kind == Kind::Wifi { "Wi-Fi" } else { "Bluetooth" }, Some(subtitle), WIDTH - TOGGLE_X + 8.0, 1.0);
+        menu_style::header_keyed(cr, renderer, 0.0, 0.0, WIDTH, Some((menu_style::BLUE, &glyph)),
+            if self.kind == Kind::Wifi { "Wi-Fi" } else { "Bluetooth" }, Some(subtitle), WIDTH - TOGGLE_X + 8.0, 1.0,
+            &format!("net{}:subtitle", self.session));
         menu_style::toggle(cr, TOGGLE_X, menu_style::HEADER_MID - 14.0, self.power.value(now),
             self.lit(Hit::Power, now), if self.loaded { 1.0 } else { 0.4 });
         let (cx, cy, size) = menu_style::close_rect(WIDTH);
@@ -736,7 +737,9 @@ impl Panel {
         let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
         let top = mid - (title_h + sub_h) / 2.0;
         menu_style::label(cr, renderer, &d.name, text_x, top, text_w, Font::Body, alpha);
-        menu_style::label(cr, renderer, &detail, text_x, top + title_h, text_w, Font::Subhead, menu_style::SECONDARY * alpha);
+        // "Подключение…" → "Подключено" reads as a change, not a jump
+        crate::motion::text(cr, renderer, &format!("net{}:{}", self.session, d.id), &detail, text_x, top + title_h, text_w,
+            0.0, Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
         // at rest the row shows its state; under the pointer, what a click does
         let right = WIDTH - RAIL - 14.0;
         let rest = alpha * (1.0 - hover);
