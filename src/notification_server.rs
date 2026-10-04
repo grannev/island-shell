@@ -26,6 +26,8 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub enum Command {
     Action { id: u32, key: String },
+    /// the user typed a reply (the notification's "inline-reply" action)
+    Reply { id: u32, text: String },
     Dismiss(u32),
     PlaySound { critical: bool },
     Wake,
@@ -63,6 +65,19 @@ fn hint_bool(value: &Value<'_>) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
         Value::Value(inner) => hint_bool(inner),
+        _ => None,
+    }
+}
+
+/// An integer hint whatever width the sender chose (`value` is an i32
+/// in the spec, but u32 and bytes turn up).
+fn hint_int(value: &Value<'_>) -> Option<i64> {
+    match value {
+        Value::I32(n) => Some(i64::from(*n)),
+        Value::U32(n) => Some(i64::from(*n)),
+        Value::I64(n) => Some(*n),
+        Value::U8(n) => Some(i64::from(*n)),
+        Value::Value(inner) => hint_int(inner),
         _ => None,
     }
 }
@@ -158,7 +173,7 @@ fn play_sound(critical: bool) {
 #[interface(name = "org.freedesktop.Notifications", spawn = false)]
 impl Service {
     fn get_capabilities(&self) -> Vec<&'static str> {
-        vec!["actions", "body", "icon-static", "persistence"]
+        vec!["actions", "body", "icon-static", "persistence", "inline-reply"]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -173,6 +188,13 @@ impl Service {
         let base_kind = notify::classify(&app_name, &app_icon, false);
         let parsed_actions: Vec<_> = actions.chunks_exact(2).take(12)
             .map(|pair| (pair[0].clone(), pair[1].clone())).collect();
+        // KDE's inline-reply extension: an action keyed "inline-reply" and
+        // a placeholder hint; the reply goes back as NotificationReplied
+        let parsed_reply = parsed_actions.iter().any(|(key, _)| key == "inline-reply").then(|| {
+            hints.get("x-kde-reply-placeholder-text").and_then(|v| hint_string(v))
+                .map(|text| notify::plain(&text)).filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "Ответ".into())
+        });
         let timeout = if expire_timeout == 0 { None } else {
             let millis = if expire_timeout < 0 { if critical { 0 } else { 5000 } } else { expire_timeout as u64 };
             if millis == 0 { None } else { Some(Instant::now() + Duration::from_millis(millis.clamp(100, 86_400_000))) }
@@ -202,11 +224,13 @@ impl Service {
             kind: if critical { notify::AppKind::Critical } else { base_kind },
             critical,
             tag: None,
-            progress: None,
+            // a job's progress (0..100), e.g. a download
+            progress: hints.get("value").and_then(|v| hint_int(v)).map(|v| v.clamp(0, 100) as f64 / 100.0),
             actions: parsed_actions,
             transient,
             icon,
             image,
+            reply: parsed_reply,
         };
         let _ = self.ui.send(Event::Upsert(note));
         if !silent { let _ = self.commands.send(Command::PlaySound { critical }); }
@@ -228,6 +252,9 @@ impl Service {
 
     #[zbus(signal)]
     async fn notification_closed(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, reason: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn notification_replied(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, text: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn action_invoked(emitter: &zbus::object_server::SignalEmitter<'_>, id: u32, action_key: &str) -> zbus::Result<()>;
@@ -267,6 +294,15 @@ pub fn spawn(ui: Sender<Event>, dnd: Arc<AtomicBool>) -> mpsc::Sender<Command> {
                 Ok(Command::EmitClosed { id, reason }) => emit_closed(&conn, &ui, id, reason),
                 Ok(Command::Dismiss(id)) => {
                     if state.lock().unwrap().active.remove(&id).is_some() { emit_closed(&conn, &ui, id, 2); }
+                }
+                Ok(Command::Reply { id, text }) => {
+                    let known = state.lock().unwrap().active.remove(&id).is_some();
+                    if known {
+                        if let Err(error) = conn.emit_signal(None::<&str>, PATH, NAME, "NotificationReplied", &(id, text.as_str())) {
+                            eprintln!("island-shell: NotificationReplied: {error}");
+                        }
+                        emit_closed(&conn, &ui, id, 2);
+                    }
                 }
                 Ok(Command::Action { id, key }) => {
                     let mut state = state.lock().unwrap();

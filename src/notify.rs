@@ -22,6 +22,10 @@ pub struct Notification {
     pub icon: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
+    /// the app takes a typed reply (the "inline-reply" action), with
+    /// this placeholder for the field
+    #[serde(default)]
+    pub reply: Option<String>,
 }
 
 impl Notification {
@@ -43,7 +47,7 @@ pub fn fabricate(app: &str, summary: &str, body: &str) -> Notification {
     let critical = app.eq_ignore_ascii_case("critical");
     let app_kind = classify(app, "", false);
     let kind = if critical { AppKind::Critical } else { app_kind };
-    Notification { id: 0, app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None, actions: Vec::new(), transient: false, icon: None, image: None }
+    Notification { id: 0, app: pretty_app(app, app_kind), summary: summary.into(), body: body.into(), kind, critical, tag: None, progress: None, actions: Vec::new(), transient: false, icon: None, image: None, reply: None }
 }
 
 impl Notification {

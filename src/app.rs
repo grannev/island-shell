@@ -612,6 +612,7 @@ fn editor_toast(kind: crate::nvim::ToastKind, title: String, body: String, progr
         progress,
         actions: Vec::new(),
         transient: false,
+        reply: None,
         icon: None,
         image: None,
     }
@@ -848,7 +849,12 @@ impl App {
                     self.after_change();
                     return "ok".into();
                 }
-                return "error: the launcher is not open".into();
+                if self.island.replying() {
+                    self.island.reply_key("", Some(&text), false, now);
+                    self.after_change();
+                    return "ok".into();
+                }
+                return "error: nothing takes text".into();
             }
             Command::Key(name) => {
                 let keysym = match name.as_str() {
@@ -1031,6 +1037,17 @@ impl App {
         if self.island.launcher.is_none() {
             if event.keysym == Keysym::Escape {
                 if self.island.close_activity_panel(now) { self.after_change(); }
+            } else if self.island.replying() {
+                let key = match event.keysym {
+                    Keysym::Return | Keysym::KP_Enter => "Return",
+                    Keysym::BackSpace => "BackSpace",
+                    Keysym::u | Keysym::U if ctrl => "u",
+                    _ => "",
+                };
+                if let crate::island::ReplyKey::Send(id, text) = self.island.reply_key(key, event.utf8.as_deref(), ctrl, now) {
+                    let _ = self.notification_commands.send(crate::notification_server::Command::Reply { id, text });
+                }
+                self.after_change();
             } else if self.island.quick_menu_open() {
                 let key = match event.keysym {
                     Keysym::Return | Keysym::KP_Enter => "enter",
@@ -1122,7 +1139,8 @@ impl App {
         }
         // whoever closed the launcher (a key, Touch ID, the compositor),
         // the keyboard goes back when it is gone
-        let wants_keyboard = self.island.launcher.is_some()
+        // a reply takes the keyboard even over a fullscreen window
+        let wants_keyboard = self.island.launcher.is_some() || self.island.replying()
             || (!self.island.is_hidden() && self.island.keyboard_panel_open());
         self.set_keyboard_focus(wants_keyboard);
         self.sync_dismiss_surface(wants_keyboard);
@@ -1238,6 +1256,14 @@ impl App {
         self.drawn_for = Some(t);
         if self.island.advance(t) {
             self.arm_deadline();
+        }
+        // a touchpad swipe that ended without a finger-lift event
+        if let Some(id) = self.island.take_swiped() {
+            self.close_notification(id);
+        }
+        if let Some(action) = self.island.take_center_action() {
+            let now = self.clock.predict(false);
+            self.handle_notification_action(action, now);
         }
         let bw = (self.width as f64 * self.scale).round() as i32;
         let bh = (self.height as f64 * self.scale).round() as i32;
@@ -1759,6 +1785,11 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     let now = self.clock.predict(false);
+                    // a notification (or a card) held by the mouse follows it sideways
+                    if self.island.drag_notice(event.position.0, now) || self.island.drag_center(event.position.0, now) {
+                        changed = true;
+                        continue;
+                    }
                     // a Control Center slider in the hand follows the pointer
                     if let Some((kind, value)) = self.island.quick_drag_to(event.position.0, now) {
                         self.set_level(kind, value);
@@ -1788,6 +1819,19 @@ impl PointerHandler for App {
                     if button == BTN_LEFT && self.island.quick_release(self.clock.predict(false)) {
                         changed = true;
                     }
+                    if button == BTN_LEFT {
+                        let now = self.clock.predict(false);
+                        let (x, y) = event.position;
+                        match self.island.release_notice(x, y, now) {
+                            crate::island::NoticeRelease::Click(click) => self.notice_click(click, now),
+                            crate::island::NoticeRelease::Dismissed(id) => self.close_notification(id),
+                            crate::island::NoticeRelease::None => {}
+                        }
+                        if let Some(action) = self.island.release_center(x, y, now) {
+                            self.handle_notification_action(action, now);
+                        }
+                        changed = true;
+                    }
                     if button == BTN_LEFT && self.island.is_scrubbing() {
                         let now = self.clock.predict(false);
                         if let Some((bus, track, command)) = self.island.end_scrub(now) {
@@ -1813,6 +1857,10 @@ impl PointerHandler for App {
                             self.island.close_launcher(now);
                             self.set_keyboard_focus(false);
                         }
+                        changed = true;
+                        continue;
+                    }
+                    if button == BTN_LEFT && self.island.press_center(event.position.0, event.position.1, now) {
                         changed = true;
                         continue;
                     }
@@ -1877,16 +1925,14 @@ impl PointerHandler for App {
                         continue;
                     }
                     if button == BTN_LEFT {
-                        if let Some(action) = self.island.notice_click_at(event.position.0, event.position.1) {
-                            match action {
-                                crate::island::NoticeClick::Invoke(id, key) => {
-                                    let _ = self.notification_commands.send(crate::notification_server::Command::Action { id, key });
-                                }
-                                crate::island::NoticeClick::Dismiss(id) => {
-                                    self.island.dismiss_notice(now);
-                                    let _ = self.notification_commands.send(crate::notification_server::Command::Dismiss(id));
-                                }
-                            }
+                        // the body may be a click or the start of a swipe:
+                        // the release decides
+                        if self.island.press_notice(event.position.0, event.position.1, now) {
+                            changed = true;
+                            continue;
+                        }
+                        if let Some(click) = self.island.notice_click_at(event.position.0, event.position.1) {
+                            self.notice_click(click, now);
                             changed = true;
                             continue;
                         }
@@ -1911,8 +1957,22 @@ impl PointerHandler for App {
                     }
                     changed = true;
                 }
-                PointerEventKind::Axis { vertical, .. } => {
+                PointerEventKind::Axis { vertical, horizontal, .. } => {
                     changed = true;
+                    // two fingers sideways over a notification swipe it
+                    if horizontal.absolute != 0.0 || horizontal.discrete != 0 || horizontal.stop {
+                        let now = self.clock.predict(false);
+                        let dx = wheel_pixels(horizontal.discrete, horizontal.value120, horizontal.absolute);
+                        let (x, y) = event.position;
+                        let (taken, dismissed) = self.island.swipe_notice(x, y, dx, horizontal.stop, now);
+                        if let Some(id) = dismissed { self.close_notification(id); }
+                        if taken { continue; }
+                        if let Some(action) = self.island.swipe_center(x, y, dx, horizontal.stop, now) {
+                            self.handle_notification_action(action, now);
+                            continue;
+                        }
+                        if vertical.absolute == 0.0 && vertical.discrete == 0 { continue; }
+                    }
                     // a notch is a push of WHEEL_PX; a touchpad moves 1:1
                     let px = wheel_pixels(vertical.discrete, vertical.value120, vertical.absolute);
                     let v = if vertical.discrete != 0 { vertical.discrete as f64 } else { vertical.absolute };
@@ -2020,6 +2080,35 @@ impl App {
                 }
             }
             Action::Close => {}
+        }
+    }
+
+    fn notice_click(&mut self, click: crate::island::NoticeClick, now: Time) {
+        match click {
+            // an app that takes inline replies: the pill opens a field
+            crate::island::NoticeClick::Invoke(_, key) if key == "inline-reply" => {
+                self.island.begin_reply(now);
+            }
+            crate::island::NoticeClick::Invoke(id, key) => {
+                let _ = self.notification_commands.send(crate::notification_server::Command::Action { id, key });
+            }
+            crate::island::NoticeClick::SendReply => {
+                if let Some((id, text)) = self.island.send_reply(now) {
+                    let _ = self.notification_commands.send(crate::notification_server::Command::Reply { id, text });
+                }
+            }
+            crate::island::NoticeClick::Field => {}
+            crate::island::NoticeClick::Dismiss(id) => {
+                self.island.dismiss_notice(now);
+                let _ = self.notification_commands.send(crate::notification_server::Command::Dismiss(id));
+            }
+        }
+    }
+
+    /// Close a notification the user dismissed (swiped or clicked away).
+    fn close_notification(&self, id: u32) {
+        if id != 0 {
+            let _ = self.notification_commands.send(crate::notification_server::Command::Dismiss(id));
         }
     }
 

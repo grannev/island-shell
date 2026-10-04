@@ -82,6 +82,8 @@ const NOTICE_PAD_R: f64 = 24.0;
 const NOTICE_ICON: f64 = 40.0;
 const NOTICE_GAP: f64 = 16.0;
 const NOTICE_LINE_GAP: f64 = 2.0;
+/// room under the message for a progress bar
+const NOTICE_BAR: f64 = 14.0;
 /// the roll when one notification replaces another
 const ROLL_DUR: f64 = 0.44;
 const PILL_W_DUR: f64 = 0.35;
@@ -328,11 +330,84 @@ pub struct Notice {
     pub since: Time,
 }
 
+/// A notification being swiped sideways (by two fingers or the mouse).
+struct Swipe {
+    /// the content's horizontal offset: set directly while held, a spring
+    /// back to rest once let go
+    offset: Spring,
+    held: bool,
+    /// fed by a touchpad / tilt wheel rather than a held button
+    axis: bool,
+    last: Time,
+    /// px/s, smoothed, for a flick
+    velocity: f64,
+    /// a mouse press that has not moved far enough to be a swipe yet
+    press: Option<f64>,
+}
+
+impl Swipe {
+    fn new(now: Time) -> Self {
+        Swipe { offset: Spring::new(0.0, 0.35, 0.82), held: true, axis: false, last: now, velocity: 0.0, press: None }
+    }
+
+    /// Follow the finger to `offset`.
+    fn to(&mut self, offset: f64, now: Time) {
+        let dt = now - self.last;
+        let old = self.offset.value(now);
+        if dt > 1e-4 {
+            self.velocity = 0.6 * self.velocity + 0.4 * (offset - old) / dt;
+        }
+        self.offset = Spring::new(offset, 0.35, 0.82);
+        self.last = now;
+    }
+}
+
+/// What letting go of a notification gesture did.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoticeRelease {
+    /// it never became a swipe: a click
+    Click(NoticeClick),
+    /// it was swiped away (the D-Bus ID to close, 0 for internal ones)
+    Dismissed(u32),
+    None,
+}
+
+/// How far (of the pill's width) or how fast a swipe must go to dismiss.
+const SWIPE_DISMISS: f64 = 0.3;
+const SWIPE_FLICK: f64 = 700.0;
+/// a touchpad that stops sending without an explicit stop has let go
+const SWIPE_IDLE: Time = 0.15;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoticeClick {
     Invoke(u32, String),
     Dismiss(u32),
+    /// the reply field's send button
+    SendReply,
+    /// the rest of a pill being replied to: nothing to do
+    Field,
 }
+
+/// A reply being typed into a notification (the app's inline-reply).
+struct Reply {
+    id: u32,
+    text: String,
+    since: Time,
+    typed: Time,
+}
+
+/// What a key did to a reply being typed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReplyKey {
+    None,
+    /// send this text to the notification with this ID
+    Send(u32, String),
+    Cancel,
+}
+
+/// the reply field's band under the message, and the pill's width then
+const REPLY_H: f64 = 52.0;
+const NOTICE_REPLY_W: f64 = 460.0;
 
 #[derive(Clone, Debug)]
 struct LiveActivity {
@@ -425,6 +500,15 @@ pub struct Island {
     notice_rect: Option<Rect>,
     notice_hovered: Option<usize>,
     notice_action_hover: [Spring; 2],
+    /// the pill's progress, eased between a job's updates
+    notice_progress: Spring,
+    notice_swipe: Option<Swipe>,
+    notice_reply: Option<Reply>,
+    /// a swiped-away notification flying off while the pill folds
+    notice_swiped: Option<(Notice, Spring, f64)>,
+    /// a swipe that ended on its own (the touchpad went quiet): its
+    /// notification for the app to close over D-Bus
+    swiped_id: Option<u32>,
     pub dnd: bool,
     dnd_glow: Spring,
     roll: Quintic,
@@ -614,6 +698,11 @@ impl Island {
             notice_rect: None,
             notice_hovered: None,
             notice_action_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
+            notice_progress: Spring::new(0.0, 0.35, 1.0),
+            notice_swipe: None,
+            notice_reply: None,
+            notice_swiped: None,
+            swiped_id: None,
             dnd,
             dnd_glow: Spring::new(f64::from(dnd), 0.32, 0.9),
             roll: Quintic::at_rest(1.0, ROLL_DUR),
@@ -729,6 +818,9 @@ impl Island {
             || self.center_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.quick_returned_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.notice_action_hover.iter().any(|spring| spring.is_moving(now))
+            || self.notice.is_some() && self.notice_progress.is_moving(now)
+            || self.notice_swipe.as_ref().is_some_and(|s| s.held || s.offset.is_moving(now))
+            || self.notice_swiped.is_some()
             || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
@@ -975,10 +1067,25 @@ impl Island {
                 changed = true;
             }
         }
-        if self.notice.as_ref().is_some_and(|n| now - n.since >= self.config.notice_hold) {
+        // a notification in the hand does not time out
+        let held = self.notice_swipe.as_ref().is_some_and(|s| s.held) || self.notice_reply.is_some();
+        if !held && self.notice.as_ref().is_some_and(|n| now - n.since >= self.config.notice_hold) {
             self.notice = None;
             self.notice_prev = None;
             changed = true;
+        }
+        if self.notice_swipe.as_ref().is_some_and(|s| s.held && s.axis && now - s.last > SWIPE_IDLE) {
+            if let Some(id) = self.release_swipe(now) { self.swiped_id = Some(id); }
+            changed = true;
+        }
+        if self.notice_swipe.as_ref().is_some_and(|s| !s.held && !s.offset.is_moving(now)) {
+            self.notice_swipe = None;
+        }
+        if let Some((_, fly, width)) = &self.notice_swiped {
+            if fly.value(now).abs() >= *width || self.pill.state(now).x <= 0.0 {
+                self.notice_swiped = None;
+                changed = true;
+            }
         }
         if self.notice_prev.is_some() && !self.roll.is_moving(now) {
             self.notice_prev = None;
@@ -1410,6 +1517,7 @@ impl Island {
         if let Some(current) = self.notice.as_mut() {
             if (note.id != 0 && current.note.id == note.id)
                 || (note.tag.is_some() && current.note.tag == note.tag) {
+                if let Some(done) = note.progress { self.notice_progress.set(done, now); }
                 current.note = note;
                 current.since = now;
                 self.notice_prev = None;
@@ -1424,6 +1532,7 @@ impl Island {
             self.roll.set_at(0.0, now);
             self.roll.set(1.0, now);
         }
+        self.notice_progress = Spring::new(note.progress.unwrap_or(0.0), 0.35, 1.0);
         self.notice = Some(Notice { note, since: now });
         self.notice_hovered = None;
         for spring in &mut self.notice_action_hover { spring.set(0.0, now); }
@@ -1517,10 +1626,15 @@ impl Island {
     }
 
     pub fn keyboard_panel_open(&self) -> bool {
-        self.quick_open || self.center.open || self.activity.as_ref().is_some_and(|current| activity::takes_keyboard(&current.event))
+        self.quick_open || self.center.open || self.notice_reply.is_some()
+            || self.activity.as_ref().is_some_and(|current| activity::takes_keyboard(&current.event))
     }
 
     pub fn close_activity_panel(&mut self, now: Time) -> bool {
+        if self.notice_reply.is_some() {
+            self.cancel_reply(now);
+            return true;
+        }
         if self.center.open {
             self.center.close();
             self.center_rect = None;
@@ -1893,7 +2007,16 @@ impl Island {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
             } else { a.event.size() }
         }));
-        let notice_size = self.notice.as_ref().map(|n| renderer.notice_size(cr, &n.note));
+        let notice_size = self.notice.as_ref().map(|n| {
+            let (w, h) = renderer.notice_size(cr, &n.note);
+            // replying, the action buttons give way to the reply field
+            if self.notice_reply.as_ref().is_some_and(|r| r.id == n.note.id) {
+                let actions = if n.note.actions.iter().any(|(key, _)| key != "default") { 39.0 } else { 0.0 };
+                (w.max(NOTICE_REPLY_W), h - actions + REPLY_H)
+            } else {
+                (w, h)
+            }
+        });
         let toast_size = self.song.as_ref().filter(|_| self.toast.is_some()).map(|song| {
             let view = song.view(&self.eq, self.config.accent, None, None, now);
             (player::toast_width(cr, renderer, &view), player::TOAST_H)
@@ -2227,11 +2350,26 @@ impl Island {
                 }
                 if let Some(notice) = &self.notice {
                     let climb = (1.0 - pill_alpha) * PILL_CLIMB + ROLL_TRAVEL * (1.0 - roll);
+                    let (_, _, w, _) = renderer.notice_layouts(cr, &notice.note);
                     if pill_alpha > 0.95 && roll > 0.95 {
-                        let (_, _, w, _) = renderer.notice_layouts(cr, &notice.note);
                         self.notice_rect = Some(Rect { x: cx - w / 2.0, y: dy, w, h: bh });
                     }
-                    self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7), climb, now);
+                    // in the hand, the content follows sideways and thins out
+                    let shift = self.notice_swipe.as_ref().map_or(0.0, |s| s.offset.value(now));
+                    let fade = 1.0 - (shift.abs() / w).clamp(0.0, 1.0).powf(1.3);
+                    cr.save().unwrap();
+                    cr.translate(shift, 0.0);
+                    self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * roll.powf(0.7) * fade, climb, now);
+                    cr.restore().unwrap();
+                }
+                if let Some((notice, fly, width)) = &self.notice_swiped {
+                    // swiped away: it carries on out while the pill folds
+                    let shift = fly.value(now);
+                    let fade = 1.0 - (shift.abs() / width).clamp(0.0, 1.0).powf(0.8);
+                    cr.save().unwrap();
+                    cr.translate(shift, 0.0);
+                    self.draw_notice(cr, renderer, notice, cx, dy, bh, pill_alpha * fade, 0.0, now);
+                    cr.restore().unwrap();
                 }
             }
         }
@@ -2347,8 +2485,15 @@ impl Island {
         let (app, msg, width, _) = renderer.notice_layouts(cr, note);
         let x0 = cx - width / 2.0;
         let icon_cx = x0 + NOTICE_PAD_L + NOTICE_ICON / 2.0;
-        let actions: Vec<_> = note.actions.iter().filter(|(key, _)| key != "default").take(2).collect();
-        let mid = dy + bh / 2.0 + offset - if actions.is_empty() { 0.0 } else { 14.0 };
+        let reply = self.notice_reply.as_ref().filter(|r| r.id == note.id);
+        let actions: Vec<_> = if reply.is_some() { Vec::new() } else {
+            note.actions.iter().filter(|(key, _)| key != "default").take(2).collect()
+        };
+        let mid = if reply.is_some() {
+            dy + (bh - REPLY_H) / 2.0 + offset + 4.0
+        } else {
+            dy + bh / 2.0 + offset - if actions.is_empty() { 0.0 } else { 14.0 }
+        };
         if !note.leading_image().is_some_and(|name| crate::notify::draw_media(cr, &self.launcher_icons, name,
             icon_cx, mid, NOTICE_ICON, renderer.scale(), alpha)) {
             icons::draw(cr, note.kind, icon_cx, mid, NOTICE_ICON, t, alpha);
@@ -2363,13 +2508,15 @@ impl Island {
         match note.progress {
             // a job reports how far it has got instead of how long the pill
             // still has to live
-            Some(done) => icons::progress_ring(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, done, alpha * smoothstep(t / 0.3)),
+            Some(_) => icons::progress_ring(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0,
+                self.notice_progress.value(now).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
             None => icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / self.config.notice_hold).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
         }
 
         let (_, app_ext) = app.pixel_extents();
         let (_, msg_ext) = msg.pixel_extents();
-        let total = app_ext.height() as f64 + NOTICE_LINE_GAP + msg_ext.height() as f64;
+        let bar = if note.progress.is_some() { NOTICE_BAR } else { 0.0 };
+        let total = app_ext.height() as f64 + NOTICE_LINE_GAP + msg_ext.height() as f64 + bar;
         let tx = renderer.snap(x0 + NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP);
         let ty = mid - total / 2.0;
         // the lines settle in a hair after the icon, each a touch later
@@ -2381,6 +2528,23 @@ impl Island {
         cr.set_source_rgba(1.0, 1.0, 1.0, alpha * 0.95);
         cr.move_to(tx + slide(0.12), renderer.snap(ty + app_ext.height() as f64 + NOTICE_LINE_GAP - msg_ext.y() as f64));
         pangocairo::functions::show_layout(cr, &msg);
+        if note.progress.is_some() {
+            // a download's bar under the message, in the app's colour
+            let done = self.notice_progress.value(now).clamp(0.0, 1.0);
+            let (bx, by) = (tx + slide(0.18), ty + total - 4.0);
+            let bw = x0 + width - NOTICE_PAD_R - tx;
+            crate::menu_style::rounded(cr, bx, by, bw, 4.0, 2.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.16 * alpha);
+            let _ = cr.fill();
+            if done > 0.0 {
+                crate::menu_style::rounded(cr, bx, by, (bw * done).max(4.0), 4.0, 2.0);
+                cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
+                let _ = cr.fill();
+            }
+        }
+        if let Some(reply) = reply {
+            self.draw_reply(cr, renderer, note, reply, tx, x0 + width - NOTICE_PAD_R, dy + bh - REPLY_H + offset, alpha, now);
+        }
         for (index, (_, title)) in actions.iter().enumerate() {
             let bx = x0 + NOTICE_PAD_L + 55.0 + index as f64 * 148.0;
             let by = dy + bh - 39.0 + offset;
@@ -2401,6 +2565,131 @@ impl Island {
             cr.pop_group_to_source().unwrap();
             let _ = cr.paint_with_alpha(opacity);
             cr.restore().unwrap();
+        }
+    }
+
+    /// The reply field: an iMessage capsule with a caret and the send
+    /// button, rising in under the message.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_reply(&self, cr: &Context, renderer: &Renderer, note: &crate::notify::Notification, reply: &Reply,
+        x0: f64, x1: f64, top: f64, alpha: f64, now: Time) {
+        let k = smoothstep((now - reply.since) / 0.3);
+        let alpha = alpha * k;
+        let (x, y, w, h) = (x0, top + 4.0 + 6.0 * (1.0 - k), x1 - x0, 36.0);
+        crate::menu_style::rounded(cr, x, y, w, h, h / 2.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha);
+        let _ = cr.fill_preserve();
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.16 * alpha);
+        let _ = cr.stroke();
+        let room = w - 16.0 - 36.0;
+        let body_h = crate::menu_style::line_height(cr, renderer, Font::Body);
+        let ty = y + (h - body_h) / 2.0;
+        let (shown, colour) = if reply.text.is_empty() {
+            (note.reply.as_deref().unwrap_or("Ответ"), crate::menu_style::TERTIARY)
+        } else {
+            (reply.text.as_str(), 1.0)
+        };
+        let layout = renderer.layout(cr, shown, Font::Body);
+        let text_w = if reply.text.is_empty() { 0.0 } else { layout.pixel_extents().1.width() as f64 };
+        cr.save().unwrap();
+        cr.rectangle(x + 12.0, y, room + 4.0, h);
+        cr.clip();
+        // long replies scroll left to keep the caret in view
+        let scroll = (text_w - room).max(0.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, colour * alpha);
+        cr.move_to(renderer.snap(x + 14.0 - scroll), renderer.snap(ty));
+        pangocairo::functions::show_layout(cr, &layout);
+        let blink = now - reply.typed < 0.6 || ((now - reply.typed) * 1.6).fract() < 0.55;
+        if blink {
+            let blue = crate::menu_style::BLUE;
+            cr.rectangle(renderer.snap(x + 14.0 - scroll + text_w + 1.0), y + 9.0, 2.0, h - 18.0);
+            cr.set_source_rgba(blue.0, blue.1, blue.2, alpha);
+            let _ = cr.fill();
+        }
+        cr.restore().unwrap();
+        // the send button: blue once there is something to send
+        let (cx, cy) = (x + w - 18.0, y + h / 2.0);
+        let ready = !reply.text.trim().is_empty();
+        let pop = if ready { 1.0 } else { 0.9 };
+        crate::menu_style::well(cr, cx, cy, 13.0 * pop, ready.then_some(crate::menu_style::BLUE), alpha);
+        cr.new_path();
+        cr.set_line_width(2.2);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * if ready { 1.0 } else { 0.5 });
+        cr.move_to(cx, cy + 6.0);
+        cr.line_to(cx, cy - 6.0);
+        cr.move_to(cx - 5.0, cy - 1.0);
+        cr.line_to(cx, cy - 6.0);
+        cr.line_to(cx + 5.0, cy - 1.0);
+        let _ = cr.stroke();
+        cr.new_path();
+    }
+
+    /// Start typing a reply to the notification on show (its app takes
+    /// inline replies). The field takes the keyboard.
+    pub fn begin_reply(&mut self, now: Time) -> bool {
+        let Some(notice) = self.notice.as_ref().filter(|n| n.note.reply.is_some()) else { return false };
+        self.notice_reply = Some(Reply { id: notice.note.id, text: String::new(), since: now, typed: now });
+        self.notice_swipe = None;
+        self.sync(now);
+        true
+    }
+
+    pub fn replying(&self) -> bool {
+        self.notice_reply.is_some()
+    }
+
+    /// Typing into the reply: text, BackSpace, Ctrl+BackSpace, Ctrl+U,
+    /// Return sends, Escape gives up.
+    pub fn reply_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, now: Time) -> ReplyKey {
+        let Some(reply) = self.notice_reply.as_mut() else { return ReplyKey::None };
+        match key {
+            "Return" => {
+                if reply.text.trim().is_empty() { return ReplyKey::None; }
+                return self.send_reply(now).map_or(ReplyKey::None, |(id, text)| ReplyKey::Send(id, text));
+            }
+            "Escape" => {
+                self.cancel_reply(now);
+                return ReplyKey::Cancel;
+            }
+            "BackSpace" if ctrl => {
+                let trimmed = reply.text.trim_end().len();
+                let cut = reply.text[..trimmed].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+                reply.text.truncate(cut);
+            }
+            "BackSpace" => { reply.text.pop(); }
+            "u" if ctrl => reply.text.clear(),
+            _ => {
+                if let Some(text) = text.filter(|t| !ctrl && t.chars().all(|c| !c.is_control())) {
+                    if reply.text.chars().count() < 2000 { reply.text.push_str(text); }
+                }
+            }
+        }
+        reply.typed = now;
+        self.sync(now);
+        ReplyKey::None
+    }
+
+    /// Send what was typed: the pill goes, its ID and the text return.
+    pub fn send_reply(&mut self, now: Time) -> Option<(u32, String)> {
+        let reply = self.notice_reply.take()?;
+        if reply.text.trim().is_empty() {
+            self.notice_reply = Some(reply);
+            return None;
+        }
+        self.notice = None;
+        self.notice_prev = None;
+        self.sync(now);
+        Some((reply.id, reply.text))
+    }
+
+    fn cancel_reply(&mut self, now: Time) {
+        if self.notice_reply.take().is_some() {
+            // back to an ordinary notification, with its full time again
+            if let Some(notice) = self.notice.as_mut() { notice.since = now; }
+            self.sync(now);
         }
     }
 
@@ -2462,11 +2751,116 @@ impl Island {
         self.sync(now);
     }
 
+    /// Two-finger (or tilt-wheel) sideways scroll over the notification:
+    /// the content follows. `stop` is the touchpad's finger lift. Returns
+    /// whether the gesture was the notification's, and the D-Bus ID to
+    /// close if it was swiped away.
+    pub fn swipe_notice(&mut self, px: f64, py: f64, dx: f64, stop: bool, now: Time) -> (bool, Option<u32>) {
+        let over = self.notice_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        let active = self.notice_swipe.as_ref().is_some_and(|s| s.held && s.axis);
+        if !active && (!over || dx == 0.0 || self.notice.is_none()) {
+            return (false, None);
+        }
+        if !active {
+            let mut swipe = Swipe::new(now);
+            swipe.axis = true;
+            self.notice_swipe = Some(swipe);
+        }
+        if dx != 0.0 {
+            if let Some(swipe) = self.notice_swipe.as_mut() {
+                // the content moves the way scrolled content would
+                let to = swipe.offset.value(now) - dx;
+                swipe.to(to, now);
+            }
+        }
+        let dismissed = if stop { self.release_swipe(now) } else { None };
+        self.sync(now);
+        (true, dismissed)
+    }
+
+    /// A mouse press on the notification's body: maybe a click, maybe the
+    /// start of a swipe — decided by how far it moves. Action buttons
+    /// keep acting on the press.
+    pub fn press_notice(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let Some(r) = self.notice_rect else { return false };
+        if px < r.x || px > r.x + r.w || py < r.y || py > r.y + r.h || self.notice.is_none() {
+            return false;
+        }
+        if self.notice_action_index_at(px, py).is_some() || self.notice_reply.is_some() {
+            return false;
+        }
+        let mut swipe = Swipe::new(now);
+        swipe.press = Some(px);
+        self.notice_swipe = Some(swipe);
+        true
+    }
+
+    /// The held mouse moved: past a few pixels it is a swipe.
+    pub fn drag_notice(&mut self, px: f64, now: Time) -> bool {
+        let Some(swipe) = self.notice_swipe.as_mut().filter(|s| s.held && !s.axis) else { return false };
+        let Some(x0) = swipe.press else { return false };
+        let dx = px - x0;
+        if swipe.offset.value(now) == 0.0 && dx.abs() < 6.0 {
+            return true;
+        }
+        swipe.to(dx, now);
+        true
+    }
+
+    /// The mouse let go of the notification.
+    pub fn release_notice(&mut self, px: f64, py: f64, now: Time) -> NoticeRelease {
+        let Some(swipe) = self.notice_swipe.as_ref().filter(|s| s.held && !s.axis) else { return NoticeRelease::None };
+        if swipe.offset.value(now) == 0.0 {
+            self.notice_swipe = None;
+            return self.notice_click_at(px, py).map_or(NoticeRelease::None, NoticeRelease::Click);
+        }
+        match self.release_swipe(now) {
+            Some(id) => NoticeRelease::Dismissed(id),
+            None => NoticeRelease::None,
+        }
+    }
+
+    /// Let go: far or fast enough and the notification flies off (its ID
+    /// is returned to close it), otherwise it springs back.
+    fn release_swipe(&mut self, now: Time) -> Option<u32> {
+        let mut swipe = self.notice_swipe.take()?;
+        let width = self.notice_rect.map_or(NOTICE_MIN_W, |r| r.w);
+        let offset = swipe.offset.value(now);
+        let flick = swipe.velocity.abs() > SWIPE_FLICK && swipe.velocity.signum() == offset.signum() && offset.abs() > 16.0;
+        if offset.abs() > width * SWIPE_DISMISS || flick {
+            let notice = self.notice.take()?;
+            let id = notice.note.id;
+            let mut fly = Spring::new(offset, 0.28, 1.0);
+            fly.set(offset.signum() * (width + 60.0), now);
+            self.notice_swiped = Some((notice, fly, width));
+            self.notice_prev = None;
+            self.notice_rect = None;
+            self.sync(now);
+            return Some(id);
+        }
+        swipe.held = false;
+        swipe.offset.set(0.0, now);
+        self.notice_swipe = Some(swipe);
+        self.sync(now);
+        None
+    }
+
+    /// A swipe that ended by itself since the last look.
+    pub fn take_swiped(&mut self) -> Option<u32> {
+        self.swiped_id.take()
+    }
+
     pub fn notice_click_at(&self, px: f64, py: f64) -> Option<NoticeClick> {
         let rect = self.notice_rect?;
         if px < rect.x || px > rect.x + rect.w || py < rect.y || py > rect.y + rect.h { return None; }
         let note = &self.notice.as_ref()?.note;
         if note.id == 0 { return None; }
+        if self.notice_reply.is_some() {
+            // only the send button acts; the rest of the pill is the field
+            let (cx, cy) = (rect.x + rect.w - NOTICE_PAD_R - 18.0, rect.y + rect.h - REPLY_H + 4.0 + 18.0);
+            let send = (px - cx).powi(2) + (py - cy).powi(2) <= 18.0 * 18.0;
+            return Some(if send { NoticeClick::SendReply } else { NoticeClick::Field });
+        }
         if let Some(index) = self.notice_action_index_at(px, py) {
             let (key, _) = note.actions.iter().filter(|(key, _)| key != "default").nth(index)?;
             return Some(NoticeClick::Invoke(note.id, key.clone()));
@@ -2534,6 +2928,42 @@ impl Island {
         } else { notice_center::Action::None };
         self.sync(now);
         Some(action)
+    }
+
+    /// Two fingers sideways over the notification center's cards.
+    pub fn swipe_center(&mut self, px: f64, py: f64, dx: f64, stop: bool, now: Time) -> Option<notice_center::Action> {
+        if !self.center.open { return None; }
+        let rect = self.center_rect?;
+        let (taken, action) = self.center.swipe_axis(px - rect.x, py - rect.y, dx, stop, now);
+        if !taken { return None; }
+        self.sync(now);
+        Some(action.unwrap_or(notice_center::Action::None))
+    }
+
+    /// A mouse press on a card: decided on release (click or swipe).
+    pub fn press_center(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.center.open { return false; }
+        let Some(rect) = self.center_rect else { return false };
+        self.center.press(px - rect.x, py - rect.y, now)
+    }
+
+    pub fn drag_center(&mut self, px: f64, now: Time) -> bool {
+        if !self.center.open { return false; }
+        let Some(rect) = self.center_rect else { return false };
+        self.center.drag(px - rect.x, now)
+    }
+
+    pub fn release_center(&mut self, px: f64, py: f64, now: Time) -> Option<notice_center::Action> {
+        if !self.center.open { return None; }
+        let rect = self.center_rect?;
+        let action = self.center.release(px - rect.x, py - rect.y, now);
+        self.sync(now);
+        action
+    }
+
+    /// What a card swipe that ended on its own did.
+    pub fn take_center_action(&mut self) -> Option<notice_center::Action> {
+        self.center.take_pending()
     }
 
     pub fn scroll_notification_center(&mut self, rows: f64, now: Time) -> bool {
@@ -3260,7 +3690,8 @@ impl Renderer {
         let text_w = (app.pixel_extents().1.width() as f64).max(msg.pixel_extents().1.width() as f64);
         let image_extra = if note.icon.is_some() && note.image.is_some() { 88.0 } else { 0.0 };
         let w = NOTICE_PAD_L + NOTICE_ICON + NOTICE_GAP + text_w + NOTICE_PAD_R + image_extra;
-        let text_h = app.pixel_extents().1.height() as f64 + NOTICE_LINE_GAP + msg.pixel_extents().1.height() as f64;
+        let text_h = app.pixel_extents().1.height() as f64 + NOTICE_LINE_GAP + msg.pixel_extents().1.height() as f64
+            + if note.progress.is_some() { NOTICE_BAR } else { 0.0 };
         let action_extra = if note.actions.iter().any(|(key, _)| key != "default") { 39.0 } else { 0.0 };
         let h = (text_h + 2.0 * NOTICE_PAD_V).max(NOTICE_ICON + 2.0 * NOTICE_PAD_V - 6.0) + action_extra;
         (app, msg, w.max(NOTICE_MIN_W), h.max(PILL_H))
@@ -3594,6 +4025,24 @@ mod tests {
         gallery_shot("10-notification", &mut island, 10.0);
 
         let mut island = gallery_island();
+        let mut note = crate::notify::fabricate("Firefox", "Загрузка", "island-shell-0.9.tar.gz — 12 из 30 МБ");
+        note.id = 31;
+        note.progress = Some(0.4);
+        island.notify(note, 10.0);
+        gallery_shot("10b-notification-progress", &mut island, 10.0);
+
+        let mut island = gallery_island();
+        let mut note = crate::notify::fabricate("Telegram", "Alice", "Are we still on for tonight?");
+        note.id = 32;
+        note.actions = vec![("default".into(), "Open".into()), ("inline-reply".into(), "Ответить".into())];
+        note.reply = Some("Сообщение".into());
+        island.notify(note, 10.0);
+        gallery_shot("10c-notification-reply-button", &mut island, 10.0);
+        island.begin_reply(12.0);
+        for key in ["Д", "а", ",", " ", "в", " ", "8"] { island.reply_key("", Some(key), false, 12.5); }
+        gallery_shot_after("10d-notification-replying", &mut island, 12.5, 1.0);
+
+        let mut island = gallery_island();
         island.song = Some(Song { now: gallery_song(true), position: 141.0, position_at: 10.0 });
         island.reveal.set_at(1.0, 10.0);
         island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
@@ -3655,6 +4104,97 @@ mod tests {
         let mut island = gallery_island();
         island.auth_started(10.0);
         gallery_shot("17-touch-id", &mut island, 10.0);
+    }
+
+    fn shown_notice(id: u32) -> (Island, Rect) {
+        let mut island = Island::new(Config::default());
+        let mut note = crate::notify::fabricate("Telegram", "Alice", "Hello there");
+        note.id = id;
+        note.actions = vec![("default".into(), "Open".into())];
+        island.notify(note, 10.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        for n in 0..40 { island.draw(&cr, &renderer, 490.0, 10.0 + n as f64 / 60.0); }
+        let rect = island.notice_rect.expect("the pill is up");
+        (island, rect)
+    }
+
+    #[test]
+    fn a_short_swipe_springs_back_and_a_long_one_dismisses() {
+        let (mut island, r) = shown_notice(7);
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        // two fingers, a little way: back it goes
+        assert_eq!(island.swipe_notice(x, y, -30.0, false, 11.0), (true, None));
+        assert_eq!(island.swipe_notice(x, y, 0.0, true, 11.02), (true, None));
+        assert!(island.notice.is_some());
+        // most of the way: it is gone and its ID comes back to be closed
+        for n in 0..10 { island.swipe_notice(x, y, -20.0, false, 12.0 + n as f64 * 0.05); }
+        assert_eq!(island.swipe_notice(x, y, 0.0, true, 12.6), (true, Some(7)));
+        assert!(island.notice.is_none() && island.notice_swiped.is_some());
+
+        // the mouse: a press that does not move is a click…
+        let (mut island, r) = shown_notice(8);
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert!(island.press_notice(x, y, 11.0));
+        assert!(island.drag_notice(x + 3.0, 11.05));
+        assert_eq!(island.release_notice(x + 3.0, y, 11.1), NoticeRelease::Click(NoticeClick::Invoke(8, "default".into())));
+        // …a slow drag past a third of the pill is a swipe
+        assert!(island.press_notice(x, y, 12.0));
+        for n in 1..=20 { island.drag_notice(x + n as f64 * 9.0, 12.0 + n as f64 * 0.1); }
+        assert_eq!(island.release_notice(x + 180.0, y, 14.1), NoticeRelease::Dismissed(8));
+    }
+
+    #[test]
+    fn a_swiped_card_leaves_the_notification_center_the_way_it_went() {
+        let mut island = Island::new(Config::default());
+        for (n, app) in ["Telegram", "Firefox"].into_iter().enumerate() {
+            let mut note = crate::notify::fabricate(app, "Message", "Body");
+            note.id = n as u32 + 1;
+            island.center.upsert(note, 5.0);
+        }
+        island.open_notification_center(10.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        for n in 0..60 { island.draw(&cr, &renderer, 490.0, 10.0 + n as f64 / 60.0); }
+        let r = island.center_rect.expect("the center is up");
+        let (x, y) = (r.x + 200.0, r.y + crate::menu_style::CONTENT_TOP + 20.0);
+        for n in 0..10 { island.swipe_center(x, y, -20.0, false, 12.0 + n as f64 * 0.05); }
+        let action = island.swipe_center(x, y, 0.0, true, 12.6).expect("the swipe was the center's");
+        // the newest card (Firefox, id 2) went
+        assert_eq!(action, notice_center::Action::Dismiss(2));
+        assert_eq!(island.center.len(), 1);
+    }
+
+    #[test]
+    fn an_inline_reply_is_typed_in_the_pill_and_sent_by_return() {
+        let mut island = Island::new(Config::default());
+        let mut note = crate::notify::fabricate("Telegram", "Alice", "Are we still on?");
+        note.id = 21;
+        note.actions = vec![("default".into(), "Open".into()), ("inline-reply".into(), "Ответить".into())];
+        note.reply = Some("Сообщение".into());
+        island.notify(note, 10.0);
+        assert!(island.begin_reply(10.5));
+        assert!(island.keyboard_panel_open());
+        for key in ["Д", "а", "!"] { island.reply_key("", Some(key), false, 11.0); }
+        island.reply_key("BackSpace", None, false, 11.1);
+        // the pill waits for the reply however long it takes
+        island.advance(10.0 + 60.0);
+        assert!(island.notice.is_some());
+        assert_eq!(island.reply_key("Return", None, false, 70.1), ReplyKey::Send(21, "Да".into()));
+        assert!(island.notice.is_none() && !island.replying());
+
+        // Escape gives the notification back, with its time restarted
+        let mut note = crate::notify::fabricate("Telegram", "Bob", "Hi");
+        note.id = 22;
+        note.reply = Some("Сообщение".into());
+        island.notify(note, 80.0);
+        island.begin_reply(80.5);
+        assert_eq!(island.reply_key("Escape", None, false, 81.0), ReplyKey::Cancel);
+        assert!(island.notice.as_ref().is_some_and(|n| n.since == 81.0) && !island.replying());
     }
 
     #[test]

@@ -30,6 +30,10 @@ const ROW_MOTION: Time = 0.42;
 /// the wheel's glide (see anim::Glide)
 const SCROLL_TAU: Time = 0.08;
 const INDICATOR_HOLD: Time = 0.8;
+/// a swipe dismisses past this share of the card, or as a flick (px/s)
+const SWIPE_DISMISS: f64 = 0.3;
+const SWIPE_FLICK: f64 = 700.0;
+const SWIPE_IDLE: Time = 0.15;
 const EXIT_MOTION: Time = 0.32;
 const VIEW_MOTION: Time = 0.28;
 
@@ -40,6 +44,29 @@ struct Leaving {
     child: bool,
     row: f64,
     since: Time,
+    /// where a swipe let go of it: it flies on out that way
+    shift: f64,
+}
+
+/// A card being swiped sideways (two fingers or the held mouse).
+struct RowSwipe {
+    key: RowKey,
+    offset: Spring,
+    held: bool,
+    axis: bool,
+    last: Time,
+    velocity: f64,
+    press: Option<f64>,
+}
+
+impl RowSwipe {
+    fn to(&mut self, offset: f64, now: Time) {
+        let dt = now - self.last;
+        let old = self.offset.value(now);
+        if dt > 1e-4 { self.velocity = 0.6 * self.velocity + 0.4 * (offset - old) / dt; }
+        self.offset = Spring::new(offset, 0.35, 0.82);
+        self.last = now;
+    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -83,6 +110,9 @@ pub struct Center {
     /// not step); rows and leaving rows live in list coordinates
     scroll: Glide,
     scrolled_at: Time,
+    swipe: Option<RowSwipe>,
+    /// what a swipe that ended by itself did, for the island to pass on
+    pending: Option<Action>,
     detail: Option<u64>,
     view_transition: Option<(Option<u64>, Time)>,
     detail_scroll: f64,
@@ -175,7 +205,7 @@ impl Center {
     fn with_entries(entries: VecDeque<Entry>, writer: Option<mpsc::Sender<Vec<Entry>>>) -> Self {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
-            entries, next_serial, open: false, opened_at: 0.0, scroll: Glide::new(0.0, SCROLL_TAU), scrolled_at: f64::NEG_INFINITY,
+            entries, next_serial, open: false, opened_at: 0.0, scroll: Glide::new(0.0, SCROLL_TAU), scrolled_at: f64::NEG_INFINITY, swipe: None, pending: None,
             detail: None, view_transition: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
             row_hover: HashMap::new(),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
@@ -289,6 +319,12 @@ impl Center {
     }
 
     pub fn advance(&mut self, now: Time) {
+        if self.swipe.as_ref().is_some_and(|s| s.held && s.axis && now - s.last > SWIPE_IDLE) {
+            if let Some(action) = self.release_swipe(now) { self.pending = Some(action); }
+        }
+        if self.swipe.as_ref().is_some_and(|s| !s.held && !s.offset.is_moving(now)) {
+            self.swipe = None;
+        }
         self.leaving.retain(|row| now - row.since < EXIT_MOTION);
         self.born_at.retain(|_, since| now - *since < ROW_MOTION);
         if now - self.row_motion_at >= ROW_MOTION { self.row_from.clear(); }
@@ -329,6 +365,7 @@ impl Center {
     pub fn is_animating(&self, now: Time) -> bool {
         self.open && (now - self.opened_at < 0.5 || self.row_hover.values().any(|s| s.is_moving(now))
             || self.scroll.is_moving(now) || now - self.scrolled_at < INDICATOR_HOLD + 0.3
+            || self.swipe.as_ref().is_some_and(|s| s.held || s.offset.is_moving(now))
             || self.button_hover.iter().any(|s| s.is_moving(now))
             || !self.leaving.is_empty() || !self.born_at.is_empty()
             || !self.row_from.is_empty()
@@ -388,6 +425,86 @@ impl Center {
         self.row_hover.retain(|_, spring| spring.target() > 0.0 || spring.is_moving(now));
     }
 
+    fn swipe_target(&self, x: f64, y: f64) -> Option<RowKey> {
+        match self.hit(x, y)? {
+            Hit::Row(i) | Hit::Remove(i) => self.rows().get(i).map(|view| view.key.clone()),
+            _ => None,
+        }
+    }
+
+    /// Two fingers sideways over a card: it follows; `stop` lets go.
+    pub fn swipe_axis(&mut self, x: f64, y: f64, dx: f64, stop: bool, now: Time) -> (bool, Option<Action>) {
+        let active = self.swipe.as_ref().is_some_and(|s| s.held && s.axis);
+        if !active {
+            if dx == 0.0 || self.detail.is_some() { return (false, None); }
+            let Some(key) = self.swipe_target(x, y) else { return (false, None) };
+            self.swipe = Some(RowSwipe { key, offset: Spring::new(0.0, 0.35, 0.82), held: true, axis: true,
+                last: now, velocity: 0.0, press: None });
+        }
+        if dx != 0.0 {
+            if let Some(swipe) = self.swipe.as_mut() {
+                let to = swipe.offset.value(now) - dx;
+                swipe.to(to, now);
+            }
+        }
+        (true, if stop { self.release_swipe(now) } else { None })
+    }
+
+    /// A mouse press on a card's body (not its ×): a click or a swipe,
+    /// decided by how far it moves.
+    pub fn press(&mut self, x: f64, y: f64, now: Time) -> bool {
+        if self.detail.is_some() || !matches!(self.hit(x, y), Some(Hit::Row(_))) { return false; }
+        let Some(key) = self.swipe_target(x, y) else { return false };
+        self.swipe = Some(RowSwipe { key, offset: Spring::new(0.0, 0.35, 0.82), held: true, axis: false,
+            last: now, velocity: 0.0, press: Some(x) });
+        true
+    }
+
+    pub fn drag(&mut self, x: f64, now: Time) -> bool {
+        let Some(swipe) = self.swipe.as_mut().filter(|s| s.held && !s.axis) else { return false };
+        let Some(x0) = swipe.press else { return false };
+        if swipe.offset.value(now) == 0.0 && (x - x0).abs() < 6.0 { return true; }
+        swipe.to(x - x0, now);
+        true
+    }
+
+    /// The mouse let go: a click if it never moved, else the swipe's end.
+    pub fn release(&mut self, x: f64, y: f64, now: Time) -> Option<Action> {
+        let swipe = self.swipe.as_ref().filter(|s| s.held && !s.axis)?;
+        if swipe.offset.value(now) == 0.0 {
+            self.swipe = None;
+            return Some(self.click(x, y, now));
+        }
+        self.release_swipe(now)
+    }
+
+    /// Far or fast enough and the card goes (its notifications close),
+    /// otherwise it springs back.
+    fn release_swipe(&mut self, now: Time) -> Option<Action> {
+        let mut swipe = self.swipe.take()?;
+        let offset = swipe.offset.value(now);
+        let width = WIDTH - 2.0 * RAIL;
+        let flick = swipe.velocity.abs() > SWIPE_FLICK && swipe.velocity.signum() == offset.signum() && offset.abs() > 16.0;
+        if offset.abs() > width * SWIPE_DISMISS || flick {
+            let view = self.rows().into_iter().find(|v| v.key == swipe.key).map(|v| (v.count, v.entry.serial, v.entry.note.app.clone()));
+            let Some((count, serial, app)) = view else { return None };
+            let action = if count > 1 { self.remove_group(&app, now) } else { self.remove_serial(serial, now) };
+            // the card carries on out from where the finger left it
+            for leaving in self.leaving.iter_mut().filter(|l| l.since == now) {
+                leaving.shift = offset;
+            }
+            return Some(action);
+        }
+        swipe.held = false;
+        swipe.offset.set(0.0, now);
+        self.swipe = Some(swipe);
+        None
+    }
+
+    pub fn take_pending(&mut self) -> Option<Action> {
+        self.pending.take()
+    }
+
     /// The scroll indicator's opacity: up while scrolling, gone a moment
     /// after the list comes to rest.
     fn indicator(&self, now: Time) -> f64 {
@@ -420,7 +537,7 @@ impl Center {
                     let row = *self.row_from.get(&view.key)?;
                     self.in_view(row).then(|| Leaving {
                         entry: view.entry.clone(), count: view.count, unread: view.unread,
-                        child: view.child, row, since: now,
+                        child: view.child, row, since: now, shift: 0.0,
                     })
                 }).collect();
                 self.leaving.extend(leaving);
@@ -443,7 +560,7 @@ impl Center {
                                     let row = *self.row_from.get(&view.key)?;
                                     self.in_view(row).then(|| Leaving {
                                         entry: view.entry.clone(), count: 1, unread: view.unread,
-                                        child: true, row, since: now,
+                                        child: true, row, since: now, shift: 0.0,
                                     })
                                 }).collect();
                             self.leaving.extend(leaving);
@@ -500,7 +617,7 @@ impl Center {
         if self.open && self.detail.is_none() {
             if let Some((_, count, unread, child, Some(row))) = view {
                 if self.in_view(row) {
-                    self.leaving.push(Leaving { entry: entry.clone(), count, unread, child, row, since: now });
+                    self.leaving.push(Leaving { entry: entry.clone(), count, unread, child, row, since: now, shift: 0.0 });
                 }
             }
         }
@@ -521,7 +638,7 @@ impl Center {
             let row = *self.row_from.get(&view.key)?;
             self.in_view(row).then(|| Leaving {
                 entry: view.entry.clone(), count: view.count, unread: view.unread,
-                child: view.child, row, since: now,
+                child: view.child, row, since: now, shift: 0.0,
             })
         }).collect();
         self.leaving.extend(leaving);
@@ -651,14 +768,25 @@ impl Center {
             let top = y + ROW_TOP + position * ROW_H + (1.0 - opening) * 15.0 + (1.0 - entrance) * 20.0;
             let opacity = alpha * opening * fade;
             let hover = self.row_hover.get(&view.key).map_or(0.0, |spring| spring.value(now));
+            // a card in the hand follows sideways and thins out
+            let shift = self.swipe.as_ref().filter(|s| s.key == view.key).map_or(0.0, |s| s.offset.value(now));
+            let fade = 1.0 - (shift.abs() / (WIDTH - 2.0 * RAIL)).clamp(0.0, 1.0).powf(1.3);
             self.draw_row(cr, renderer, media, view.entry, view.count, view.unread, view.child,
-                x, top, opacity, hover, born.map_or(now - self.opened_at, |since| now - since));
+                x + shift, top, opacity * fade, hover, born.map_or(now - self.opened_at, |since| now - since));
         }
         for leaving in &self.leaving {
             let k = min_jerk(((now - leaving.since) / EXIT_MOTION).clamp(0.0, 1.0));
-            let top = y + ROW_TOP + (leaving.row - scroll) * ROW_H - k * 9.0;
+            let swiped = leaving.shift != 0.0;
+            let top = y + ROW_TOP + (leaving.row - scroll) * ROW_H - if swiped { 0.0 } else { k * 9.0 };
+            let (dx, fade) = if swiped {
+                // swiped away: on out the way it was going
+                let dx = leaving.shift + leaving.shift.signum() * k * WIDTH;
+                (dx, (1.0 - (leaving.shift.abs() / (WIDTH - 2.0 * RAIL)).min(1.0).powf(1.3)) * (1.0 - k))
+            } else {
+                (k * 25.0, 1.0 - k)
+            };
             self.draw_row(cr, renderer, media, &leaving.entry, leaving.count, leaving.unread, leaving.child,
-                x + k * 25.0, top, alpha * (1.0 - k), 0.0, now - self.opened_at);
+                x + dx, top, alpha * fade, 0.0, now - self.opened_at);
         }
         // cards slide under soft edges where there is more to scroll to
         let max = self.max_scroll();
@@ -743,6 +871,17 @@ impl Center {
             menu_style::label(cr, renderer, body, text_x, line1 + title_h, right - 28.0 - text_x,
                 Font::Subhead, menu_style::SECONDARY * alpha);
         }
+        if let Some(done) = entry.note.progress.filter(|_| entry.active && count <= 1) {
+            // a running job keeps its bar along the card's foot
+            let (bx, by, bw) = (text_x, top + card_h - 9.0, right - 28.0 - text_x);
+            menu_style::rounded(cr, bx, by, bw, 3.0, 1.5);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha);
+            let _ = cr.fill();
+            let accent = icons::accent(entry.note.kind);
+            menu_style::rounded(cr, bx, by, (bw * done.clamp(0.0, 1.0)).max(3.0), 3.0, 1.5);
+            cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
+            let _ = cr.fill();
+        }
         if grouped {
             cr.pop_group_to_source().unwrap();
             let _ = cr.paint_with_alpha(opacity);
@@ -808,7 +947,8 @@ fn age(seconds: u64) -> String {
 
 fn visible_actions(note: &Notification) -> Vec<&(String, String)> {
     let mut actions: Vec<_> = note.actions.iter().filter(|(key, _)| key == "default").take(1).collect();
-    actions.extend(note.actions.iter().filter(|(key, _)| key != "default").take(1));
+    // a reply is typed into the live pill; as a plain action it does nothing
+    actions.extend(note.actions.iter().filter(|(key, _)| key != "default" && key != "inline-reply").take(1));
     actions
 }
 
