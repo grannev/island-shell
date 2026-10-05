@@ -4252,19 +4252,19 @@ mod tests {
             use crate::tasks::{Op, Request};
             let req = |id: &str, op| Request { id: id.into(), op, owner: None };
             let mut island = gallery_island();
-            island.task(req("build", Op::Start { title: "cargo build".into() }), 4.0).unwrap();
+            island.task(req("build", Op::Start { title: "cargo build".into(), after: 0.0 }), 4.0).unwrap();
             gallery_shot_after("05b-task-running", &mut island, 10.0, 1.0);
-            island.task(req("copy", Op::Start { title: "Копирование фото".into() }), 10.0).unwrap();
+            island.task(req("copy", Op::Start { title: "Копирование фото".into(), after: 0.0 }), 10.0).unwrap();
             island.task(req("copy", Op::Set { progress: Some(0.4), detail: Some("412 из 1030 файлов".into()) }), 10.0).unwrap();
             gallery_shot_after("05c-task-progress", &mut island, 10.0, 1.0);
-            island.task(req("backup", Op::Start { title: "Резервная копия".into() }), 11.0).unwrap();
+            island.task(req("backup", Op::Start { title: "Резервная копия".into(), after: 0.0 }), 11.0).unwrap();
             island.task(req("backup", Op::Fail { detail: Some("диск отключён".into()) }), 11.5).unwrap();
             island.click_tasks_at(-1.0, -1.0, 11.5);
             island.show_tasks(12.0);
             gallery_shot_after("05d-task-pill", &mut island, 12.0, 1.0);
             island.task(req("build", Op::Done { detail: None }), 20.0).unwrap();
             let mut done = gallery_island();
-            done.task(req("build", Op::Start { title: "cargo build".into() }), 1.0).unwrap();
+            done.task(req("build", Op::Start { title: "cargo build".into(), after: 0.0 }), 1.0).unwrap();
             done.task(req("build", Op::Done { detail: None }), 1.5).unwrap();
             gallery_shot_after("05e-task-done", &mut done, 1.5, 1.0);
         }

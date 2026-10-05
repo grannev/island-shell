@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 cargo build --release
 install -Dm755 target/release/island-shell "$HOME/.local/bin/island-shell"
 install -Dm755 scripts/island-screenshot.sh "$HOME/.local/bin/island-screenshot"
+install -Dm644 shell/island.bash "$HOME/.local/share/island-shell/island.bash"
 install -Dm644 assets/waybar/timer.svg "$HOME/.local/share/island-shell/icons/timer.svg"
 install -Dm644 assets/waybar/bluetooth.svg "$HOME/.local/share/island-shell/icons/bluetooth.svg"
 echo "installed $HOME/.local/bin/island-shell"

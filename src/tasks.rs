@@ -34,8 +34,10 @@ const CHIP_GAP: f64 = 6.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
-    /// start (or restart) a job with this title
-    Start { title: String },
+    /// start (or restart) a job with this title; with `after` it shows
+    /// only once it has run that many seconds (a shell's commands: the
+    /// quick ones never appear)
+    Start { title: String, after: f64 },
     /// how far it has got (0..1) and/or what it is doing now
     Set { progress: Option<f64>, detail: Option<String> },
     /// `progress <title> <n>%`: start if new, set, and end at 100 %
@@ -81,9 +83,15 @@ pub fn parse(words: &[&str], shorthand: bool) -> Option<Request> {
     let request = |id: &str, op| Some(Request { id: id.to_string(), op, owner });
     match words {
         ["list"] => request("", Op::List),
-        ["start", id, title @ ..] => {
+        ["start", rest @ ..] => {
+            let (after, rest) = match rest.split_first() {
+                Some((first, rest)) if first.starts_with("--after=") =>
+                    (first["--after=".len()..].parse::<f64>().ok().filter(|s| s.is_finite() && *s >= 0.0)?, rest),
+                _ => (0.0, rest),
+            };
+            let (id, title) = rest.split_first()?;
             let title = text(title).unwrap_or_else(|| id.to_string());
-            request(id, Op::Start { title })
+            request(id, Op::Start { title, after })
         }
         ["set", id, rest @ ..] => {
             let (progress, rest) = match rest.split_first() {
@@ -182,6 +190,8 @@ pub enum Outcome {
 #[derive(Default)]
 pub struct Tasks {
     list: Vec<Task>,
+    /// started with a delay, not shown yet: (job, when it shows)
+    pending: Vec<(Task, Time)>,
     serial: u64,
 }
 
@@ -199,13 +209,20 @@ impl Tasks {
                     t.progress.map_or_else(|| "-".into(), |p| format!("{:.0}%", p * 100.0)), t.title)).collect();
                 Ok(Outcome::Listed(if lines.is_empty() { "no tasks".into() } else { lines.join("\n") }))
             }
-            Op::Start { title } => {
+            Op::Start { title, after } => {
                 self.list.retain(|t| t.id != id);
+                self.pending.retain(|(t, _)| t.id != id);
                 self.serial += 1;
-                self.list.push(Task {
+                let task = Task {
                     id, title, detail: None, progress: None, eased: Spring::new(0.0, 0.5, 1.0),
                     started: now, updated: now, ended: None, owner, serial: self.serial,
-                });
+                };
+                if after > 0.0 {
+                    self.pending.push((task, now + after));
+                    self.pending.truncate(64);
+                    return Ok(Outcome::Changed);
+                }
+                self.list.push(task);
                 // too many: the oldest finished ones go, then the oldest
                 while self.list.len() > LIMIT {
                     let index = self.list.iter().position(|t| t.ended.is_some()).unwrap_or(0);
@@ -215,7 +232,7 @@ impl Tasks {
             }
             Op::Progress { title, progress } => {
                 if !self.list.iter().any(|t| t.id == id && t.ended.is_none()) {
-                    self.apply(Request { id: id.clone(), op: Op::Start { title }, owner }, now)?;
+                    self.apply(Request { id: id.clone(), op: Op::Start { title, after: 0.0 }, owner }, now)?;
                 }
                 self.apply(Request { id: id.clone(), op: Op::Set { progress: Some(progress), detail: None }, owner: None }, now)?;
                 if progress >= 1.0 {
@@ -224,6 +241,11 @@ impl Tasks {
                 Ok(Outcome::Changed)
             }
             Op::Set { progress, detail } => {
+                if let Some((task, _)) = self.pending.iter_mut().find(|(t, _)| t.id == id) {
+                    if progress.is_some() { task.progress = progress; task.eased = Spring::new(progress.unwrap_or(0.0), 0.5, 1.0); }
+                    if detail.is_some() { task.detail = detail; }
+                    return Ok(Outcome::Changed);
+                }
                 let task = self.live(&id)?;
                 if let Some(p) = progress {
                     if task.progress.is_none() {
@@ -238,6 +260,10 @@ impl Tasks {
                 Ok(Outcome::Changed)
             }
             Op::Done { detail } | Op::Fail { detail } => {
+                // a delayed job that ends before it shows was never news
+                let before = self.pending.len();
+                self.pending.retain(|(t, _)| t.id != id);
+                if self.pending.len() != before { return Ok(Outcome::Changed); }
                 let ok = done;
                 let task = self.live(&id)?;
                 if detail.is_some() { task.detail = detail; }
@@ -247,9 +273,10 @@ impl Tasks {
                 Ok(Outcome::Ended { announce: now - task.started >= ANNOUNCE_AFTER })
             }
             Op::Cancel => {
-                let before = self.list.len();
+                let before = self.list.len() + self.pending.len();
                 self.list.retain(|t| t.id != id);
-                if self.list.len() == before { return Err(format!("no task {id:?}")); }
+                self.pending.retain(|(t, _)| t.id != id);
+                if self.list.len() + self.pending.len() == before { return Err(format!("no task {id:?}")); }
                 Ok(Outcome::Changed)
             }
         }
@@ -261,11 +288,15 @@ impl Tasks {
 
     /// The owners of running jobs, to check that they are still alive.
     pub fn owners(&self) -> Vec<(String, u32)> {
-        self.list.iter().filter(|t| t.ended.is_none()).filter_map(|t| Some((t.id.clone(), t.owner?))).collect()
+        self.list.iter().filter(|t| t.ended.is_none()).chain(self.pending.iter().map(|(t, _)| t))
+            .filter_map(|t| Some((t.id.clone(), t.owner?))).collect()
     }
 
     /// The owner of `id` exited without ending it.
     pub fn orphaned(&mut self, id: &str, now: Time) -> Option<Outcome> {
+        let before = self.pending.len();
+        self.pending.retain(|(t, _)| t.id != id);
+        if self.pending.len() != before { return Some(Outcome::Changed); }
         let task = self.live(id).ok()?;
         task.detail = Some("прервано".into());
         task.ended = Some(End { at: now, ok: false });
@@ -278,7 +309,21 @@ impl Tasks {
     pub fn advance(&mut self, now: Time) -> bool {
         let before = self.list.len();
         self.list.retain(|t| t.ended.is_none_or(|e| now - e.at < LINGER));
-        before != self.list.len()
+        // delayed jobs that have run long enough come out (the ring starts
+        // from their real start, so the time shown is the command's)
+        let due: Vec<Task> = self.pending.iter().filter(|(_, at)| now >= *at).map(|(t, _)| t.clone()).collect();
+        self.pending.retain(|(_, at)| now < *at);
+        let shown = !due.is_empty();
+        for mut task in due {
+            task.updated = now;
+            self.list.retain(|t| t.id != task.id);
+            self.list.push(task);
+        }
+        while self.list.len() > LIMIT {
+            let index = self.list.iter().position(|t| t.ended.is_some()).unwrap_or(0);
+            self.list.remove(index);
+        }
+        shown || before != self.list.len()
     }
 
     /// The ring needs frames: it eases, or an outcome pops in.
@@ -295,10 +340,10 @@ impl Tasks {
     /// When the next time-driven change is due (the running seconds tick,
     /// a finished job leaves).
     pub fn next_change(&self, now: Time) -> Option<Time> {
-        self.list.iter().filter_map(|t| match t.ended {
-            Some(e) => Some(e.at + LINGER),
-            None => Some(now + 1.0 - ((now - t.started).fract())),
-        }).reduce(f64::min)
+        self.list.iter().map(|t| match t.ended {
+            Some(e) => e.at + LINGER,
+            None => now + 1.0 - ((now - t.started).fract()),
+        }).chain(self.pending.iter().map(|(_, at)| *at)).reduce(f64::min)
     }
 
     /// The job the compact ring speaks for: the latest running one, else
@@ -479,7 +524,7 @@ mod tests {
     #[test]
     fn parses_task_commands() {
         assert_eq!(request("task --pid=42 start build Сборка проекта"),
-            Some(Request { id: "build".into(), op: Op::Start { title: "Сборка проекта".into() }, owner: Some(42) }));
+            Some(Request { id: "build".into(), op: Op::Start { title: "Сборка проекта".into(), after: 0.0 }, owner: Some(42) }));
         assert_eq!(request("task set build 40% linking"),
             Some(Request { id: "build".into(), op: Op::Set { progress: Some(0.4), detail: Some("linking".into()) }, owner: None }));
         assert_eq!(request("task set build 12,5%").map(|r| r.op), Some(Op::Set { progress: Some(0.125), detail: None }));
@@ -493,7 +538,7 @@ mod tests {
     #[test]
     fn a_job_runs_ends_and_leaves() {
         let mut tasks = Tasks::default();
-        let start = |id: &str| Request { id: id.into(), op: Op::Start { title: id.into() }, owner: Some(7) };
+        let start = |id: &str| Request { id: id.into(), op: Op::Start { title: id.into(), after: 0.0 }, owner: Some(7) };
         tasks.apply(start("a"), 1.0).unwrap();
         assert!(tasks.apply(Request { id: "b".into(), op: Op::Done { detail: None }, owner: None }, 1.0).is_err());
         assert_eq!(tasks.primary().unwrap().value(66.5), "1:05");
@@ -512,5 +557,22 @@ mod tests {
         assert_eq!(tasks.apply(progress(0.5), 10.0), Ok(Outcome::Changed));
         assert_eq!(tasks.apply(progress(1.0), 11.0), Ok(Outcome::Ended { announce: false }));
         assert_eq!(tasks.primary().unwrap().value(11.0), "Готово");
+    }
+
+    #[test]
+    fn a_delayed_job_shows_only_if_it_runs_long_enough() {
+        let mut tasks = Tasks::default();
+        let start = |id: &str| Request { id: id.into(), op: Op::Start { title: "make".into(), after: 10.0 }, owner: Some(5) };
+        let done = |id: &str| Request { id: id.into(), op: Op::Done { detail: None }, owner: None };
+        tasks.apply(start("quick"), 0.0).unwrap();
+        assert!(tasks.is_empty());
+        assert_eq!(tasks.next_change(0.0), Some(10.0));
+        assert_eq!(tasks.apply(done("quick"), 2.0), Ok(Outcome::Changed), "ends unseen, no announcement");
+        assert!(!tasks.advance(20.0) && tasks.is_empty());
+        tasks.apply(start("slow"), 30.0).unwrap();
+        assert_eq!(tasks.owners(), vec![("slow".to_string(), 5)]);
+        assert!(tasks.advance(40.0));
+        assert_eq!(tasks.primary().unwrap().value(42.5), "0:12", "timed from the command's start");
+        assert_eq!(tasks.apply(done("slow"), 45.0), Ok(Outcome::Ended { announce: true }));
     }
 }

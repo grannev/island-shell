@@ -72,6 +72,14 @@ with its outcome and duration, even over a fullscreen window:
     island-shell task done build | task fail build disk full
     island-shell task cancel build | task list
 
+In bash, every command can be a job without `run`: `scripts/install.sh`
+installs `shell/island.bash`, and a line in `~/.bashrc` sources it. A
+command still running after 10 seconds (`ISLAND_JOB_AFTER`) shows its ring,
+titled with the command, and ends with a tick or with «код N»/«прервано».
+Quick commands never appear. The hook only tells the island when a command
+starts and ends; it starts no background process. Editors, pagers, `ssh`,
+`tmux` and other interactive programs (`ISLAND_JOB_IGNORE`) are left out.
+
 `run` passes the command's input, output and exit status through untouched.
 A failure shows «код N», or «прервано» when the command was killed by a
 signal; without a running island the command simply runs. Every job belongs to
@@ -518,6 +526,7 @@ while the compact island remains hidden.
     src/clipboard.rs  wl-copy and the cliphist history for "clip:"
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
+    shell/          island.bash: long shell commands as live activities
     systemd/        the user service
     examples/icons.rs  renders the icon set to a PNG for eyeballing
     examples/apps.rs   lists what the launcher would show, with icon sizes
