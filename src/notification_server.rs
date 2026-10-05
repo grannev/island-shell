@@ -32,12 +32,19 @@ pub enum Command {
     PlaySound { critical: bool },
     Wake,
     EmitClosed { id: u32, reason: u32 },
+    /// the user has this notification in hand (typing a reply, the pointer
+    /// on it): it must not expire meanwhile
+    Hold(u32),
+    /// let go: it expires again, after its full timeout from now
+    Release(u32),
 }
 
 struct Active {
     actions: Vec<(String, String)>,
     resident: bool,
     expires: Option<Instant>,
+    /// the app's timeout, to restart it after a hold
+    timeout: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -195,10 +202,11 @@ impl Service {
                 .map(|text| notify::plain(&text)).filter(|text| !text.is_empty())
                 .unwrap_or_else(|| "Ответ".into())
         });
-        let timeout = if expire_timeout == 0 { None } else {
+        let lifetime = if expire_timeout == 0 { None } else {
             let millis = if expire_timeout < 0 { if critical { 0 } else { 5000 } } else { expire_timeout as u64 };
-            if millis == 0 { None } else { Some(Instant::now() + Duration::from_millis(millis.clamp(100, 86_400_000))) }
+            if millis == 0 { None } else { Some(Duration::from_millis(millis.clamp(100, 86_400_000))) }
         };
+        let timeout = lifetime.map(|d| Instant::now() + d);
         let mut state = self.state.lock().unwrap();
         let id = if replaces_id != 0 && state.active.contains_key(&replaces_id) {
             replaces_id
@@ -208,7 +216,7 @@ impl Service {
                 if !state.active.contains_key(&state.next_id) { break state.next_id; }
             }
         };
-        state.active.insert(id, Active { actions: parsed_actions.clone(), resident, expires: timeout });
+        state.active.insert(id, Active { actions: parsed_actions.clone(), resident, expires: timeout, timeout: lifetime });
         drop(state);
         let icon = media_name(&app_icon).or_else(|| hints.get("desktop-entry")
             .and_then(|value| hint_string(value)).and_then(|name| media_name(name.trim_end_matches(".desktop"))));
@@ -296,12 +304,20 @@ pub fn spawn(ui: Sender<Event>, dnd: Arc<AtomicBool>) -> mpsc::Sender<Command> {
                     if state.lock().unwrap().active.remove(&id).is_some() { emit_closed(&conn, &ui, id, 2); }
                 }
                 Ok(Command::Reply { id, text }) => {
+                    // even if the app closed it while the reply was typed,
+                    // the reply still goes: it carries the conversation's ID
                     let known = state.lock().unwrap().active.remove(&id).is_some();
-                    if known {
-                        if let Err(error) = conn.emit_signal(None::<&str>, PATH, NAME, "NotificationReplied", &(id, text.as_str())) {
-                            eprintln!("island-shell: NotificationReplied: {error}");
-                        }
-                        emit_closed(&conn, &ui, id, 2);
+                    if let Err(error) = conn.emit_signal(None::<&str>, PATH, NAME, "NotificationReplied", &(id, text.as_str())) {
+                        eprintln!("island-shell: NotificationReplied: {error}");
+                    }
+                    if known { emit_closed(&conn, &ui, id, 2); }
+                }
+                Ok(Command::Hold(id)) => {
+                    if let Some(active) = state.lock().unwrap().active.get_mut(&id) { active.expires = None; }
+                }
+                Ok(Command::Release(id)) => {
+                    if let Some(active) = state.lock().unwrap().active.get_mut(&id) {
+                        active.expires = active.timeout.map(|d| Instant::now() + d);
                     }
                 }
                 Ok(Command::Action { id, key }) => {

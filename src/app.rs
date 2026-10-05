@@ -317,6 +317,8 @@ pub struct App {
     controls: std::sync::mpsc::Sender<crate::control::Request>,
     /// screen recordings report through here
     recorder_tx: channel::Sender<crate::recorder::Event>,
+    /// the notification the server was asked not to expire
+    held_notice: Option<u32>,
     quick_was_open: bool,
     /// refreshes the sound page's applications while it is open
     sound_poll: Option<RegistrationToken>,
@@ -441,6 +443,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_dnd,
         controls,
         recorder_tx,
+        held_notice: None,
         quick_was_open: false,
         sound_poll: None,
         task_poll: None,
@@ -1210,6 +1213,14 @@ impl App {
             }).ok();
         } else if !sound {
             if let Some(token) = self.sound_poll.take() { self.loop_handle.remove(token); }
+        }
+        // a notification in hand must not expire at the server meanwhile
+        let held = self.island.held_notice();
+        if held != self.held_notice {
+            use crate::notification_server::Command;
+            if let Some(id) = self.held_notice { let _ = self.notification_commands.send(Command::Release(id)); }
+            if let Some(id) = held { let _ = self.notification_commands.send(Command::Hold(id)); }
+            self.held_notice = held;
         }
         // the screen recorder starts after 3-2-1 and stops on request
         if self.island.take_record_start() {

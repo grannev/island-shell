@@ -538,6 +538,8 @@ pub struct Island {
     notice_progress: Spring,
     notice_swipe: Option<Swipe>,
     notice_reply: Option<Reply>,
+    /// the pointer is on the notification's pill
+    notice_pointer: bool,
     /// a swiped-away notification flying off while the pill folds
     notice_swiped: Option<(Notice, Spring, f64)>,
     /// a swipe that ended on its own (the touchpad went quiet): its
@@ -763,6 +765,7 @@ impl Island {
             notice_progress: Spring::new(0.0, 0.35, 1.0),
             notice_swipe: None,
             notice_reply: None,
+            notice_pointer: false,
             notice_swiped: None,
             swiped_id: None,
             dnd,
@@ -1200,8 +1203,9 @@ impl Island {
                 changed = true;
             }
         }
-        // a notification in the hand does not time out
-        let held = self.notice_swipe.as_ref().is_some_and(|s| s.held) || self.notice_reply.is_some();
+        // a notification in the hand (a reply being typed, the pointer on
+        // it, a swipe) does not time out
+        let held = self.held_notice().is_some();
         if !held && self.notice.as_ref().is_some_and(|n| now - n.since >= self.config.notice_hold) {
             self.notice = None;
             self.notice_prev = None;
@@ -1667,6 +1671,9 @@ impl Island {
     }
 
     fn show_notice(&mut self, note: crate::notify::Notification, now: Time) {
+        // a pointer that was already resting where the pill appears does
+        // not hold it; it has to move onto it
+        if !self.notice.as_ref().is_some_and(|n| n.note.id == note.id) { self.notice_pointer = false; }
         // an update of the same job (LSP progress, say) takes the pill over
         // in place: no roll, the timer simply starts again
         if let Some(current) = self.notice.as_mut() {
@@ -2986,7 +2993,11 @@ impl Island {
             // still has to live
             Some(_) => icons::progress_ring(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0,
                 self.notice_progress.value(now).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
-            None => icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, 1.0 - (t / self.config.notice_hold).clamp(0.0, 1.0), alpha * smoothstep(t / 0.3)),
+            // held (a reply, the pointer on it), its time stands still: full
+            None => {
+                let left = if self.held_notice() == Some(note.id) { 1.0 } else { 1.0 - (t / self.config.notice_hold).clamp(0.0, 1.0) };
+                icons::countdown(cr, note.kind, icon_cx, mid, NOTICE_ICON / 2.0 + 6.0, left, alpha * smoothstep(t / 0.3))
+            }
         }
 
         let (_, app_ext) = app.pixel_extents();
@@ -3310,6 +3321,14 @@ impl Island {
     }
 
     pub fn set_notice_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let over = self.notice_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        if over != self.notice_pointer {
+            self.notice_pointer = over;
+            // let go, it has its full time again
+            if !over {
+                if let Some(notice) = self.notice.as_mut() { notice.since = now; }
+            }
+        }
         let hovered = self.notice_action_index_at(px, py);
         if self.notice_hovered == hovered { return false; }
         self.notice_hovered = hovered;
@@ -3319,8 +3338,23 @@ impl Island {
         true
     }
 
+    /// The notification the user has in hand: a reply being typed into it,
+    /// the pointer resting on it, a swipe under way. It neither times out
+    /// here nor expires at the server.
+    pub fn held_notice(&self) -> Option<u32> {
+        let notice = self.notice.as_ref()?;
+        let held = self.notice_reply.as_ref().is_some_and(|r| r.id == notice.note.id) || self.notice_pointer
+            || self.notice_swipe.as_ref().is_some_and(|s| s.held);
+        held.then_some(notice.note.id)
+    }
+
     pub fn notification_closed(&mut self, id: u32, now: Time) {
         self.center.closed(id);
+        // a reply being typed stays until it is sent or given up
+        if self.notice_reply.as_ref().is_some_and(|r| r.id == id) {
+            self.sync(now);
+            return;
+        }
         if self.notice.as_ref().is_some_and(|n| n.note.id == id) {
             self.notice = None;
             self.notice_prev = None;
@@ -4753,9 +4787,12 @@ mod tests {
         assert!(island.keyboard_panel_open());
         for key in ["Д", "а", "!"] { island.reply_key("", Some(key), false, 11.0); }
         island.reply_key("BackSpace", None, false, 11.1);
-        // the pill waits for the reply however long it takes
+        // the pill waits for the reply however long it takes: the server is
+        // asked to hold it, and even the app closing it does not take it
+        assert_eq!(island.held_notice(), Some(21));
+        island.notification_closed(21, 15.0);
         island.advance(10.0 + 60.0);
-        assert!(island.notice.is_some());
+        assert!(island.notice.is_some() && island.replying());
         assert_eq!(island.reply_key("Return", None, false, 70.1), ReplyKey::Send(21, "Да".into()));
         assert!(island.notice.is_none() && !island.replying());
 
@@ -4767,6 +4804,22 @@ mod tests {
         island.begin_reply(80.5);
         assert_eq!(island.reply_key("Escape", None, false, 81.0), ReplyKey::Cancel);
         assert!(island.notice.as_ref().is_some_and(|n| n.since == 81.0) && !island.replying());
+        assert_eq!(island.held_notice(), None, "given back, it expires again");
+    }
+
+    #[test]
+    fn the_pointer_on_a_notification_holds_it() {
+        let (mut island, r) = shown_notice(30);
+        island.set_notice_hover(r.x + r.w / 2.0, r.y + r.h / 2.0, 11.0);
+        assert_eq!(island.held_notice(), Some(30));
+        island.advance(30.0);
+        assert!(island.notice.is_some(), "it waits while the pointer rests on it");
+        island.set_notice_hover(-1.0, -1.0, 30.0);
+        assert_eq!(island.held_notice(), None);
+        island.advance(30.0 + island.config.notice_hold - 0.1);
+        assert!(island.notice.is_some(), "let go, it has its full time again");
+        island.advance(30.0 + island.config.notice_hold + 0.1);
+        assert!(island.notice.is_none());
     }
 
     #[test]
