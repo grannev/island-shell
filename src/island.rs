@@ -159,6 +159,8 @@ pub struct Config {
     pub silent_after: f64,
     /// How far the island moves left for the bar's ⋯ drawer, px.
     pub dodge: f64,
+    /// Night mode's colour temperature, K.
+    pub night_temp: u32,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -176,14 +178,15 @@ impl Default for Config {
             toast_hold: TOAST_HOLD,
             silent_after: SILENT_AFTER,
             dodge: DODGE,
+            night_temp: 4500,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 10] = [
+    pub const KEYS: [&'static str; 11] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge",
+        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -217,6 +220,10 @@ impl Config {
             "toast_hold" => self.toast_hold = number()?.clamp(1.0, 30.0),
             "silent_after" => self.silent_after = number()?.clamp(1.0, 3600.0),
             "dodge" => self.dodge = number()?.clamp(0.0, 1000.0),
+            "night_temp" => {
+                let kelvin: f64 = value.trim_end_matches(['K', 'k']).parse().map_err(|_| format!("bad value {value:?} for {key}"))?;
+                self.night_temp = kelvin.clamp(1500.0, 6500.0) as u32;
+            }
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -227,9 +234,9 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
-            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge,
+            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp,
         )
     }
 
@@ -566,6 +573,8 @@ pub struct Island {
     clock_rect: Option<Rect>,
     /// who records from a microphone now: an orange dot at the line's end
     mic_users: Vec<String>,
+    /// night mode's colour on the display module, eased
+    night_glow: Spring,
     /// screen recording: its state, whether wf-recorder exists, the red
     /// chip beside the clock and its hit target, and requests for the app
     recording: Option<Recording>,
@@ -777,6 +786,7 @@ impl Island {
             calendar_rect: None,
             clock_rect: None,
             mic_users: Vec::new(),
+            night_glow: Spring::new(0.0, 0.35, 1.0),
             recording: None,
             recorder: crate::recorder::available(),
             record_chip: Quintic::at_rest(0.0, CHIP_DUR),
@@ -876,6 +886,7 @@ impl Island {
             || self.quick_view_from.is_some_and(|(_, since)| now - since < SHEET_SWAP)
             || self.quick_close_hover.is_moving(now)
             || self.dnd_glow.is_moving(now)
+            || self.night_glow.is_moving(now)
             || self.quick_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.center_retiring_at.is_some_and(|since| now - since < SHEET_SWAP)
             || self.quick_returned_at.is_some_and(|since| now - since < SHEET_SWAP)
@@ -3136,6 +3147,7 @@ impl Island {
             dnd: self.dnd_glow.value(now),
             timer: self.timer.as_ref().map(|t| (t.remaining(now), t.running)),
             recording: self.recorder.then_some(self.recording.is_some()),
+            night: self.night_glow.value(now),
         }
     }
 
@@ -3554,10 +3566,24 @@ impl Island {
             if let Some((value, _)) = snapshot.mic { self.show_level(quick::Slider::Mic, value, now); }
         }
         self.controls.mic_label = snapshot.mic_label;
+        if self.controls.night != snapshot.night {
+            self.controls.night = snapshot.night;
+            self.night_glow.set(if snapshot.night { 1.0 } else { 0.0 }, now);
+        }
         self.controls.sinks = snapshot.sinks;
         self.controls.default_sink = snapshot.default_sink;
         if let Some(layout) = snapshot.layout { self.set_layout(layout, now); }
         self.sync(now);
+    }
+
+    /// Night mode on or off at once (the worker confirms); returns the
+    /// new state.
+    pub fn toggle_night(&mut self, now: Time) -> bool {
+        self.controls.night = !self.controls.night;
+        self.night_glow.set(if self.controls.night { 1.0 } else { 0.0 }, now);
+        self.quick_bounced.insert(quick::Action::Night, now);
+        self.sync(now);
+        self.controls.night
     }
 
     /// Mute or unmute the microphone at once (the worker confirms).
@@ -4354,6 +4380,7 @@ mod tests {
             ],
             mic: Some((0.7, false)),
             mic_label: Some("Встроенный микрофон".into()),
+            night: true,
         };
         let mut island = gallery_island();
         island.open_quick_menu(10.0);

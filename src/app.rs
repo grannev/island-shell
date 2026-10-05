@@ -364,6 +364,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
     let (control_tx, control_rx) = channel::channel::<crate::control::Snapshot>();
     let controls = crate::control::spawn(control_tx);
+    // the island starts knowing the environment (night mode, the layout)
+    let _ = controls.send(crate::control::Request::Refresh);
     let (recorder_tx, recorder_rx) = channel::channel::<crate::recorder::Event>();
 
     let mut island = Island::new(load_config());
@@ -935,6 +937,24 @@ impl App {
                 }
                 self.after_change();
                 return "ok".into();
+            }
+            Command::Night(state) => {
+                let on = self.island.controls.night;
+                let want = match state.as_str() {
+                    "status" => return if on { "on".into() } else { "off".into() },
+                    "on" => true,
+                    "off" => false,
+                    _ => !on,
+                };
+                if want != on {
+                    self.island.toggle_night(now);
+                    let _ = self.controls.send(crate::control::Request::Night(want.then_some(self.island.config.night_temp)));
+                }
+                if !self.island.quick_menu_open() {
+                    self.island.live_activity(activity::Event::NightMode { on: want }, now);
+                }
+                self.after_change();
+                return if want { "on".into() } else { "off".into() };
             }
             Command::Record => {
                 let reply = match self.island.toggle_recording(now) {
@@ -2148,6 +2168,10 @@ impl App {
             self.island.close_quick_menu(now);
         }
         match action {
+            Action::Night => {
+                let on = self.island.toggle_night(now);
+                let _ = self.controls.send(Request::Night(on.then_some(self.island.config.night_temp)));
+            }
             Action::Record => {
                 // 3-2-1 needs the pill, so the menu goes first
                 self.island.close_quick_menu(now);

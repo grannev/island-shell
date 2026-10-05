@@ -48,6 +48,8 @@ pub enum Event {
     MicInUse { apps: Vec<String> },
     /// 3-2-1 before a screen recording starts
     RecordCountdown,
+    /// night mode was switched (from the keyboard or a script)
+    NightMode { on: bool },
     /// a screen recording was saved (its first frame, its length)
     Recording { path: PathBuf, thumb: Option<PathBuf>, seconds: u64 },
 }
@@ -73,6 +75,7 @@ impl Event {
             Event::MicMute { .. } => (300.0, PILL_H),
             Event::MicInUse { .. } => (0.0, 0.0),
             Event::RecordCountdown => (300.0, PILL_H),
+            Event::NightMode { .. } => (300.0, PILL_H),
             Event::Recording { .. } => (400.0, 96.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
@@ -91,6 +94,7 @@ impl Event {
             Event::MicMute { .. } => 1.8,
             Event::MicInUse { .. } => 0.0,
             Event::RecordCountdown => RECORD_COUNTDOWN,
+            Event::NightMode { .. } => 1.8,
             Event::Recording { .. } => 4.5,
             Event::TimerMenu => f64::INFINITY,
             Event::WifiOpen | Event::BluetoothOpen => f64::INFINITY,
@@ -663,6 +667,26 @@ pub fn draw_pill(
         Event::WifiOpen | Event::BluetoothOpen => {}
         // drawn by the island, which holds the jobs and the calendar
         Event::Tasks | Event::CalendarOpen | Event::MicInUse { .. } => {}
+        Event::NightMode { on } => {
+            // the moon bounces in a warm (or a plain) well
+            let (mx, o) = (x0 + 49.0, crate::menu_style::ORANGE);
+            let colour = if *on { o } else { (1.0, 1.0, 1.0) };
+            crate::menu_style::well(cr, mx, cy, 21.0, Some(colour), enter * if *on { 0.25 } else { 0.12 });
+            let s = 1.5 * crate::menu_style::bounce_scale(now - since - 0.05);
+            crate::menu_style::transformed(cr, mx, cy, s, 0.0, || {
+                cr.save().unwrap();
+                cr.set_fill_rule(cairo::FillRule::EvenOdd);
+                cr.new_path();
+                cr.arc(mx, cy, 6.0, 0.0, std::f64::consts::TAU);
+                cr.new_sub_path();
+                cr.arc(mx + 3.4, cy - 2.6, 5.2, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(colour.0, colour.1, colour.2, enter);
+                let _ = cr.fill();
+                cr.restore().unwrap();
+            });
+            draw_two_lines(cr, renderer, "Ночной режим", if *on { "Включён" } else { "Выключен" }, x0 + 88.0, cy, enter,
+                if *on { o } else { crate::menu_style::TEAL });
+        }
         Event::RecordCountdown => {
             // a red ring empties around the digit, which rolls down
             let t = now - since;

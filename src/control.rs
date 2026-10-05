@@ -51,6 +51,8 @@ pub struct Snapshot {
     /// the default microphone's level and mute, and what it is called
     pub mic: Option<(f64, bool)>,
     pub mic_label: Option<String>,
+    /// gammastep is tinting the screen
+    pub night: bool,
 }
 
 pub enum Request {
@@ -63,6 +65,8 @@ pub enum Request {
     MicMute,
     Sink(String),
     NextLayout,
+    /// night mode on (at this colour temperature) or off
+    Night(Option<u32>),
     Lock,
     Suspend,
     Logout,
@@ -171,6 +175,21 @@ impl Worker {
                 run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]);
                 true
             }
+            Request::Night(kelvin) => {
+                // the same gammastep as the mod+n script: a warm tint through
+                // wlr-gamma-control while it runs; killing it restores the
+                // screen. It lives in its own scope, past an island restart.
+                run("pkill", &["-x", "gammastep"]);
+                if let Some(kelvin) = kelvin {
+                    let mut command = Command::new("gammastep");
+                    command.args(["-O", &kelvin.to_string(), "-m", "wayland"]);
+                    match crate::launch::spawn(&command) {
+                        Ok(mut child) => { thread::spawn(move || { let _ = child.wait(); }); }
+                        Err(e) => eprintln!("island-shell: gammastep: {e}"),
+                    }
+                }
+                true
+            }
             Request::Lock => {
                 run("loginctl", &["lock-session"]);
                 false
@@ -199,6 +218,8 @@ impl Worker {
             layout,
             apps: output("pactl", &["-f", "json", "list", "sink-inputs"]).map(|json| parse_apps(&json)).unwrap_or_default(),
             mic: read_level("@DEFAULT_AUDIO_SOURCE@"),
+            night: Command::new("pgrep").args(["-x", "gammastep"]).stdout(Stdio::null()).stderr(Stdio::null())
+                .status().is_ok_and(|s| s.success()),
             mic_label: output("pactl", &["get-default-source"]).and_then(|name| {
                 let json = output("pactl", &["-f", "json", "list", "sources"])?;
                 source_label(&json, &name)

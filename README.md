@@ -44,6 +44,14 @@ preview the activities without changing hardware state:
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
 
+**Night mode.** The display module's «Ночной режим» capsule (or `mod+n`,
+which runs `island-shell night`) tints the screen warm with `gammastep -O
+<night_temp>` (4500 K by default; `set night_temp 3800`). The capsule warms to
+orange and its moon bounces. From the keyboard a short pill says
+«Включён»/«Выключен». gammastep runs in its own systemd scope, so the tint
+survives an island restart; switching off kills it. `island-shell night
+on|off|toggle|status` works from scripts too.
+
 **Screen recording.** «Запись» in the Control Center's bottom row (or
 `island-shell record`) counts down 3-2-1 in a pill: a red ring empties and the
 digit rolls down. `Escape` cancels. Once the pill has folded away,
@@ -460,6 +468,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)
     island-shell record                         # 3-2-1, record the screen; again stops
+    island-shell night [on|off|toggle|status]   # night mode (gammastep)
     island-shell run [--title T] -- <command>   # a command as a live job
     island-shell progress <title> <n>%          # a job by its percentage
     island-shell task start|set|done|fail|cancel <id> … | task list
@@ -482,6 +491,7 @@ at the beginning of a line or as a separate word), read at start;
     toast_hold = 4        # seconds the "now playing" toast stays up
     silent_after = 15     # seconds of pause / mute before the bars fold away
     dodge = 240           # px the island moves left for the ⋯ drawer
+    night_temp = 4500     # night mode's colour temperature, K
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a

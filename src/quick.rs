@@ -54,6 +54,8 @@ pub struct Status {
     pub timer: Option<(f64, bool)>,
     /// screen recording: None without wf-recorder, else whether one runs
     pub recording: Option<bool>,
+    /// night mode, eased 0..1
+    pub night: f64,
 }
 
 /// The environment as the menu last read it.
@@ -71,6 +73,8 @@ pub struct Controls {
     pub mic_label: Option<String>,
     /// what is playing (kept by the island from MPRIS)
     pub media: Option<Media>,
+    /// night mode (gammastep) is on
+    pub night: bool,
 }
 
 /// The track "Now playing" shows.
@@ -184,6 +188,8 @@ pub enum Action {
     Layout,
     /// start / stop a screen recording
     Record,
+    /// night mode on the display module
+    Night,
     Lock,
     Sleep,
     Logout,
@@ -205,9 +211,9 @@ pub enum Hit {
 }
 
 /// Keyboard order of the main page.
-pub const ACTIONS: [Action; 12] = [
+pub const ACTIONS: [Action; 13] = [
     Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd,
-    Action::Outputs, Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout,
+    Action::Night, Action::Outputs, Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout,
 ];
 const TILES: [Action; 6] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd];
 const SMALL: [Action; 5] = [Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout];
@@ -230,6 +236,11 @@ fn small(i: usize) -> f64 {
 /// The output button on the sound module's title line.
 fn outputs_button(controls: &Controls) -> (f64, f64, f64, f64) {
     (RAIL + INNER - 12.0 - 170.0, SOUND_Y + shift(controls) + 4.0, 170.0, 24.0)
+}
+
+/// Night mode's capsule on the display module's title line.
+fn night_button(controls: &Controls) -> (f64, f64, f64, f64) {
+    (RAIL + INNER - 10.0 - 146.0, DISPLAY_Y + shift(controls) + 4.0, 146.0, 22.0)
 }
 
 /// The transport buttons' centres in "Now playing".
@@ -298,6 +309,9 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
                 return Some(Hit::Action(*action));
             }
         }
+    }
+    if inside(x, y, night_button(controls)) {
+        return Some(Hit::Action(Action::Night));
     }
     if !controls.sinks.is_empty() && inside(x, y, outputs_button(controls)) {
         return Some(Hit::Action(Action::Outputs));
@@ -643,6 +657,39 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
     // Display
     let (alpha, rise) = frame.arrival(3 + media_rows, base_alpha);
     module(cr, renderer, "Дисплей", x, y + DISPLAY_Y + rise, alpha);
+    // night mode: a capsule that warms to orange, its moon bouncing
+    {
+        let (bx, by, bw, bh) = night_button(controls);
+        let by = by - shift(controls) + rise;
+        let night = status.night.clamp(0.0, 1.0);
+        let lit = (frame.hover)(Action::Night).clamp(0.0, 1.0);
+        let press = menu_style::press_scale((frame.pressed)(Action::Night));
+        let (cx, cy) = (x + bx + bw / 2.0, y + by + bh / 2.0);
+        menu_style::transformed(cr, cx, cy, press, 0.0, || {
+            menu_style::rounded(cr, x + bx, y + by, bw, bh, bh / 2.0);
+            let o = menu_style::ORANGE;
+            cr.set_source_rgba(1.0, 1.0, 1.0, (0.10 + 0.06 * lit) * (1.0 - night) * alpha);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgba(o.0, o.1, o.2, (0.28 + 0.08 * lit) * night * alpha);
+            let _ = cr.fill();
+            let colour = (1.0 + (o.0 - 1.0) * night, 1.0 + (o.1 - 1.0) * night, 1.0 + (o.2 - 1.0) * night);
+            let mx = x + bx + 16.0;
+            menu_style::transformed(cr, mx, cy, menu_style::bounce_scale((frame.bounced)(Action::Night)), 0.0, || {
+                cr.save().unwrap();
+                cr.set_fill_rule(cairo::FillRule::EvenOdd);
+                cr.new_path();
+                cr.arc(mx, cy, 6.0, 0.0, std::f64::consts::TAU);
+                cr.new_sub_path();
+                cr.arc(mx + 3.4, cy - 2.6, 5.2, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
+                let _ = cr.fill();
+                cr.restore().unwrap();
+            });
+            let lh = menu_style::line_height(cr, renderer, Font::Subhead);
+            menu_style::text(cr, renderer, "Ночной режим", mx + 12.0, cy - lh / 2.0, bw - 34.0, Font::Subhead, colour,
+                alpha * (0.75 + 0.25 * night.max(lit)));
+        });
+    }
     let present = controls.brightness.is_some();
     slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, (frame.level)(Slider::Brightness),
         "sun", 1.0, alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Brightness));
