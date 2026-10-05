@@ -393,7 +393,8 @@ timings; `ISLAND_DEBUG=1` additionally logs presentation prediction errors.
 
 ## Build and install
 
-    scripts/install.sh        # cargo build --release → ~/.local/bin/island-shell
+    scripts/install.sh        # cargo build --release → ~/.local/bin/island-shell,
+                              # then restarts a running island-shell.service
 
 Needs the cairo, pango and wayland-client development packages (Debian:
 `libcairo2-dev libpango1.0-dev libwayland-dev`).

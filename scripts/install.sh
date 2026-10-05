@@ -16,3 +16,8 @@ install -Dm644 nvim/lua/island.lua "$HOME/.local/share/nvim/site/lua/island.lua"
 install -Dm644 nvim/lua/island/cmdline.lua "$HOME/.local/share/nvim/site/lua/island/cmdline.lua"
 install -Dm644 nvim/lua/island/results.lua "$HOME/.local/share/nvim/site/lua/island/results.lua"
 echo "installed $HOME/.local/share/nvim/site/lua/island.lua"
+# a running island keeps the old binary until it restarts
+if systemctl --user is-active --quiet island-shell 2>/dev/null; then
+    systemctl --user restart island-shell
+    echo "restarted island-shell.service"
+fi
