@@ -19,6 +19,7 @@ use crate::nvim::{self, Editor};
 use crate::player;
 use crate::quick;
 use crate::tasks;
+use crate::calendar::{self, Calendar};
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -544,6 +545,10 @@ pub struct Island {
     tasks_w: f64,
     tasks_rect: Option<Rect>,
     tasks_pill_rect: Option<Rect>,
+    /// the month sheet (a right click on the clock) and where it is
+    calendar: Option<Calendar>,
+    calendar_rect: Option<Rect>,
+    clock_rect: Option<Rect>,
     quick_open: bool,
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
@@ -738,6 +743,9 @@ impl Island {
             tasks_w: 0.0,
             tasks_rect: None,
             tasks_pill_rect: None,
+            calendar: None,
+            calendar_rect: None,
+            clock_rect: None,
             quick_open: false,
             quick_rect: None,
             quick_hover: None,
@@ -837,6 +845,7 @@ impl Island {
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
             || self.tasks_chip.is_moving(now)
+            || self.calendar.as_ref().is_some_and(|c| c.is_animating(now)) && self.calendar_shown()
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
@@ -1069,6 +1078,7 @@ impl Island {
             self.activity_retiring = None;
             self.activity_art.clear();
             if !self.connections_open() { self.network_panel = None; }
+            if !self.calendar_open() { self.calendar = None; }
         }
         if self.timer.as_ref().is_some_and(|timer| timer.running && timer.remaining(now) <= 0.0) {
             self.timer = None;
@@ -1799,6 +1809,69 @@ impl Island {
         }
     }
 
+    /// Unfold the month (a right click on the clock, `island-shell calendar`).
+    pub fn open_calendar(&mut self, now: Time) {
+        if self.calendar_open() || self.auth.is_some() || self.launcher.is_some() { return; }
+        if self.center.open {
+            self.center.close();
+            self.center_rect = None;
+        }
+        if self.quick_open { self.close_quick_menu(now); }
+        self.calendar = Some(Calendar::new(now));
+        self.show_activity(activity::Event::CalendarOpen, now);
+        // a sheet that had to wait leaves nothing half-made
+        if !self.calendar_open() { self.calendar = None; }
+    }
+
+    pub fn calendar_open(&self) -> bool {
+        self.activity.as_ref().is_some_and(|a| a.event == activity::Event::CalendarOpen)
+    }
+
+    fn calendar_shown(&self) -> bool {
+        self.visible_activity().is_some_and(|a| a.event == activity::Event::CalendarOpen)
+    }
+
+    /// Is (px, py) on the compact clock?
+    pub fn clock_at(&self, px: f64, py: f64) -> bool {
+        self.accepts_quick_menu_click()
+            && self.clock_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+    }
+
+    pub fn set_calendar_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.calendar_open() { return false; }
+        let (Some(r), Some(c)) = (self.calendar_rect, self.calendar.as_mut()) else { return false };
+        c.pointer(px - r.x, py - r.y, now)
+    }
+
+    /// A click while the month is open: its controls act, the rest of the
+    /// sheet just takes the click.
+    pub fn click_calendar(&mut self, px: f64, py: f64, left: bool, now: Time) -> bool {
+        if !self.calendar_open() { return false; }
+        let Some(r) = self.calendar_rect else { return true };
+        if !left { return true; }
+        let close = self.calendar.as_mut().is_some_and(|c| c.click(px - r.x, py - r.y, now));
+        if close {
+            self.activity_retiring = self.activity.take();
+        }
+        self.sync(now);
+        true
+    }
+
+    /// The wheel over the open month turns the months.
+    pub fn scroll_calendar(&mut self, px: f64, now: Time) -> bool {
+        if !self.calendar_open() { return false; }
+        if let Some(c) = &mut self.calendar { c.scroll(px, now); }
+        self.sync(now);
+        true
+    }
+
+    pub fn calendar_key(&mut self, key: &str, now: Time) -> bool {
+        if !self.calendar_open() { return false; }
+        let taken = self.calendar.as_mut().is_some_and(|c| c.key(key, now));
+        if taken { self.sync(now); }
+        true
+    }
+
     /// A left click on the compact timer pauses or resumes it.
     pub fn toggle_timer(&mut self, now: Time) -> bool {
         let Some(timer) = self.timer.as_mut() else { return false };
@@ -2099,6 +2172,8 @@ impl Island {
         let tasks_len = tasks_k * (self.tasks_w + 10.0);
         self.tasks_rect = None;
         self.tasks_pill_rect = None;
+        self.calendar_rect = None;
+        self.clock_rect = None;
         self.timer_rect = None;
         self.timer_menu_rect = None;
         self.network_menu_rect = None;
@@ -2119,6 +2194,8 @@ impl Island {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
             } else if a.event == activity::Event::Tasks {
                 self.tasks.pill_size()
+            } else if a.event == activity::Event::CalendarOpen {
+                self.calendar.as_ref().map_or(a.event.size(), |c| (calendar::WIDTH, c.height()))
             } else { a.event.size() }
         }));
         let notice_size = self.notice.as_ref().map(|n| {
@@ -2244,6 +2321,9 @@ impl Island {
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
             crate::motion::text(cr, renderer, "clock", &self.clock, clock_x, ty,
                 clock_w.max(clock_target) + clock_ext.x() as f64 + 8.0, 0.0, Font::Text, (1.0, 1.0, 1.0), line_alpha);
+            if line_alpha > 0.95 && !self.pill_open() {
+                self.clock_rect = Some(Rect { x: clock_x + clock_ext.x() as f64 - 6.0, y: dy, w: clock_w + 12.0, h: line_h });
+            }
             let mut after_clock = clock_x + clock_ext.x() as f64 + clock_w;
             if timer_len > 0.5 {
                 if self.timer.is_some() && line_alpha > 0.95 && timer_k > 0.95 && !self.pill_open() {
@@ -2434,6 +2514,15 @@ impl Island {
                     activity::draw_timer_menu(cr, renderer, mx, dy + climb + enter,
                         self.timer.as_ref().map(|t| (t.remaining(now), t.running)), &std::array::from_fn(|i| self.timer_button_hover[i].value(now).clamp(0.0, 1.0)),
                         &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), content_alpha, activity.since, now);
+                }
+                if activity.event == activity::Event::CalendarOpen {
+                    let (w, x) = (calendar::WIDTH, cx - calendar::WIDTH / 2.0);
+                    if content_alpha > 0.9 {
+                        self.calendar_rect = Some(Rect { x, y: dy + climb + enter, w, h: bh });
+                    }
+                    if let Some(c) = &self.calendar {
+                        c.draw(cr, renderer, x, dy + climb + enter, bh, content_alpha, now);
+                    }
                 }
                 if activity.event == activity::Event::Tasks {
                     if content_alpha > 0.9 {
@@ -3972,6 +4061,15 @@ mod tests {
         island.advance(11.0);
         island.open_quick_menu_shortcut(11.0);
         filmstrip("swap-center-quick", &mut island, 11.0, 12, 2.0 / 60.0);
+
+        let mut island = gallery_island();
+        island.open_calendar(10.0);
+        island.calendar = Some(Calendar::at(calendar::Date { year: 2026, month: 10, day: 5 }, 10.0));
+        island.advance(11.0);
+        island.calendar.as_mut().unwrap().key("PageDown", 12.0);
+        filmstrip("calendar-month", &mut island, 12.0, 12, 4.0 / 60.0);
+        island.calendar.as_mut().unwrap().key("PageUp", 13.0);
+        filmstrip("calendar-month-back", &mut island, 13.0, 12, 4.0 / 60.0);
     }
 
     /// Every inner surface, settled, at the display's 1.5 scale:
@@ -4045,6 +4143,19 @@ mod tests {
         let mut island = gallery_island();
         island.timer_command("25m", 10.0).unwrap();
         gallery_shot("05-timer-compact", &mut island, 10.0);
+
+        {
+            let mut island = gallery_island();
+            island.open_calendar(10.0);
+            island.calendar = Some(Calendar::at(calendar::Date { year: 2026, month: 10, day: 5 }, 10.0));
+            gallery_shot("05f-calendar", &mut island, 10.0);
+            island.calendar.as_mut().unwrap().key("Down", 12.0);
+            island.calendar.as_mut().unwrap().key("Right", 12.0);
+            island.calendar.as_mut().unwrap().pointer(200.0, 230.0, 12.0);
+            gallery_shot("05g-calendar-selected", &mut island, 12.0);
+            island.calendar.as_mut().unwrap().key("PageDown", 15.0);
+            gallery_shot_after("05h-calendar-switching", &mut island, 15.0, 0.12);
+        }
 
         {
             use crate::tasks::{Op, Request};

@@ -84,7 +84,8 @@ The island's Control Center (shortcut modules, Display/Sound sliders, audio
 Sound page (outputs, per-application levels, microphone), keyboard layout, Lock/Sleep/Log out with a confirming second
 press) opens from a normal left click on the ordinary compact body;
 `src/control.rs` is its environment worker (never block the UI on it). mod+d still opens the
-launcher directly. Music controls are scoped to the equaliser on the compact
+launcher directly. A right click on the clock opens the calendar sheet
+(`src/calendar.rs`). Music controls are scoped to the equaliser on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.

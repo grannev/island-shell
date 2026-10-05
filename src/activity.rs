@@ -39,6 +39,8 @@ pub enum Event {
     BluetoothOpen,
     /// the jobs from `island-shell task|progress|run`, unfolded
     Tasks,
+    /// the month, from a right click on the clock
+    CalendarOpen,
 }
 
 impl Event {
@@ -54,6 +56,8 @@ impl Event {
             Event::TimerMenu => (TIMER_MENU_W, 176.0),
             // sized by the island from its jobs (tasks::Tasks::pill_size)
             Event::Tasks => (crate::tasks::PILL_W, PILL_H),
+            // sized by the island from the month shown
+            Event::CalendarOpen => (crate::calendar::WIDTH, 352.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
     }
@@ -67,6 +71,7 @@ impl Event {
             Event::Screenshot { .. } => 4.0,
             Event::TimerDone => 4.0,
             Event::Tasks => 4.5,
+            Event::CalendarOpen => f64::INFINITY,
             Event::TimerMenu => f64::INFINITY,
             Event::WifiOpen | Event::BluetoothOpen => f64::INFINITY,
         }
@@ -78,7 +83,7 @@ impl Event {
 }
 
 pub fn takes_keyboard(event: &Event) -> bool {
-    matches!(event, Event::TimerMenu | Event::WifiOpen | Event::BluetoothOpen)
+    matches!(event, Event::TimerMenu | Event::WifiOpen | Event::BluetoothOpen | Event::CalendarOpen)
 }
 
 /// Start the environment readers.  Missing optional tools simply disable
@@ -577,8 +582,8 @@ pub fn draw_pill(
         }
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}
-        // drawn by the island, which holds the jobs
-        Event::Tasks => {}
+        // drawn by the island, which holds the jobs and the calendar
+        Event::Tasks | Event::CalendarOpen => {}
     }
 }
 

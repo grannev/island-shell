@@ -58,6 +58,9 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
 - **Swipeable cards**: a notification pill or center card follows two
   fingers or a held drag sideways; past 30 % or on a flick it flies out
   and closes, otherwise it springs back.
+- **Calendar days**: today is a red disc with a semibold number, a
+  selected day a white disc with a black number, a hovered day a light
+  wash; weekend days and weekday names are dimmer.
 - **Selection and hover** are a light card (`group` at full hover), the
   same in the launcher and the notification center; no solid fills.
 - **Scrolling** glides (`anim::Glide`): a wheel notch is a push of about
@@ -81,6 +84,9 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   Not Disturb's moon, the keyboard on a layout switch); a control asking
   for confirmation wiggles (`wiggle_angle`).
 - **Sliders** swell slightly while held.
+- **Paging**: content that pages sideways (the calendar's months)
+  slides about 44 px the way it goes while the old page fades out first;
+  the sheet's height eases to the new content.
 - **Arrival**: the Control Center's rows arrive in a wave, each a beat
   after the one above, rising a few points as they fade in.
 

@@ -916,6 +916,7 @@ impl App {
                 match event {
                     activity::Event::WifiOpen => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
                     activity::Event::BluetoothOpen => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
+                    activity::Event::CalendarOpen => self.island.open_calendar(now),
                     _ => self.island.live_activity(event, now),
                 }
                 self.after_change();
@@ -1060,6 +1061,18 @@ impl App {
                     let _ = self.notification_commands.send(crate::notification_server::Command::Reply { id, text });
                 }
                 self.after_change();
+            } else if self.island.calendar_open() {
+                let key = match event.keysym {
+                    Keysym::Left => "Left",
+                    Keysym::Right => "Right",
+                    Keysym::Up => "Up",
+                    Keysym::Down => "Down",
+                    Keysym::Home => "Home",
+                    Keysym::Page_Up => "PageUp",
+                    Keysym::Page_Down => "PageDown",
+                    _ => "",
+                };
+                if self.island.calendar_key(key, now) { self.after_change(); }
             } else if self.island.quick_menu_open() {
                 let key = match event.keysym {
                     Keysym::Return | Keysym::KP_Enter => "enter",
@@ -1797,6 +1810,9 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_at = event.position;
+                    if self.island.set_calendar_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
                     self.island.hold_tasks_hover(event.position.0, event.position.1, self.clock.predict(false));
                     if self.island.set_timer_hover(event.position.0, event.position.1) {
                         changed = true;
@@ -1933,6 +1949,16 @@ impl PointerHandler for App {
                         changed = true;
                         continue;
                     }
+                    if self.island.click_calendar(event.position.0, event.position.1, button == BTN_LEFT, now) {
+                        changed = true;
+                        continue;
+                    }
+                    // a right click on the clock unfolds the month
+                    if button == BTN_RIGHT && self.island.clock_at(event.position.0, event.position.1) {
+                        self.island.open_calendar(now);
+                        changed = true;
+                        continue;
+                    }
                     if button == BTN_LEFT && self.island.click_timer_at(event.position.0, event.position.1, now) {
                         changed = true;
                         continue;
@@ -2023,6 +2049,9 @@ impl PointerHandler for App {
                         // the card under a resting pointer changed
                         let (x, y) = self.pointer_at;
                         self.island.set_center_hover(x, y, now);
+                        continue;
+                    }
+                    if self.island.scroll_calendar(px, now) {
                         continue;
                     }
                     if self.island.scroll_network(px / crate::connections::ROW_H, now) {

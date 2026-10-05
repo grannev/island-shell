@@ -70,6 +70,16 @@ the process that started it: the calling shell or script for `task` and
 ending the job, the job ends as «прервано». Pass `--pid=<pid>` right
 after `task`/`progress` to name another owner; `--pid=0` detaches the job.
 
+A right click on the clock unfolds the **calendar**. It shows the month,
+weeks starting on Monday, with weekends dimmer and today on a red disc.
+‹ › or the wheel turn the months; the grid slides the way the months go,
+and the sheet eases to five or six weeks. A click selects a day (a white
+disc). The footer names the selected day and its distance from today
+(«Вторник, 13 октября · через 8 дней»); «Сегодня» brings you back. With
+the keyboard: arrows move by a day or a week, crossing into the
+neighbouring month; `PageUp`/`PageDown` turn the month; `Home` goes to
+today; `Escape` closes. `island-shell calendar` opens it too.
+
 Click the ordinary compact island to open the **Control Center**: modules
 for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
 a Display and a Sound module with Control Center sliders (press anywhere
@@ -393,6 +403,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
+    island-shell calendar                       # the month (right click on the clock)
     island-shell run [--title T] -- <command>   # a command as a live job
     island-shell progress <title> <n>%          # a job by its percentage
     island-shell task start|set|done|fail|cancel <id> … | task list
@@ -466,6 +477,7 @@ while the compact island remains hidden.
     src/nvim.rs     the Neovim protocol, its state and the calls back into it
     src/editor.rs   the mode chip and the editor panel
     src/tasks.rs    jobs from task/progress/run: the ring, the pill, owners
+    src/calendar.rs the month sheet: dates, grid, selection, month motion
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
     systemd/        the user service
