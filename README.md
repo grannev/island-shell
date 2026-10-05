@@ -36,12 +36,22 @@ The watchers use the desktop's existing tools: `pactl subscribe` plus
 optional tools only disable that source. The commands below can be used to
 preview the activities without changing hardware state:
 
+    island-shell mic muted | mic on
     island-shell volume 0.65
     island-shell brightness 0.8
     island-shell battery 72 charging
     island-shell battery 10 low
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
+
+**Microphone.** While any application records from a microphone, an orange
+privacy dot sits at the right end of the compact island. It swells in and
+shrinks away and stays for as long as the recording runs, as in iOS. Speaker
+listeners such as cava and visualisers, level meters and paused streams do
+not count. Muting or unmuting the default microphone (the mic-mute key)
+shows a short pill: the microphone symbol bounces, struck through on red
+when muted. With the Control Center open, its own microphone button shows
+the change instead.
 
 **Jobs** from anywhere become live activities. A running job is a small
 ring beside the clock: it fills with the job's percentage, or an arc turns

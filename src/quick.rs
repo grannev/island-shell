@@ -688,7 +688,7 @@ fn checkmark(cr: &Context, cx: f64, cy: f64, alpha: f64) {
 }
 
 /// The microphone: a capsule and stand; struck through when muted.
-fn mic(cr: &Context, cx: f64, cy: f64, muted: bool, alpha: f64) {
+pub fn mic(cr: &Context, cx: f64, cy: f64, muted: bool, alpha: f64) {
     cr.save().unwrap();
     stroke_style(cr, 1.8, alpha);
     menu_style::rounded(cr, cx - 3.2, cy - 8.5, 6.4, 11.0, 3.2);

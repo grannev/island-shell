@@ -119,6 +119,8 @@ impl Command {
             ["timer", "start", duration] => Command::Timer(duration.to_string()),
             ["wifi"] => Command::Activity(crate::activity::Event::WifiOpen),
             ["calendar"] => Command::Activity(crate::activity::Event::CalendarOpen),
+            ["mic", "muted"] => Command::Activity(crate::activity::Event::MicMute { muted: true }),
+            ["mic", "on"] => Command::Activity(crate::activity::Event::MicMute { muted: false }),
             ["bluetooth"] => Command::Activity(crate::activity::Event::BluetoothOpen),
             ["task", rest @ ..] => Command::Task(crate::tasks::parse(rest, false)?),
             ["progress", rest @ ..] => Command::Task(crate::tasks::parse(rest, true)?),

@@ -41,6 +41,11 @@ pub enum Event {
     Tasks,
     /// the month, from a right click on the clock
     CalendarOpen,
+    /// the default microphone was muted or unmuted
+    MicMute { muted: bool },
+    /// the applications recording from a microphone now (state for the
+    /// privacy dot, never a pill of its own)
+    MicInUse { apps: Vec<String> },
 }
 
 impl Event {
@@ -58,6 +63,8 @@ impl Event {
             Event::Tasks => (crate::tasks::PILL_W, PILL_H),
             // sized by the island from the month shown
             Event::CalendarOpen => (crate::calendar::WIDTH, 352.0),
+            Event::MicMute { .. } => (300.0, PILL_H),
+            Event::MicInUse { .. } => (0.0, 0.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
     }
@@ -72,6 +79,8 @@ impl Event {
             Event::TimerDone => 4.0,
             Event::Tasks => 4.5,
             Event::CalendarOpen => f64::INFINITY,
+            Event::MicMute { .. } => 1.8,
+            Event::MicInUse { .. } => 0.0,
             Event::TimerMenu => f64::INFINITY,
             Event::WifiOpen | Event::BluetoothOpen => f64::INFINITY,
         }
@@ -97,6 +106,11 @@ pub fn spawn_watchers(tx: Sender<Event>) {
 fn spawn_audio(tx: Sender<Event>) {
     thread::spawn(move || {
         let mut previous = read_volume();
+        let mut mic_muted = read_mic_muted();
+        let mut mic_users = read_mic_users();
+        if !mic_users.is_empty() {
+            let _ = tx.send(Event::MicInUse { apps: mic_users.clone() });
+        }
         loop {
             let child = Command::new("pactl").arg("subscribe").stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
             let Ok(mut child) = child else {
@@ -105,6 +119,23 @@ fn spawn_audio(tx: Sender<Event>) {
             };
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    // a recording starting or stopping, a microphone muted
+                    if line.contains(" source") {
+                        let users = read_mic_users();
+                        if users != mic_users {
+                            mic_users = users;
+                            let _ = tx.send(Event::MicInUse { apps: mic_users.clone() });
+                        }
+                        let muted = read_mic_muted();
+                        if muted.is_some() && muted != mic_muted {
+                            // only a change is news (not the state at start)
+                            if mic_muted.is_some() {
+                                let _ = tx.send(Event::MicMute { muted: muted.unwrap_or(false) });
+                            }
+                            mic_muted = muted;
+                        }
+                        continue;
+                    }
                     if !line.contains("sink") && !line.contains("server") {
                         continue;
                     }
@@ -119,6 +150,43 @@ fn spawn_audio(tx: Sender<Event>) {
             thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+/// Is the default microphone muted?
+fn read_mic_muted() -> Option<bool> {
+    let out = Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).contains("MUTED"))
+}
+
+/// The applications recording from a microphone right now: live capture
+/// streams, leaving out what listens to the speakers (cava, visualisers:
+/// sink monitors) and level meters.
+fn read_mic_users() -> Vec<String> {
+    let Ok(out) = Command::new("pactl").args(["-f", "json", "list", "source-outputs"]).output() else { return Vec::new() };
+    let Ok(streams) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else { return Vec::new() };
+    let monitors: Vec<u64> = Command::new("pactl").args(["list", "short", "sources"]).output().ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.split('\t').nth(1).is_some_and(|n| n.ends_with(".monitor")))
+            .filter_map(|l| l.split('\t').next()?.parse().ok()).collect())
+        .unwrap_or_default();
+    mic_users(&streams, &monitors)
+}
+
+fn mic_users(streams: &[serde_json::Value], monitors: &[u64]) -> Vec<String> {
+    let mut apps: Vec<String> = streams.iter().filter_map(|stream| {
+        let props = stream.get("properties")?;
+        let prop = |key: &str| props.get(key).and_then(|v| v.as_str());
+        if stream.get("corked").and_then(|v| v.as_bool()) == Some(true)
+            || prop("stream.capture.sink") == Some("true")
+            || prop("media.name").is_some_and(|n| n.eq_ignore_ascii_case("peak detect"))
+            || stream.get("source").and_then(|v| v.as_u64()).is_some_and(|s| monitors.contains(&s)) {
+            return None;
+        }
+        let name = prop("application.name").or(prop("application.process.binary")).or(prop("node.name"))?;
+        Some(name.chars().take(40).collect())
+    }).collect();
+    apps.sort();
+    apps.dedup();
+    apps
 }
 
 pub fn read_volume() -> Option<(f64, bool)> {
@@ -583,7 +651,18 @@ pub fn draw_pill(
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}
         // drawn by the island, which holds the jobs and the calendar
-        Event::Tasks | Event::CalendarOpen => {}
+        Event::Tasks | Event::CalendarOpen | Event::MicInUse { .. } => {}
+        Event::MicMute { muted } => {
+            // the symbol bounces as it is struck through or freed
+            let s = 1.45 * crate::menu_style::bounce_scale(now - since - 0.05);
+            let colour = if *muted { crate::menu_style::RED } else { crate::menu_style::ORANGE };
+            crate::menu_style::well(cr, x0 + 49.0, cy, 21.0, Some(colour), enter * 0.22);
+            crate::menu_style::transformed(cr, x0 + 49.0, cy, s, 0.0, || {
+                crate::quick::mic(cr, x0 + 49.0, cy, *muted, enter);
+            });
+            let detail = if *muted { "Выключен" } else { "Включён" };
+            draw_two_lines(cr, renderer, "Микрофон", detail, x0 + 88.0, cy, enter, colour);
+        }
     }
 }
 
@@ -784,6 +863,19 @@ fn round_rect(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_users_leave_out_speaker_listeners_and_meters() {
+        let streams: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"source": 59, "corked": false, "properties": {"media.name": "cava", "node.name": "cava", "stream.capture.sink": "true"}},
+            {"source": 60, "corked": false, "properties": {"application.name": "Telegram Desktop"}},
+            {"source": 60, "corked": false, "properties": {"application.name": "Telegram Desktop"}},
+            {"source": 60, "corked": true, "properties": {"application.name": "Paused"}},
+            {"source": 61, "corked": false, "properties": {"application.name": "obs"}},
+            {"source": 60, "corked": false, "properties": {"application.name": "pavucontrol", "media.name": "Peak detect"}}
+        ]"#).unwrap();
+        assert_eq!(mic_users(&streams, &[61]), vec!["Telegram Desktop".to_string()]);
+    }
 
     #[test]
     fn wifi_icon_does_not_stroke_the_previous_text_position() {

@@ -118,6 +118,8 @@ thumbnails, and a compact clickable countdown / Pomodoro beside the clock.
 Jobs from `island-shell task|progress|run` (`src/tasks.rs`) are a ring
 beside the clock and an unfolding pill; a job ends as interrupted when its
 owner process exits (checked once a second, outside painting).
+An orange dot shows while an application records from a microphone (sink
+monitors such as cava excluded), and mic mute changes get a short pill.
 Environment readers live in `src/activity.rs`; a grim wrapper is installed
 as `~/.local/bin/island-screenshot`.
 The timer opens from the island's shortcut menu; a running

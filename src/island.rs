@@ -549,6 +549,9 @@ pub struct Island {
     calendar: Option<Calendar>,
     calendar_rect: Option<Rect>,
     clock_rect: Option<Rect>,
+    /// who records from a microphone now: an orange dot at the line's end
+    mic_users: Vec<String>,
+    mic_dot: Spring,
     quick_open: bool,
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
@@ -746,6 +749,9 @@ impl Island {
             calendar: None,
             calendar_rect: None,
             clock_rect: None,
+            mic_users: Vec::new(),
+            // under-damped: the dot swells a hair past full, then settles
+            mic_dot: Spring::new(0.0, 0.32, 0.72),
             quick_open: false,
             quick_rect: None,
             quick_hover: None,
@@ -845,6 +851,7 @@ impl Island {
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
             || self.tasks_chip.is_moving(now)
+            || self.mic_dot.is_moving(now)
             || self.calendar.as_ref().is_some_and(|c| c.is_animating(now)) && self.calendar_shown()
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
@@ -1603,6 +1610,18 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
+        if let activity::Event::MicInUse { apps } = event {
+            self.set_mic_users(apps, now);
+            return;
+        }
+        if let activity::Event::MicMute { muted } = &event {
+            self.controls.mic_muted = *muted;
+            // the Control Center's own mic button shows it
+            if self.quick_open {
+                self.sync(now);
+                return;
+            }
+        }
         // with the Control Center open its sliders show the change; no OSD
         // over it and none queued for after it closes
         if let activity::Event::Slider { kind, value, muted } = &event {
@@ -1807,6 +1826,13 @@ impl Island {
                 current.updated_at = now;
             }
         }
+    }
+
+    /// The applications recording from a microphone changed.
+    pub fn set_mic_users(&mut self, apps: Vec<String>, now: Time) {
+        self.mic_dot.set(if apps.is_empty() { 0.0 } else { 1.0 }, now);
+        self.mic_users = apps;
+        self.sync(now);
     }
 
     /// Unfold the month (a right click on the clock, `island-shell calendar`).
@@ -2184,8 +2210,10 @@ impl Island {
         self.player_rect = None;
         self.editor_chip_rect = None;
         let unread_len = if self.center.unread() > 0 { 18.0 } else { 0.0 };
-        let dnd_len = if self.dnd { 17.0 } else { 0.0 };
-        let line_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + 2.0 * pad;
+        let dnd_len = if self.dnd { 21.0 } else { 0.0 };
+        let mic_k = self.mic_dot.value(now).clamp(0.0, 1.2);
+        let mic_len = mic_k.min(1.0) * 16.0;
+        let line_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + mic_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
@@ -2302,7 +2330,7 @@ impl Island {
         let pill_alpha = pill_alpha_of(q);
         let sheet_k = self.quick_retiring_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len;
+            let content_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + mic_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -2377,7 +2405,7 @@ impl Island {
                 let _ = cr.fill();
             }
             if self.dnd {
-                let mx = after_clock + bars_len + unread_len + 8.0;
+                let mx = after_clock + bars_len + unread_len + 12.0;
                 let my = dy + line_h / 2.0;
                 cr.save().unwrap();
                 cr.set_fill_rule(cairo::FillRule::EvenOdd);
@@ -2387,6 +2415,15 @@ impl Island {
                 cr.set_source_rgba(0.72, 0.64, 1.0, line_alpha);
                 let _ = cr.fill();
                 cr.restore().unwrap();
+            }
+            if mic_len > 0.3 {
+                // the privacy dot swells in (a touch past full) and shrinks away
+                let mx = after_clock + bars_len + unread_len + dnd_len + 10.5;
+                let orange = crate::menu_style::ORANGE;
+                cr.new_path();
+                cr.arc(mx, dy + line_h / 2.0, 3.3 * mic_k, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(orange.0, orange.1, orange.2, line_alpha * mic_k.min(1.0));
+                let _ = cr.fill();
             }
         }
 
@@ -4143,6 +4180,15 @@ mod tests {
         let mut island = gallery_island();
         island.timer_command("25m", 10.0).unwrap();
         gallery_shot("05-timer-compact", &mut island, 10.0);
+
+        {
+            let mut island = gallery_island();
+            island.set_mic_users(vec!["Telegram Desktop".into()], 9.0);
+            island.set_dnd(true, 9.0);
+            gallery_shot("05j-mic-in-use", &mut island, 10.0);
+            island.live_activity(activity::Event::MicMute { muted: true }, 11.0);
+            gallery_shot_after("05k-mic-muted", &mut island, 11.0, 1.0);
+        }
 
         {
             let mut island = gallery_island();
