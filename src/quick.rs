@@ -13,12 +13,19 @@ const GAP: f64 = 8.0;
 const TILE_W: f64 = (INNER - GAP) / 2.0;
 const TILE_H: f64 = 56.0;
 const MODULE_GAP: f64 = 10.0;
-const DISPLAY_Y: f64 = menu_style::CONTENT_TOP + 3.0 * TILE_H + 2.0 * GAP + MODULE_GAP;
+/// "Now playing" sits under the tiles while something plays; the modules
+/// below it move down by its height (see `shift`)
+const MEDIA_Y: f64 = menu_style::CONTENT_TOP + 3.0 * TILE_H + 2.0 * GAP + MODULE_GAP;
+const MEDIA_H: f64 = 72.0;
+const MEDIA_ART: f64 = 48.0;
+const MEDIA_BUTTON: f64 = 38.0;
+const DISPLAY_Y: f64 = MEDIA_Y;
 const MODULE_H: f64 = 62.0;
 const SOUND_Y: f64 = DISPLAY_Y + MODULE_H + MODULE_GAP;
 const BOTTOM_Y: f64 = SOUND_Y + MODULE_H + MODULE_GAP;
 const BOTTOM_H: f64 = 70.0;
 const SMALL_W: f64 = (INNER - 3.0 * GAP) / 4.0;
+/// the main page without "Now playing"
 pub const HEIGHT: f64 = BOTTOM_Y + BOTTOM_H + RAIL;
 /// the sliders: inset in their module, below its title
 const SLIDER_X: f64 = RAIL + 12.0;
@@ -60,6 +67,23 @@ pub struct Controls {
     pub mic: Option<f64>,
     pub mic_muted: bool,
     pub mic_label: Option<String>,
+    /// what is playing (kept by the island from MPRIS)
+    pub media: Option<Media>,
+}
+
+/// The track "Now playing" shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Media {
+    pub title: String,
+    pub artist: String,
+    pub app: String,
+    pub art_url: String,
+    pub playing: bool,
+}
+
+/// How far the modules under the tiles move down for "Now playing".
+fn shift(controls: &Controls) -> f64 {
+    if controls.media.is_some() { MEDIA_H + MODULE_GAP } else { 0.0 }
 }
 
 impl Controls {
@@ -116,6 +140,8 @@ pub struct Frame<'a> {
     pub grow: &'a dyn Fn(Slider) -> f64,
     /// an icon-theme icon at a size in device pixels (loaded off-thread)
     pub icon: &'a dyn Fn(&str, i32) -> Option<cairo::ImageSurface>,
+    /// album art (loaded off-thread)
+    pub art: &'a crate::art::Art,
     /// how lit each control is (hover / keyboard selection)
     pub hover: &'a dyn Fn(Action) -> f64,
     /// the logout button is waiting for its confirming second press
@@ -158,6 +184,10 @@ pub enum Action {
     Sleep,
     Logout,
     Sink(usize),
+    /// "Now playing": previous, play / pause, next
+    MediaPrevious,
+    MediaPlayPause,
+    MediaNext,
     Back,
     Close,
 }
@@ -180,7 +210,7 @@ const SMALL: [Action; 4] = [Action::Layout, Action::Lock, Action::Sleep, Action:
 
 pub fn height(view: View, controls: &Controls) -> f64 {
     match view {
-        View::Main => HEIGHT,
+        View::Main => HEIGHT + shift(controls),
         View::Sound => sound_page(controls).height,
     }
 }
@@ -194,8 +224,15 @@ fn small(i: usize) -> f64 {
 }
 
 /// The output button on the sound module's title line.
-fn outputs_button() -> (f64, f64, f64, f64) {
-    (RAIL + INNER - 12.0 - 170.0, SOUND_Y + 4.0, 170.0, 24.0)
+fn outputs_button(controls: &Controls) -> (f64, f64, f64, f64) {
+    (RAIL + INNER - 12.0 - 170.0, SOUND_Y + shift(controls) + 4.0, 170.0, 24.0)
+}
+
+/// The transport buttons' centres in "Now playing".
+const MEDIA_ACTIONS: [Action; 3] = [Action::MediaPrevious, Action::MediaPlayPause, Action::MediaNext];
+
+fn media_button(i: usize) -> (f64, f64) {
+    (RAIL + INNER - 10.0 - MEDIA_BUTTON / 2.0 - (2 - i) as f64 * MEDIA_BUTTON, MEDIA_Y + MEDIA_H / 2.0)
 }
 
 fn inside(x: f64, y: f64, rect: (f64, f64, f64, f64)) -> bool {
@@ -250,12 +287,21 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
             return Some(Hit::Action(*action));
         }
     }
-    if !controls.sinks.is_empty() && inside(x, y, outputs_button()) {
+    if controls.media.is_some() {
+        for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
+            let (cx, cy) = media_button(i);
+            if (x - cx).abs() <= MEDIA_BUTTON / 2.0 && (y - cy).abs() <= 22.0 {
+                return Some(Hit::Action(*action));
+            }
+        }
+    }
+    if !controls.sinks.is_empty() && inside(x, y, outputs_button(controls)) {
         return Some(Hit::Action(Action::Outputs));
     }
+    let dy = shift(controls);
     for (slider, top, present) in [
-        (Slider::Brightness, DISPLAY_Y, controls.brightness.is_some()),
-        (Slider::Volume, SOUND_Y, controls.volume.is_some()),
+        (Slider::Brightness, DISPLAY_Y + dy, controls.brightness.is_some()),
+        (Slider::Volume, SOUND_Y + dy, controls.volume.is_some()),
     ] {
         // the whole lower part of the module grabs the slider
         if present && inside(x, y, (RAIL, top + SLIDER_DY - 8.0, INNER, SLIDER_H + 16.0)) {
@@ -263,7 +309,7 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
         }
     }
     for (i, action) in SMALL.iter().enumerate() {
-        if inside(x, y, (small(i), BOTTOM_Y, SMALL_W, BOTTOM_H)) {
+        if inside(x, y, (small(i), BOTTOM_Y + dy, SMALL_W, BOTTOM_H)) {
             return Some(Hit::Action(*action));
         }
     }
@@ -575,19 +621,28 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         cr.restore().unwrap();
     }
 
+    // what is playing, then the modules below it
+    let media_rows = usize::from(controls.media.is_some());
+    if let Some(media) = &controls.media {
+        let (alpha, rise) = frame.arrival(3, base_alpha);
+        draw_media(cr, renderer, x, y + MEDIA_Y + rise, alpha, frame, media);
+    }
+    let y = y + shift(controls);
+
     // Display
-    let (alpha, rise) = frame.arrival(3, base_alpha);
+    let (alpha, rise) = frame.arrival(3 + media_rows, base_alpha);
     module(cr, renderer, "Дисплей", x, y + DISPLAY_Y + rise, alpha);
     let present = controls.brightness.is_some();
     slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, (frame.level)(Slider::Brightness),
         "sun", 1.0, alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Brightness));
 
     // Sound, with the output it plays through
-    let (alpha, rise) = frame.arrival(4, base_alpha);
+    let (alpha, rise) = frame.arrival(4 + media_rows, base_alpha);
     let y = y + rise;
     module(cr, renderer, "Звук", x, y + SOUND_Y, alpha);
     if let Some(sink) = controls.current_sink() {
-        let (bx, by, bw, bh) = outputs_button();
+        let (bx, by, bw, bh) = outputs_button(controls);
+        let by = by - shift(controls);
         let lit = (frame.hover)(Action::Outputs).clamp(0.0, 1.0);
         let label_w = renderer.layout(cr, &sink.label, Font::Subhead).pixel_extents().1.width() as f64;
         let text_w = label_w.min(bw - 30.0);
@@ -607,7 +662,7 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
     let y = y - rise;
 
     // the keyboard layout and the session
-    let (alpha, rise) = frame.arrival(5, base_alpha);
+    let (alpha, rise) = frame.arrival(5 + media_rows, base_alpha);
     for (i, action) in SMALL.iter().enumerate() {
         let sx = x + small(i);
         let sy = y + BOTTOM_Y + rise;
@@ -642,6 +697,43 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         crate::motion::text(cr, renderer, &frame.key(&format!("small{i}")), &label, sx + 4.0, sy + 44.0 + (18.0 - lh) / 2.0,
             SMALL_W - 8.0, 0.5, Font::Footnote, colour, alpha * if armed { 1.0 } else { 0.85 });
         cr.restore().unwrap();
+    }
+}
+
+/// "Now playing": the art, the title over the artist, and previous /
+/// play-pause / next; a new track's title rises in, a pressed button dips.
+fn draw_media(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame, media: &Media) {
+    if alpha <= 0.002 {
+        return;
+    }
+    menu_style::group(cr, x + RAIL, y, INNER, MEDIA_H, 0.0, alpha);
+    let (ax, ay) = (x + RAIL + 12.0, y + (MEDIA_H - MEDIA_ART) / 2.0);
+    crate::player::art_tile(cr, renderer, frame.art, &media.art_url, ax, ay, MEDIA_ART, 10.0, alpha);
+    let tx = ax + MEDIA_ART + 12.0;
+    let tw = x + media_button(0).0 - MEDIA_BUTTON / 2.0 - 6.0 - tx;
+    let title_h = menu_style::line_height(cr, renderer, Font::Headline);
+    let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+    let top = y + (MEDIA_H - title_h - sub_h) / 2.0;
+    let second = if media.artist.is_empty() { media.app.clone() } else { media.artist.clone() };
+    crate::motion::text(cr, renderer, &frame.key("media-title"), &media.title, tx, top, tw, 0.0, Font::Headline,
+        (1.0, 1.0, 1.0), alpha);
+    crate::motion::text(cr, renderer, &frame.key("media-artist"), &second, tx, top + title_h, tw, 0.0, Font::Subhead,
+        (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
+    for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
+        let (cx, cy) = media_button(i);
+        let (cx, cy) = (x + cx, y - MEDIA_Y + cy);
+        let lit = (frame.hover)(*action).clamp(0.0, 1.0);
+        if lit > 0.0 {
+            menu_style::well(cr, cx, cy, 17.0, None, 0.8 * lit * alpha);
+        }
+        let control = match action {
+            Action::MediaPrevious => crate::player::Control::Previous,
+            Action::MediaPlayPause => crate::player::Control::PlayPause,
+            _ => crate::player::Control::Next,
+        };
+        let size = if control == crate::player::Control::PlayPause { 0.78 } else { 0.62 };
+        let press = menu_style::press_scale((frame.pressed)(*action));
+        crate::player::control_glyph(cr, control, media.playing, cx, cy, size * press, alpha * (0.85 + 0.15 * lit));
     }
 }
 
@@ -850,12 +942,23 @@ mod tests {
         for (i, action) in SMALL.iter().enumerate() {
             assert_eq!(hit(View::Main, &c, small(i) + 30.0, BOTTOM_Y + 30.0), Some(Hit::Action(*action)));
         }
-        let (bx, by, bw, _) = outputs_button();
+        let (bx, by, bw, _) = outputs_button(&c);
         assert_eq!(hit(View::Main, &c, bx + bw - 10.0, by + 10.0), Some(Hit::Action(Action::Outputs)));
         assert_eq!(hit(View::Main, &c, SLIDER_X, SOUND_Y + SLIDER_DY + 10.0), Some(Hit::Slider(Slider::Volume, 0.0)));
         assert_eq!(hit(View::Main, &c, SLIDER_X + SLIDER_W, DISPLAY_Y + SLIDER_DY + 10.0),
             Some(Hit::Slider(Slider::Brightness, 1.0)));
         assert_eq!(hit(View::Main, &c, WIDTH - 37.0, 40.0), Some(Hit::Action(Action::Close)));
+        // with something playing, its buttons take their place and the
+        // modules below move down by the module's height
+        let mut playing = c.clone();
+        playing.media = Some(Media { title: "Says".into(), playing: true, ..Media::default() });
+        for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
+            let (cx, cy) = media_button(i);
+            assert_eq!(hit(View::Main, &playing, cx, cy), Some(Hit::Action(*action)));
+        }
+        let dy = MEDIA_H + MODULE_GAP;
+        assert_eq!(hit(View::Main, &playing, small(0) + 30.0, BOTTOM_Y + dy + 30.0), Some(Hit::Action(Action::Layout)));
+        assert_eq!(height(View::Main, &playing), HEIGHT + dy);
         assert_eq!(hit(View::Main, &c, WIDTH / 2.0, HEIGHT - 8.0), None);
         let page = sound_page(&c);
         assert_eq!(hit(View::Sound, &c, 200.0, page.sinks + SINK_H + 10.0), Some(Hit::Action(Action::Sink(1))));

@@ -80,7 +80,8 @@ Semibold 16 px white, padding 16, content-sized width; clock text
   hidden island shows the panel temporarily and an open drawer closes first.
 - Lock screen (hyprlock) is separate and stays as is.
 
-The island's Control Center (shortcut modules, Display/Sound sliders, audio
+The island's Control Center (shortcut modules, "Now playing" while a player
+is active, Display/Sound sliders, audio
 Sound page (outputs, per-application levels, microphone), keyboard layout, Lock/Sleep/Log out with a confirming second
 press) opens from a normal left click on the ordinary compact body;
 `src/control.rs` is its environment worker (never block the UI on it). mod+d still opens the

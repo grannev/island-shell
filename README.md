@@ -92,6 +92,9 @@ today; `Escape` closes. `island-shell calendar` opens it too.
 
 Click the ordinary compact island to open the **Control Center**: modules
 for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
+while something plays, a **Now playing** module with the art, the title
+over the artist, and previous / play-pause / next buttons (also in the
+keyboard order, after the tiles; a new track's title rises in);
 a Display and a Sound module with Control Center sliders (press anywhere
 on a slider to jump there, drag to adjust; moving the volume unmutes); the
 sound module's output button opens the **Sound** page: the audio outputs

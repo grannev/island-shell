@@ -924,6 +924,17 @@ impl Island {
 
     /// Re-aim the movers after a state change.
     pub fn sync(&mut self, now: Time) {
+        // the Control Center's "Now playing" follows the player
+        let media = self.song.as_ref().map(|song| quick::Media {
+            title: song.now.title.clone(),
+            artist: song.now.artist.clone(),
+            app: song.now.app.clone(),
+            art_url: song.now.art_url.clone(),
+            playing: song.now.playing,
+        });
+        if self.controls.media != media {
+            self.controls.media = media;
+        }
         // System events and panels rise on their own even when the compact
         // island is parked above the edge. Once they finish, it stays hidden.
         self.hide.set(if self.is_hidden() { 1.0 } else { 0.0 }, now);
@@ -2521,6 +2532,7 @@ impl Island {
                     level: &level,
                     grow: &grow,
                     icon: &icon,
+                    art: &self.art,
                     hover: &hover,
                     logout_armed: self.logout_armed_at.is_some(),
                     now,
@@ -2643,6 +2655,7 @@ impl Island {
                 level: &level,
                 grow: &no_grow,
                 icon: &no_icon,
+                art: &self.art,
                 hover: &hover,
                 logout_armed: false,
                 now,
@@ -3402,8 +3415,18 @@ impl Island {
     /// The actions the keyboard walks through on the current page.
     fn quick_keys(&self) -> Vec<quick::Action> {
         match self.quick_view {
-            quick::View::Main => quick::ACTIONS.iter().copied()
-                .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty()).collect(),
+            quick::View::Main => {
+                let media = self.controls.media.is_some();
+                quick::ACTIONS.iter().copied()
+                    .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty())
+                    .flat_map(|a| {
+                        // the transport buttons come after the tiles
+                        let after = (a == quick::Action::Dnd && media).then_some([
+                            quick::Action::MediaPrevious, quick::Action::MediaPlayPause, quick::Action::MediaNext]);
+                        std::iter::once(a).chain(after.into_iter().flatten())
+                    })
+                    .collect()
+            }
             quick::View::Sound => (0..self.controls.sinks.len()).map(quick::Action::Sink)
                 .chain(self.controls.mic.is_some().then_some(quick::Action::MicMute)).collect(),
         }
@@ -3972,7 +3995,7 @@ mod tests {
     fn gallery_shot_after(name: &str, island: &mut Island, t: Time, settle: f64) {
         let scale = 1.5;
         let renderer = Renderer::new(scale);
-        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
         let ctx = Context::new(&scratch).unwrap();
         ctx.scale(scale, scale);
         for n in 0..(settle * 60.0) as usize {
@@ -3983,19 +4006,19 @@ mod tests {
         }
         let end = t + settle;
         island.advance(end);
-        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 840).unwrap();
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
         let cr = Context::new(&surface).unwrap();
         cr.scale(scale, scale);
-        let gradient = cairo::LinearGradient::new(0.0, 0.0, 980.0, 560.0);
+        let gradient = cairo::LinearGradient::new(0.0, 0.0, 980.0, 640.0);
         gradient.add_color_stop_rgb(0.0, 0.10, 0.16, 0.22);
         gradient.add_color_stop_rgb(1.0, 0.26, 0.42, 0.48);
         cr.set_source(&gradient).unwrap();
         cr.paint().unwrap();
         let frame = island.draw(&cr, &renderer, 490.0, end);
         drop(cr);
-        let b = frame.bounds.unwrap_or(Rect { x: 0.0, y: 0.0, w: 980.0, h: 560.0 });
+        let b = frame.bounds.unwrap_or(Rect { x: 0.0, y: 0.0, w: 980.0, h: 640.0 });
         let (x0, x1) = (((b.x - 24.0) * scale).max(0.0) as i32, ((b.x + b.w + 24.0) * scale).min(1470.0) as i32);
-        let y1 = ((b.y + b.h + 24.0) * scale).min(840.0) as i32;
+        let y1 = ((b.y + b.h + 24.0) * scale).min(960.0) as i32;
         let out = cairo::ImageSurface::create(cairo::Format::ARgb32, x1 - x0, y1).unwrap();
         let oc = Context::new(&out).unwrap();
         oc.set_source_surface(&surface, -x0 as f64, 0.0).unwrap();
@@ -4148,6 +4171,14 @@ mod tests {
         island.open_quick_menu(10.0);
         island.set_controls(controls.clone(), 10.0);
         gallery_shot("02-quick-menu", &mut island, 10.0);
+        {
+            let mut playing = gallery_island();
+            playing.song = Some(Song { now: gallery_song(true), position: 141.0, position_at: 10.0 });
+            playing.open_quick_menu(10.0);
+            playing.set_controls(controls.clone(), 10.0);
+            playing.quick_hover = Some(quick::Action::MediaPlayPause);
+            gallery_shot("02e-quick-menu-playing", &mut playing, 10.0);
+        }
         island.arm_logout(12.0);
         island.quick_hover = Some(quick::Action::Sleep);
         island.sync(12.0);

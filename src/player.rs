@@ -206,6 +206,13 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
 
 /// The album art, or the app's initial when the player publishes none.
 fn draw_art(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y: f64, size: f64, radius: f64, alpha: f64) {
+    art_tile(cr, renderer, art, view.art_url, x, y, size, radius, alpha);
+}
+
+/// Album art at `url` in a rounded square (a plate with a music note when
+/// there is none), with a hairline so a dark cover keeps its edge.
+#[allow(clippy::too_many_arguments)]
+pub fn art_tile(cr: &Context, renderer: &Renderer, art: &Art, url: &str, x: f64, y: f64, size: f64, radius: f64, alpha: f64) {
     if alpha <= 0.003 {
         return;
     }
@@ -213,7 +220,7 @@ fn draw_art(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
     cr.save().unwrap();
     rounded(cr, x, y, size, size, radius);
     cr.clip();
-    match art.get(view.art_url, device) {
+    match art.get(url, device) {
         Some(surface) => {
             cr.save().unwrap();
             cr.translate(x, y);
@@ -286,7 +293,7 @@ pub fn bars(cr: &Context, renderer: &Renderer, levels: &[f64], accent: (f64, f64
 
 /// Previous / play-pause / next, drawn rather than typed so they can be
 /// nudged when pressed.
-fn control_glyph(cr: &Context, control: Control, playing: bool, cx: f64, cy: f64, scale: f64, alpha: f64) {
+pub fn control_glyph(cr: &Context, control: Control, playing: bool, cx: f64, cy: f64, scale: f64, alpha: f64) {
     cr.save().unwrap();
     cr.translate(cx, cy);
     cr.scale(scale, scale);

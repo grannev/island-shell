@@ -70,9 +70,11 @@ use crate::sway;
 /// dodge and the spread, tall enough for the Touch ID pill and the liquid
 /// stretch.
 const SURFACE_W: u32 = 980;
-/// tall enough for the launcher panel as well (the surface is transparent
-/// and its input region only ever covers the island itself)
-const SURFACE_H: u32 = 560;
+/// tall enough for the launcher panel and the tallest sheet (the Control
+/// Center with "Now playing", the Sound page with four applications); the
+/// surface is transparent and its input region only ever covers the
+/// island itself
+const SURFACE_H: u32 = 640;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -2115,6 +2117,16 @@ impl App {
             self.island.close_quick_menu(now);
         }
         match action {
+            Action::MediaPrevious | Action::MediaPlayPause | Action::MediaNext => {
+                let control = match action {
+                    Action::MediaPrevious => crate::player::Control::Previous,
+                    Action::MediaPlayPause => crate::player::Control::PlayPause,
+                    _ => crate::player::Control::Next,
+                };
+                if let Some((bus, track, command)) = self.island.press_control(control, now) {
+                    dbus::control(&bus, &track, command);
+                }
+            }
             Action::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
             Action::Bluetooth => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
             Action::Timer => { let _ = self.island.timer_command("menu", now); }
