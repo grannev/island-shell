@@ -1635,6 +1635,9 @@ impl Island {
             self.cancel_reply(now);
             return true;
         }
+        if self.center.open && self.center.clear_reply(now) {
+            return true;
+        }
         if self.center.open {
             self.center.close();
             self.center_rect = None;
@@ -1824,6 +1827,12 @@ impl Island {
             }
         }
         true
+    }
+
+    /// Typing into the reply field of an open notification in the center.
+    pub fn center_reply_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, now: Time) -> Option<notice_center::Action> {
+        if !self.center.open { return None; }
+        self.center.reply_key(key, text, ctrl, now)
     }
 
     pub fn network_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, now: Time) -> bool {
@@ -2574,57 +2583,9 @@ impl Island {
     fn draw_reply(&self, cr: &Context, renderer: &Renderer, note: &crate::notify::Notification, reply: &Reply,
         x0: f64, x1: f64, top: f64, alpha: f64, now: Time) {
         let k = smoothstep((now - reply.since) / 0.3);
-        let alpha = alpha * k;
-        let (x, y, w, h) = (x0, top + 4.0 + 6.0 * (1.0 - k), x1 - x0, 36.0);
-        crate::menu_style::rounded(cr, x, y, w, h, h / 2.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha);
-        let _ = cr.fill_preserve();
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, 0.16 * alpha);
-        let _ = cr.stroke();
-        let room = w - 16.0 - 36.0;
-        let body_h = crate::menu_style::line_height(cr, renderer, Font::Body);
-        let ty = y + (h - body_h) / 2.0;
-        let (shown, colour) = if reply.text.is_empty() {
-            (note.reply.as_deref().unwrap_or("Ответ"), crate::menu_style::TERTIARY)
-        } else {
-            (reply.text.as_str(), 1.0)
-        };
-        let layout = renderer.layout(cr, shown, Font::Body);
-        let text_w = if reply.text.is_empty() { 0.0 } else { layout.pixel_extents().1.width() as f64 };
-        cr.save().unwrap();
-        cr.rectangle(x + 12.0, y, room + 4.0, h);
-        cr.clip();
-        // long replies scroll left to keep the caret in view
-        let scroll = (text_w - room).max(0.0);
-        cr.set_source_rgba(1.0, 1.0, 1.0, colour * alpha);
-        cr.move_to(renderer.snap(x + 14.0 - scroll), renderer.snap(ty));
-        pangocairo::functions::show_layout(cr, &layout);
-        let blink = now - reply.typed < 0.6 || ((now - reply.typed) * 1.6).fract() < 0.55;
-        if blink {
-            let blue = crate::menu_style::BLUE;
-            cr.rectangle(renderer.snap(x + 14.0 - scroll + text_w + 1.0), y + 9.0, 2.0, h - 18.0);
-            cr.set_source_rgba(blue.0, blue.1, blue.2, alpha);
-            let _ = cr.fill();
-        }
-        cr.restore().unwrap();
-        // the send button: blue once there is something to send
-        let (cx, cy) = (x + w - 18.0, y + h / 2.0);
-        let ready = !reply.text.trim().is_empty();
-        let pop = if ready { 1.0 } else { 0.9 };
-        crate::menu_style::well(cr, cx, cy, 13.0 * pop, ready.then_some(crate::menu_style::BLUE), alpha);
-        cr.new_path();
-        cr.set_line_width(2.2);
-        cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_line_join(cairo::LineJoin::Round);
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha * if ready { 1.0 } else { 0.5 });
-        cr.move_to(cx, cy + 6.0);
-        cr.line_to(cx, cy - 6.0);
-        cr.move_to(cx - 5.0, cy - 1.0);
-        cr.line_to(cx, cy - 6.0);
-        cr.line_to(cx + 5.0, cy - 1.0);
-        let _ = cr.stroke();
-        cr.new_path();
+        let rect = (x0, top + 4.0 + 6.0 * (1.0 - k), x1 - x0, crate::menu_style::REPLY_FIELD_H);
+        crate::menu_style::reply_field(cr, renderer, rect, &reply.text, note.reply.as_deref().unwrap_or("Ответ"),
+            reply.typed, now, alpha * k);
     }
 
     /// Start typing a reply to the notification on show (its app takes
@@ -4019,6 +3980,22 @@ mod tests {
         }
         island.center.click(90.0, menu_style_top() + 12.0, 13.0);
         gallery_shot("09b-notification-detail", &mut island, 13.0);
+        {
+            let mut replying = gallery_island();
+            let mut note = crate::notify::fabricate("Telegram", "Alice", "Are we still on for tonight? I booked the table for eight.");
+            note.id = 40;
+            note.actions = vec![("default".into(), "Открыть".into()), ("inline-reply".into(), "Ответить".into())];
+            note.reply = Some("Сообщение".into());
+            replying.center.upsert(note, 5.0);
+            replying.open_notification_center(10.0);
+            replying.center.click(90.0, menu_style_top() + 12.0, 11.0);
+            for key in ["Д", "а", ",", " ", "в", " ", "8"] { replying.center_reply_key("", Some(key), false, 12.0); }
+            gallery_shot_after("09e-notification-detail-reply", &mut replying, 12.0, 1.0);
+            let sent = replying.center_reply_key("Return", None, false, 13.0);
+            assert_eq!(sent, Some(notice_center::Action::Reply(40, "Да, в 8".into())));
+            replying.center.closed(40);
+            gallery_shot_after("09f-notification-detail-sent", &mut replying, 13.0, 0.8);
+        }
 
         let mut island = gallery_island();
         island.notify(crate::notify::fabricate("Telegram", "Alice", "Are we still on for tonight? I booked the table for eight, and the place is near the river."), 10.0);

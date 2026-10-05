@@ -52,6 +52,12 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   `Headline` title and a `Subhead` status line.
 - **Segmented controls, switches, fields** (`segmented`, `toggle`,
   `field`): the iOS shapes; focus is a blue ring, selection a grey thumb.
+- **Message field** (`reply_field`): a capsule with a dim placeholder,
+  a blinking blue caret and a round send button that turns blue once
+  there is text; the notification pill and the center's details share it.
+- **Swipeable cards**: a notification pill or center card follows two
+  fingers or a held drag sideways; past 30 % or on a flick it flies out
+  and closes, otherwise it springs back.
 - **Selection and hover** are a light card (`group` at full hover), the
   same in the launcher and the notification center; no solid fills.
 - **Scrolling** glides (`anim::Glide`): a wheel notch is a push of about

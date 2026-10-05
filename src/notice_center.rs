@@ -36,6 +36,12 @@ const SWIPE_FLICK: f64 = 700.0;
 const SWIPE_IDLE: Time = 0.15;
 const EXIT_MOTION: Time = 0.32;
 const VIEW_MOTION: Time = 0.28;
+/// the reply field's band between the message and the buttons
+const REPLY_BAND: f64 = menu_style::REPLY_FIELD_H + 10.0;
+/// the reply field's top, in a notification's details
+const REPLY_TOP: f64 = HEIGHT - RAIL - menu_style::BUTTON_H - 14.0 - menu_style::REPLY_FIELD_H;
+/// how long "sent" stays in the field's place
+const SENT_HOLD: Time = 2.4;
 
 struct Leaving {
     entry: Entry,
@@ -96,10 +102,12 @@ pub enum Action {
     Dismiss(u32),
     Invoke(u32, String),
     DismissMany(Vec<u32>),
+    /// send a typed reply to the notification with this ID
+    Reply(u32, String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Hit { Close, Clear, Back, Row(usize), Remove(usize), DetailRemove, Invoke(usize) }
+enum Hit { Close, Clear, Back, Row(usize), Remove(usize), DetailRemove, Invoke(usize), ReplyField, ReplySend }
 
 pub struct Center {
     entries: VecDeque<Entry>,
@@ -116,6 +124,11 @@ pub struct Center {
     detail: Option<u64>,
     view_transition: Option<(Option<u64>, Time)>,
     detail_scroll: f64,
+    /// the reply being typed under an open notification that takes one
+    reply: String,
+    reply_typed: Time,
+    /// the notification just answered, and when
+    sent: Option<(u64, Time)>,
     expanded: HashSet<String>,
     hovered: Option<Hit>,
     row_hover: HashMap<RowKey, Spring>,
@@ -206,7 +219,8 @@ impl Center {
         let next_serial = entries.iter().map(|e| e.serial).max().unwrap_or(0).saturating_add(1);
         Self {
             entries, next_serial, open: false, opened_at: 0.0, scroll: Glide::new(0.0, SCROLL_TAU), scrolled_at: f64::NEG_INFINITY, swipe: None, pending: None,
-            detail: None, view_transition: None, detail_scroll: 0.0, expanded: HashSet::new(), hovered: None,
+            detail: None, view_transition: None, detail_scroll: 0.0,
+            reply: String::new(), reply_typed: 0.0, sent: None, expanded: HashSet::new(), hovered: None,
             row_hover: HashMap::new(),
             button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.22, 0.85)),
             row_from: HashMap::new(), row_motion_at: 0.0,
@@ -346,6 +360,7 @@ impl Center {
         self.scroll.reset(0.0);
         self.row_hover.clear();
         self.detail = None;
+        self.reply.clear();
         self.view_transition = None;
         self.expanded.clear();
         self.hovered = None;
@@ -369,7 +384,10 @@ impl Center {
             || self.button_hover.iter().any(|s| s.is_moving(now))
             || !self.leaving.is_empty() || !self.born_at.is_empty()
             || !self.row_from.is_empty()
-            || self.view_transition.is_some_and(|(_, since)| now - since < VIEW_MOTION))
+            || self.view_transition.is_some_and(|(_, since)| now - since < VIEW_MOTION)
+            // the caret blinks
+            || self.replyable().is_some()
+            || self.sent.is_some_and(|(_, at)| now - at < SENT_HOLD + 0.4))
     }
 
     fn hit(&self, x: f64, y: f64) -> Option<Hit> {
@@ -377,6 +395,12 @@ impl Center {
         if x >= WIDTH - 54.0 && y < 58.0 { return Some(Hit::Close); }
         if self.detail.is_some() {
             if x < 107.0 && y < 58.0 { return Some(Hit::Back); }
+            if self.replyable().is_some() && (REPLY_TOP..REPLY_TOP + menu_style::REPLY_FIELD_H).contains(&y)
+                && (RAIL..WIDTH - RAIL).contains(&x) {
+                let (cx, cy) = (WIDTH - RAIL - menu_style::REPLY_SEND_INSET, REPLY_TOP + menu_style::REPLY_FIELD_H / 2.0);
+                let send = (x - cx).powi(2) + (y - cy).powi(2) <= 18.0 * 18.0;
+                return Some(if send { Hit::ReplySend } else { Hit::ReplyField });
+            }
             if x >= WIDTH - 110.0 && y >= HEIGHT - 68.0 { return Some(Hit::DetailRemove); }
             if y >= HEIGHT - 68.0 && x >= 22.0 && x < WIDTH - 120.0 {
                 return Some(Hit::Invoke(((x - 22.0) / 154.0).floor() as usize));
@@ -546,6 +570,7 @@ impl Center {
             Some(Hit::Back) => {
                 self.view_transition = Some((self.detail, now));
                 self.detail = None;
+                self.reply.clear();
                 self.detail_scroll = 0.0;
                 Action::None
             }
@@ -579,6 +604,7 @@ impl Center {
                         entry.read = true;
                         self.view_transition = Some((None, now));
                         self.detail = Some(serial);
+                        self.reply.clear();
                         self.detail_scroll = 0.0;
                         self.persist();
                     }
@@ -594,6 +620,7 @@ impl Center {
             Some(Hit::DetailRemove) => {
                 let index = self.entries.iter().position(|e| Some(e.serial) == self.detail);
                 self.detail = None;
+                self.reply.clear();
                 index.map_or(Action::None, |i| self.remove(i, now))
             }
             Some(Hit::Invoke(index)) => {
@@ -602,8 +629,63 @@ impl Center {
                 let actions = visible_actions(&entry.note);
                 actions.get(index).map_or(Action::None, |(key, _)| Action::Invoke(entry.note.id, key.clone()))
             }
+            Some(Hit::ReplyField) => Action::None,
+            Some(Hit::ReplySend) => self.send_reply(now),
             None => Action::None,
         }
+    }
+
+    /// The open notification, if it is still live and its app takes a
+    /// typed reply.
+    fn replyable(&self) -> Option<&Entry> {
+        let serial = self.detail?;
+        self.entries.iter().find(|e| e.serial == serial && e.active && e.note.reply.is_some())
+    }
+
+    /// Does the open notification show the reply band (the field, or
+    /// "sent" after an answer)?
+    fn reply_band(&self, serial: u64) -> bool {
+        self.sent.is_some_and(|(s, _)| s == serial)
+            || self.entries.iter().any(|e| e.serial == serial && e.active && e.note.reply.is_some())
+    }
+
+    /// Typing while a notification that takes replies is open: text,
+    /// BackSpace, Ctrl+BackSpace, Ctrl+U; Return sends. Returns `None`
+    /// when there is no field to type into.
+    pub fn reply_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, now: Time) -> Option<Action> {
+        self.replyable()?;
+        match key {
+            "Return" => return Some(self.send_reply(now)),
+            "BackSpace" if ctrl => {
+                let trimmed = self.reply.trim_end().len();
+                let cut = self.reply[..trimmed].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+                self.reply.truncate(cut);
+            }
+            "BackSpace" => { self.reply.pop(); }
+            "u" if ctrl => self.reply.clear(),
+            _ => {
+                let text = text.filter(|t| !ctrl && !t.is_empty() && t.chars().all(|c| !c.is_control()))?;
+                if self.reply.chars().count() < 2000 { self.reply.push_str(text); }
+            }
+        }
+        self.reply_typed = now;
+        Some(Action::None)
+    }
+
+    /// Escape with a reply typed clears the reply first.
+    pub fn clear_reply(&mut self, now: Time) -> bool {
+        if self.reply.is_empty() || self.replyable().is_none() { return false; }
+        self.reply.clear();
+        self.reply_typed = now;
+        true
+    }
+
+    fn send_reply(&mut self, now: Time) -> Action {
+        let Some(entry) = self.replyable() else { return Action::None };
+        if self.reply.trim().is_empty() { return Action::None; }
+        let (serial, id) = (entry.serial, entry.note.id);
+        self.sent = Some((serial, now));
+        Action::Reply(id, std::mem::take(&mut self.reply))
     }
 
     fn remove(&mut self, index: usize, now: Time) -> Action {
@@ -906,7 +988,8 @@ impl Center {
         menu_style::label(cr, renderer, &format!("{} · {}", entry.note.app, when), tx, line1 + title_h, tw,
             Font::Subhead, menu_style::SECONDARY * alpha);
         let body_top = top + 58.0;
-        let body_h = HEIGHT - menu_style::BUTTON_H - RAIL - 14.0 - body_top + y;
+        let band = if self.reply_band(serial) { REPLY_BAND } else { 0.0 };
+        let body_h = HEIGHT - menu_style::BUTTON_H - RAIL - 14.0 - band - body_top + y;
         menu_style::group(cr, x + RAIL, body_top, WIDTH - 2.0 * RAIL, body_h, 0.0, alpha);
         cr.save().unwrap();
         cr.rectangle(x + RAIL + 14.0, body_top + 10.0, WIDTH - 2.0 * RAIL - 28.0, body_h - 20.0);
@@ -923,6 +1006,9 @@ impl Center {
         cr.move_to(renderer.snap(x + RAIL + 14.0), renderer.snap(body_y - self.detail_scroll));
         pangocairo::functions::show_layout(cr, &text);
         cr.restore().unwrap();
+        if band > 0.0 {
+            self.draw_reply_band(cr, renderer, entry, x, y + REPLY_TOP, alpha, now);
+        }
         let by = y + HEIGHT - RAIL - menu_style::BUTTON_H;
         for (index, (_, text)) in visible_actions(&entry.note).iter().enumerate() {
             let kind = if index == 0 { ButtonKind::Primary } else { ButtonKind::Neutral };
@@ -931,6 +1017,50 @@ impl Center {
         }
         menu_style::button(cr, renderer, "Удалить", (x + WIDTH - 110.0, by, 88.0, menu_style::BUTTON_H),
             ButtonKind::Destructive, self.button_hover[4].value(now), alpha);
+    }
+}
+
+impl Center {
+    /// The reply field; once sent, the answer lifts out of it and a
+    /// green "sent" rises in its place.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_reply_band(&self, cr: &Context, renderer: &Renderer, entry: &Entry, x: f64, y: f64, alpha: f64, now: Time) {
+        let rect = (x + RAIL, y, WIDTH - 2.0 * RAIL, menu_style::REPLY_FIELD_H);
+        let sent = self.sent.filter(|(serial, _)| *serial == entry.serial).map(|(_, at)| now - at);
+        let leave = sent.map_or(0.0, |t| crate::island::smoothstep(t / 0.3));
+        if leave < 1.0 {
+            let placeholder = entry.note.reply.as_deref().unwrap_or("Ответ");
+            let field = |cr: &Context| menu_style::reply_field(cr, renderer, rect, &self.reply, placeholder,
+                self.reply_typed, now, alpha * (1.0 - leave));
+            if leave > 0.0 {
+                cr.save().unwrap();
+                cr.translate(0.0, -8.0 * leave);
+                field(cr);
+                cr.restore().unwrap();
+            } else {
+                field(cr);
+            }
+        }
+        if let Some(t) = sent {
+            let k = crate::island::smoothstep((t - 0.15) / 0.35);
+            let fade = 1.0 - crate::island::smoothstep((t - SENT_HOLD) / 0.4);
+            let a = alpha * k * fade;
+            let h = menu_style::line_height(cr, renderer, Font::Subhead);
+            let cy = y + menu_style::REPLY_FIELD_H / 2.0 + 6.0 * (1.0 - k);
+            let (gx, gy) = (rect.0 + 14.0 + 8.0, cy);
+            cr.new_path();
+            cr.set_line_width(2.0);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            let green = menu_style::GREEN;
+            cr.set_source_rgba(green.0, green.1, green.2, a);
+            cr.move_to(gx - 6.0, gy);
+            cr.line_to(gx - 2.0, gy + 4.0);
+            cr.line_to(gx + 6.0, gy - 5.0);
+            let _ = cr.stroke();
+            menu_style::text(cr, renderer, "Ответ отправлен", gx + 14.0, cy - h / 2.0, rect.2 - 50.0,
+                Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * a);
+        }
     }
 }
 
@@ -976,6 +1106,31 @@ mod tests {
         assert_eq!(center.entries.front().unwrap().note.summary, "updated");
         center.closed(52);
         assert!(!center.entries.front().unwrap().active);
+    }
+
+    #[test]
+    fn a_reply_is_typed_under_the_open_notification_and_sent_once() {
+        let mut center = center();
+        let mut note = crate::notify::fabricate("Telegram", "Alice", "Tonight?");
+        note.id = 7;
+        note.actions = vec![("inline-reply".into(), "Ответить".into())];
+        note.reply = Some("Ответ".into());
+        center.upsert(note, 1.0);
+        center.open(2.0);
+        assert_eq!(center.reply_key("", Some("x"), false, 2.1), None, "no field on the list");
+        center.click(90.0, ROW_TOP + 12.0, 2.2);
+        assert!(center.detail.is_some());
+        assert_eq!(center.reply_key("Return", None, false, 2.3), Some(Action::None), "nothing to send yet");
+        for key in ["О", "к"] { center.reply_key("", Some(key), false, 2.4); }
+        center.reply_key("BackSpace", None, false, 2.5);
+        center.reply_key("", Some("К"), false, 2.5);
+        assert!(center.clear_reply(2.6) && center.reply.is_empty(), "Escape clears the text first");
+        center.reply_key("", Some("Да"), false, 2.7);
+        let (cx, cy) = (WIDTH - RAIL - menu_style::REPLY_SEND_INSET, REPLY_TOP + menu_style::REPLY_FIELD_H / 2.0);
+        assert_eq!(center.click(cx, cy, 2.8), Action::Reply(7, "Да".into()));
+        center.closed(7);
+        assert_eq!(center.reply_key("", Some("x"), false, 2.9), None, "an answered notification takes no more");
+        assert!(!center.clear_reply(3.0));
     }
 
     #[test]

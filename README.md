@@ -247,6 +247,31 @@ widens to fit. Critical notifications get a breathing red rim. A click
 dismisses; notifications wait behind an active Touch ID. A notification
 rises on its own even while the compact island is hidden, then retreats
 without leaving the island visible.
+
+Notifications can be worked with in place:
+
+- **Progress.** A notification with the standard `value` hint (0–100, as
+  sent by downloads and copy jobs) fills the ring around its icon on a
+  spring and shows a progress bar under the message; updates with the same
+  ID move the bar instead of restarting the pill. Its card in the center
+  keeps the bar while the job runs.
+- **Swipe to dismiss.** Two fingers sideways on a touchpad, or a held mouse
+  drag, move the pill or a card in the center with the pointer. Past a third
+  of the width, or thrown quickly, it flies out that way and is closed (the
+  app receives the close signal); otherwise it springs back. A press that
+  does not move is an ordinary click.
+- **Reply.** The server advertises KDE's `inline-reply` capability. For an
+  app that offers it (the `inline-reply` action and an optional
+  `x-kde-reply-placeholder-text` hint), the pill's «Ответить» opens an
+  iMessage-style field under the message: it takes the keyboard (also over a
+  fullscreen window), and the pill stays while you type. `Enter` or the
+  round send button emits `NotificationReplied` and closes the
+  notification, `Escape` cancels. A live notification opened in the center
+  shows the same field above its buttons; typing goes straight into it, the
+  sent text lifts away and «Ответ отправлен» takes its place, and `Escape`
+  clears typed text before it closes the sheet. Apps read the capability
+  when they connect, so restart an already running app (Telegram Desktop)
+  after first installing this version.
 The same temporary reveal applies to a now-playing pill when playback starts
 in fullscreen; it is fully placed on-screen without exposing the compact bar.
 

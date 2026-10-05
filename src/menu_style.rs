@@ -327,6 +327,64 @@ pub fn field(cr: &Context, x: f64, y: f64, w: f64, h: f64, focused: bool, alpha:
     }
 }
 
+/// The message field (iMessage's capsule): the text or a dim
+/// placeholder, a blinking blue caret, and a round send button on the
+/// right that turns blue once there is something to send. `typed` is when
+/// the text last changed (the caret holds still while typing). Long text
+/// scrolls left to keep the caret in view. The send button is a circle of
+/// radius 13 centred `REPLY_SEND_INSET` from the right end.
+#[allow(clippy::too_many_arguments)]
+pub fn reply_field(
+    cr: &Context, renderer: &Renderer, rect: (f64, f64, f64, f64), text: &str, placeholder: &str,
+    typed: f64, now: f64, alpha: f64,
+) {
+    let (x, y, w, h) = rect;
+    rounded(cr, x, y, w, h, h / 2.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * alpha);
+    let _ = cr.fill_preserve();
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.16 * alpha);
+    let _ = cr.stroke();
+    let room = w - 16.0 - 36.0;
+    let ty = y + (h - line_height(cr, renderer, Font::Body)) / 2.0;
+    let (shown, colour) = if text.is_empty() { (placeholder, TERTIARY) } else { (text, PRIMARY) };
+    let layout = renderer.layout(cr, shown, Font::Body);
+    let text_w = if text.is_empty() { 0.0 } else { layout.pixel_extents().1.width() as f64 };
+    cr.save().unwrap();
+    cr.rectangle(x + 12.0, y, room + 4.0, h);
+    cr.clip();
+    let scroll = (text_w - room).max(0.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, colour * alpha);
+    cr.move_to(renderer.snap(x + 14.0 - scroll), renderer.snap(ty));
+    pangocairo::functions::show_layout(cr, &layout);
+    if now - typed < 0.6 || ((now - typed) * 1.6).fract() < 0.55 {
+        cr.rectangle(renderer.snap(x + 14.0 - scroll + text_w + 1.0), y + 9.0, 2.0, h - 18.0);
+        set(cr, BLUE, alpha);
+        let _ = cr.fill();
+    }
+    cr.restore().unwrap();
+    let (cx, cy) = (x + w - REPLY_SEND_INSET, y + h / 2.0);
+    let ready = !text.trim().is_empty();
+    well(cr, cx, cy, if ready { 13.0 } else { 11.7 }, ready.then_some(BLUE), alpha);
+    cr.new_path();
+    cr.set_line_width(2.2);
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_line_join(cairo::LineJoin::Round);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * if ready { 1.0 } else { 0.5 });
+    cr.move_to(cx, cy + 6.0);
+    cr.line_to(cx, cy - 6.0);
+    cr.move_to(cx - 5.0, cy - 1.0);
+    cr.line_to(cx, cy - 6.0);
+    cr.line_to(cx + 5.0, cy - 1.0);
+    let _ = cr.stroke();
+    cr.new_path();
+}
+
+/// The reply field's height and its send button's distance from the
+/// field's right end.
+pub const REPLY_FIELD_H: f64 = 36.0;
+pub const REPLY_SEND_INSET: f64 = 18.0;
+
 /// A chevron: `angle` 0 points right, π/2 down.
 pub fn chevron(cr: &Context, cx: f64, cy: f64, size: f64, angle: f64, alpha: f64) {
     cr.save().unwrap();

@@ -1065,8 +1065,15 @@ impl App {
                     Keysym::BackSpace => "BackSpace",
                     Keysym::Up => "Up",
                     Keysym::Down => "Down",
+                    Keysym::u | Keysym::U if ctrl => "u",
                     _ => "",
                 };
+                if let Some(action) = self.island.center_reply_key(key, event.utf8.as_deref(), ctrl, now) {
+                    self.handle_notification_action(action, now);
+                    self.after_change();
+                    return;
+                }
+                let key = if key == "u" { "" } else { key };
                 if self.island.network_key(key, event.utf8.as_deref(), ctrl, now) { self.after_change(); }
             }
             return;
@@ -2137,6 +2144,7 @@ impl App {
             Action::DismissMany(ids) => {
                 for id in ids { let _ = self.notification_commands.send(Command::Dismiss(id)); }
             }
+            Action::Reply(id, text) => { let _ = self.notification_commands.send(Command::Reply { id, text }); }
             Action::Close => self.island.return_to_quick_menu(now),
             Action::None => {}
         }
