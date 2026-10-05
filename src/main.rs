@@ -33,6 +33,7 @@ mod connections;
 mod control;
 mod player;
 mod quick;
+mod recorder;
 mod notify_kinds;
 mod sway;
 mod tasks;

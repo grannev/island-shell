@@ -46,7 +46,14 @@ pub enum Event {
     /// the applications recording from a microphone now (state for the
     /// privacy dot, never a pill of its own)
     MicInUse { apps: Vec<String> },
+    /// 3-2-1 before a screen recording starts
+    RecordCountdown,
+    /// a screen recording was saved (its first frame, its length)
+    Recording { path: PathBuf, thumb: Option<PathBuf>, seconds: u64 },
 }
+
+/// The countdown before a recording, in seconds.
+pub const RECORD_COUNTDOWN: f64 = 3.0;
 
 impl Event {
     pub fn size(&self) -> (f64, f64) {
@@ -65,6 +72,8 @@ impl Event {
             Event::CalendarOpen => (crate::calendar::WIDTH, 352.0),
             Event::MicMute { .. } => (300.0, PILL_H),
             Event::MicInUse { .. } => (0.0, 0.0),
+            Event::RecordCountdown => (300.0, PILL_H),
+            Event::Recording { .. } => (400.0, 96.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
     }
@@ -81,6 +90,8 @@ impl Event {
             Event::CalendarOpen => f64::INFINITY,
             Event::MicMute { .. } => 1.8,
             Event::MicInUse { .. } => 0.0,
+            Event::RecordCountdown => RECORD_COUNTDOWN,
+            Event::Recording { .. } => 4.5,
             Event::TimerMenu => f64::INFINITY,
             Event::WifiOpen | Event::BluetoothOpen => f64::INFINITY,
         }
@@ -92,7 +103,7 @@ impl Event {
 }
 
 pub fn takes_keyboard(event: &Event) -> bool {
-    matches!(event, Event::TimerMenu | Event::WifiOpen | Event::BluetoothOpen | Event::CalendarOpen)
+    matches!(event, Event::TimerMenu | Event::WifiOpen | Event::BluetoothOpen | Event::CalendarOpen | Event::RecordCountdown)
 }
 
 /// Start the environment readers.  Missing optional tools simply disable
@@ -652,6 +663,59 @@ pub fn draw_pill(
         Event::WifiOpen | Event::BluetoothOpen => {}
         // drawn by the island, which holds the jobs and the calendar
         Event::Tasks | Event::CalendarOpen | Event::MicInUse { .. } => {}
+        Event::RecordCountdown => {
+            // a red ring empties around the digit, which rolls down
+            let t = now - since;
+            let left = (RECORD_COUNTDOWN - t).max(0.0);
+            let (rx, red) = (x0 + 49.0, crate::menu_style::RED);
+            crate::menu_style::well(cr, rx, cy, 22.0, Some(red), enter * 0.18);
+            cr.save().unwrap();
+            cr.set_line_width(3.0);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_source_rgba(red.0, red.1, red.2, enter);
+            cr.new_path();
+            let share = left / RECORD_COUNTDOWN;
+            cr.arc(rx, cy, 20.5, -std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * share);
+            let _ = cr.stroke();
+            cr.restore().unwrap();
+            let digit = format!("{}", left.ceil().max(1.0) as u32);
+            let h = crate::menu_style::line_height(cr, renderer, Font::Title);
+            crate::motion::text(cr, renderer, &format!("record{since:.4}"), &digit, rx - 20.0, cy - h / 2.0, 40.0, 0.5,
+                Font::Title, (1.0, 1.0, 1.0), enter);
+            draw_two_lines(cr, renderer, "Запись экрана", "Весь экран", x0 + 88.0, cy, enter, red);
+        }
+        Event::Recording { thumb, seconds, path } => {
+            // the first frame, 16:9, pops in like a screenshot's
+            let (w, h) = (112.0, 63.0);
+            let (ix, iy) = (x0 + 18.0, cy - h / 2.0);
+            let pop = 0.75 + 0.25 * smoothstep((now - since) / 0.4);
+            cr.save().unwrap();
+            cr.translate(ix + w / 2.0, cy);
+            cr.scale(pop, pop);
+            cr.translate(-(ix + w / 2.0), -cy);
+            round_rect(cr, ix, iy, w, h, 10.0);
+            cr.clip();
+            let surface = thumb.as_ref().and_then(|t| art.get(&format!("file://{}", t.to_string_lossy()), (w * renderer.scale()).round() as i32));
+            match surface {
+                Some(surface) => {
+                    // cover the frame, keeping the picture's proportions
+                    let k = (w / surface.width() as f64).max(h / surface.height() as f64);
+                    cr.translate(ix + (w - surface.width() as f64 * k) / 2.0, iy + (h - surface.height() as f64 * k) / 2.0);
+                    cr.scale(k, k);
+                    cr.set_source_surface(&surface, 0.0, 0.0).ok();
+                    let _ = cr.paint_with_alpha(enter);
+                }
+                None => {
+                    cr.set_source_rgba(0.18, 0.18, 0.20, enter);
+                    let _ = cr.paint();
+                }
+            }
+            cr.restore().unwrap();
+            let length = format!("{}:{:02}", seconds / 60, seconds % 60);
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            draw_two_lines(cr, renderer, "Запись сохранена", &format!("{length} · {name}"), x0 + 146.0, cy, enter,
+                crate::menu_style::RED);
+        }
         Event::MicMute { muted } => {
             // the symbol bounces as it is struck through or freed
             let s = 1.45 * crate::menu_style::bounce_scale(now - since - 0.05);

@@ -24,7 +24,7 @@ const MODULE_H: f64 = 62.0;
 const SOUND_Y: f64 = DISPLAY_Y + MODULE_H + MODULE_GAP;
 const BOTTOM_Y: f64 = SOUND_Y + MODULE_H + MODULE_GAP;
 const BOTTOM_H: f64 = 70.0;
-const SMALL_W: f64 = (INNER - 3.0 * GAP) / 4.0;
+const SMALL_W: f64 = (INNER - 4.0 * GAP) / 5.0;
 /// the main page without "Now playing"
 pub const HEIGHT: f64 = BOTTOM_Y + BOTTOM_H + RAIL;
 /// the sliders: inset in their module, below its title
@@ -52,6 +52,8 @@ pub struct Status {
     pub dnd: f64,
     /// a countdown's remaining seconds and whether it is running
     pub timer: Option<(f64, bool)>,
+    /// screen recording: None without wf-recorder, else whether one runs
+    pub recording: Option<bool>,
 }
 
 /// The environment as the menu last read it.
@@ -180,6 +182,8 @@ pub enum Action {
     Outputs,
     MicMute,
     Layout,
+    /// start / stop a screen recording
+    Record,
     Lock,
     Sleep,
     Logout,
@@ -201,12 +205,12 @@ pub enum Hit {
 }
 
 /// Keyboard order of the main page.
-pub const ACTIONS: [Action; 11] = [
+pub const ACTIONS: [Action; 12] = [
     Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd,
-    Action::Outputs, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+    Action::Outputs, Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout,
 ];
 const TILES: [Action; 6] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd];
-const SMALL: [Action; 4] = [Action::Layout, Action::Lock, Action::Sleep, Action::Logout];
+const SMALL: [Action; 5] = [Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout];
 
 pub fn height(view: View, controls: &Controls) -> f64 {
     match view {
@@ -475,6 +479,13 @@ fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64
             cr.line_to(3.5, 3.4);
             let _ = cr.stroke();
         }
+        "record" => {
+            // a ring around a dot (screen recording)
+            cr.arc(0.0, 0.0, 7.5, 0.0, tau);
+            let _ = cr.stroke();
+            cr.arc(0.0, 0.0, 4.0, 0.0, tau);
+            let _ = cr.fill();
+        }
         "lock" => {
             menu_style::rounded(cr, -6.0, -1.5, 12.0, 9.5, 2.2);
             let _ = cr.fill();
@@ -667,7 +678,10 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         let sx = x + small(i);
         let sy = y + BOTTOM_Y + rise;
         let h = (frame.hover)(*action).clamp(0.0, 1.0);
-        let armed = *action == Action::Logout && frame.logout_armed;
+        let recording = *action == Action::Record && status.recording == Some(true);
+        let armed = *action == Action::Logout && frame.logout_armed || recording;
+        let missing = *action == Action::Record && status.recording.is_none();
+        let alpha = if missing { alpha * 0.4 } else { alpha };
         let press = menu_style::press_scale((frame.pressed)(*action));
         cr.save().unwrap();
         cr.translate(sx + SMALL_W / 2.0, sy + BOTTOM_H / 2.0);
@@ -677,9 +691,10 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         let (name, label) = match action {
             Action::Layout => ("keyboard", controls.layout.as_deref().map(crate::control::layout_label)
                 .unwrap_or_else(|| "Раскладка".into())),
+            Action::Record => ("record", if recording { "Стоп".into() } else { "Запись".into() }),
             Action::Lock => ("lock", "Блокировка".into()),
             Action::Sleep => ("sleep", "Сон".into()),
-            _ => ("logout", if armed { "Точно?".into() } else { "Выйти".into() }),
+            _ => ("logout", if frame.logout_armed { "Точно?".into() } else { "Выйти".into() }),
         };
         let wy = sy + 25.0;
         let since = (frame.bounced)(*action);
@@ -694,8 +709,8 @@ fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fram
         });
         let colour = if armed { menu_style::RED } else { (1.0, 1.0, 1.0) };
         let lh = menu_style::line_height(cr, renderer, Font::Footnote);
-        crate::motion::text(cr, renderer, &frame.key(&format!("small{i}")), &label, sx + 4.0, sy + 44.0 + (18.0 - lh) / 2.0,
-            SMALL_W - 8.0, 0.5, Font::Footnote, colour, alpha * if armed { 1.0 } else { 0.85 });
+        crate::motion::text(cr, renderer, &frame.key(&format!("small{i}")), &label, sx + 1.0, sy + 44.0 + (18.0 - lh) / 2.0,
+            SMALL_W - 2.0, 0.5, Font::Footnote, colour, alpha * if armed { 1.0 } else { 0.85 });
         cr.restore().unwrap();
     }
 }

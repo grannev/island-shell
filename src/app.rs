@@ -315,6 +315,8 @@ pub struct App {
     /// the Control Center's worker (volume, brightness, outputs, layout,
     /// session) and whether the menu was open at the last change
     controls: std::sync::mpsc::Sender<crate::control::Request>,
+    /// screen recordings report through here
+    recorder_tx: channel::Sender<crate::recorder::Event>,
     quick_was_open: bool,
     /// refreshes the sound page's applications while it is open
     sound_poll: Option<RegistrationToken>,
@@ -362,6 +364,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (network_tx, network_rx) = channel::channel::<crate::network::Message>();
     let (control_tx, control_rx) = channel::channel::<crate::control::Snapshot>();
     let controls = crate::control::spawn(control_tx);
+    let (recorder_tx, recorder_rx) = channel::channel::<crate::recorder::Event>();
 
     let mut island = Island::new(load_config());
     island.update_clock();
@@ -435,6 +438,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_commands,
         notification_dnd,
         controls,
+        recorder_tx,
         quick_was_open: false,
         sound_poll: None,
         task_poll: None,
@@ -505,6 +509,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.island.set_muted(*muted, now);
             }
             app.island.live_activity(event, now);
+            app.after_change();
+        }
+    })?;
+
+    loop_handle.insert_source(recorder_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(event) = event {
+            let now = app.frame_time();
+            app.island.recorder_event(event, now);
             app.after_change();
         }
     })?;
@@ -924,6 +936,14 @@ impl App {
                 self.after_change();
                 return "ok".into();
             }
+            Command::Record => {
+                let reply = match self.island.toggle_recording(now) {
+                    Ok(state) => state.to_string(),
+                    Err(error) => return format!("error: {error}"),
+                };
+                self.after_change();
+                return reply;
+            }
             Command::Task(request) => {
                 let reply = match self.island.task(request, now) {
                     Ok(reply) => reply,
@@ -1170,6 +1190,13 @@ impl App {
             }).ok();
         } else if !sound {
             if let Some(token) = self.sound_poll.take() { self.loop_handle.remove(token); }
+        }
+        // the screen recorder starts after 3-2-1 and stops on request
+        if self.island.take_record_start() {
+            crate::recorder::start(self.bound_output_name(), self.recorder_tx.clone());
+        }
+        if let Some(pid) = self.island.take_record_stop() {
+            crate::recorder::stop(pid);
         }
         // a job whose owner process is gone ends as interrupted
         let owned = !self.island.task_owners().is_empty();
@@ -1965,6 +1992,10 @@ impl PointerHandler for App {
                         changed = true;
                         continue;
                     }
+                    if button == BTN_LEFT && self.island.click_record_at(event.position.0, event.position.1, now) {
+                        changed = true;
+                        continue;
+                    }
                     if button == BTN_LEFT && self.island.click_tasks_at(event.position.0, event.position.1, now) {
                         changed = true;
                         continue;
@@ -2117,6 +2148,11 @@ impl App {
             self.island.close_quick_menu(now);
         }
         match action {
+            Action::Record => {
+                // 3-2-1 needs the pill, so the menu goes first
+                self.island.close_quick_menu(now);
+                let _ = self.island.toggle_recording(now);
+            }
             Action::MediaPrevious | Action::MediaPlayPause | Action::MediaNext => {
                 let control = match action {
                     Action::MediaPrevious => crate::player::Control::Previous,

@@ -44,6 +44,17 @@ preview the activities without changing hardware state:
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
 
+**Screen recording.** «Запись» in the Control Center's bottom row (or
+`island-shell record`) counts down 3-2-1 in a pill: a red ring empties and the
+digit rolls down. `Escape` cancels. Once the pill has folded away,
+`wf-recorder` records the island's output. A red dot and the recording's
+length sit beside the clock; a click on them (or «Стоп», or `island-shell
+record` again) stops it. The recorder gets SIGINT so the file is finished
+properly. The video goes to `~/Videos/Screencasts/<date>.mp4`; its first
+frame (made with `ffmpeg`) flies into the island with the length and the file
+name. `wf-recorder` needs `sudo sh scripts/03-install-screen-recorder.sh`;
+until then the button is dimmed.
+
 **Microphone.** While any application records from a microphone, an orange
 privacy dot sits at the right end of the compact island. It swells in and
 shrinks away and stays for as long as the recording runs, as in iOS. Speaker
@@ -448,6 +459,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)
+    island-shell record                         # 3-2-1, record the screen; again stops
     island-shell run [--title T] -- <command>   # a command as a live job
     island-shell progress <title> <n>%          # a job by its percentage
     island-shell task start|set|done|fail|cancel <id> … | task list
@@ -524,6 +536,7 @@ while the compact island remains hidden.
     src/calendar.rs the month sheet: dates, grid, selection, month motion
     src/calc.rs     the launcher's answers: arithmetic, units, currencies
     src/clipboard.rs  wl-copy and the cliphist history for "clip:"
+    src/recorder.rs wf-recorder: start, stop (SIGINT), the first frame
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
     shell/          island.bash: long shell commands as live activities

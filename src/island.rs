@@ -398,6 +398,21 @@ struct Reply {
     typed: Time,
 }
 
+/// A screen recording's course.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Recording {
+    /// 3-2-1 in the pill (since)
+    Countdown(Time),
+    /// the pill folds away before capture starts (start at)
+    Starting(Time),
+    /// asked the recorder to start
+    Launching,
+    /// recording since, as this process
+    Running(Time, u32),
+    /// asked it to stop (it finishes the file)
+    Stopping(Time),
+}
+
 /// What a key did to a reply being typed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReplyKey {
@@ -551,6 +566,17 @@ pub struct Island {
     clock_rect: Option<Rect>,
     /// who records from a microphone now: an orange dot at the line's end
     mic_users: Vec<String>,
+    /// screen recording: its state, whether wf-recorder exists, the red
+    /// chip beside the clock and its hit target, and requests for the app
+    recording: Option<Recording>,
+    pub recorder: bool,
+    record_chip: Quintic,
+    record_w: f64,
+    record_rect: Option<Rect>,
+    record_start: bool,
+    record_stop: Option<u32>,
+    /// when the last recording ran, for its length
+    record_last: Option<Time>,
     mic_dot: Spring,
     quick_open: bool,
     quick_rect: Option<Rect>,
@@ -751,6 +777,14 @@ impl Island {
             calendar_rect: None,
             clock_rect: None,
             mic_users: Vec::new(),
+            recording: None,
+            recorder: crate::recorder::available(),
+            record_chip: Quintic::at_rest(0.0, CHIP_DUR),
+            record_w: 0.0,
+            record_rect: None,
+            record_start: false,
+            record_stop: None,
+            record_last: None,
             // under-damped: the dot swells a hair past full, then settles
             mic_dot: Spring::new(0.0, 0.32, 0.72),
             quick_open: false,
@@ -853,6 +887,7 @@ impl Island {
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
             || self.tasks_chip.is_moving(now)
+            || self.record_chip.is_moving(now)
             || self.mic_dot.is_moving(now)
             || self.calendar.as_ref().is_some_and(|c| c.is_animating(now)) && self.calendar_shown()
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
@@ -991,6 +1026,9 @@ impl Island {
             }
         }
         self.timer_chip.set(if timer { 1.0 } else { 0.0 }, now);
+        let rec = matches!(self.recording, Some(Recording::Running(..) | Recording::Stopping(_)))
+            && !self.hidden.any() && !self.dodged && self.launcher.is_none();
+        self.record_chip.set(if rec { 1.0 } else { 0.0 }, now);
         let jobs = !self.tasks.is_empty() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         self.tasks_chip.set(if jobs { 1.0 } else { 0.0 }, now);
         let editor_panel = self.want_editor_panel(now);
@@ -1084,6 +1122,25 @@ impl Island {
         }
         if self.tasks.advance(now) {
             changed = true;
+        }
+        match self.recording {
+            // Escape (or anything taking the pill) during 3-2-1 cancels it
+            Some(Recording::Countdown(_)) if !self.activity.as_ref().is_some_and(|a| a.event == activity::Event::RecordCountdown) => {
+                self.recording = None;
+                changed = true;
+            }
+            Some(Recording::Countdown(since)) if now >= since + activity::RECORD_COUNTDOWN => {
+                self.activity_retiring = self.activity.take();
+                // capture once the pill has folded away
+                self.recording = Some(Recording::Starting(now + 0.45));
+                changed = true;
+            }
+            Some(Recording::Starting(at)) if now >= at => {
+                self.recording = Some(Recording::Launching);
+                self.record_start = true;
+                changed = true;
+            }
+            _ => {}
         }
         // the jobs' pill has nothing left to show
         if self.tasks.is_empty() && self.activity.as_ref().is_some_and(|a| a.event == activity::Event::Tasks) {
@@ -1196,6 +1253,13 @@ impl Island {
         }
         if let Some(at) = self.tasks.next_change(now) {
             consider(at);
+        }
+        match self.recording {
+            Some(Recording::Countdown(since)) => consider(since + activity::RECORD_COUNTDOWN),
+            Some(Recording::Starting(at)) => consider(at),
+            // the time beside the dot ticks each second
+            Some(Recording::Running(since, _)) if !self.hidden.any() => consider(now + 1.0 - (now - since).fract()),
+            _ => {}
         }
         if self.tasks.turning() && (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) {
             consider(now + 1.0 / 30.0);
@@ -1782,6 +1846,82 @@ impl Island {
         Ok("ok".into())
     }
 
+    /// Start a recording (after 3-2-1) or stop the one running.
+    pub fn toggle_recording(&mut self, now: Time) -> Result<&'static str, &'static str> {
+        match self.recording {
+            None if !self.recorder => Err("wf-recorder is not installed (sudo sh scripts/03-install-screen-recorder.sh)"),
+            None => {
+                self.recording = Some(Recording::Countdown(now));
+                self.show_activity(activity::Event::RecordCountdown, now);
+                if !self.activity.as_ref().is_some_and(|a| a.event == activity::Event::RecordCountdown) {
+                    self.recording = None;
+                    return Err("busy");
+                }
+                Ok("counting down")
+            }
+            Some(Recording::Countdown(_) | Recording::Starting(_)) => {
+                if self.activity.as_ref().is_some_and(|a| a.event == activity::Event::RecordCountdown) {
+                    self.activity_retiring = self.activity.take();
+                }
+                self.recording = None;
+                self.sync(now);
+                Ok("cancelled")
+            }
+            Some(Recording::Running(_, pid)) => {
+                self.record_stop = Some(pid);
+                self.recording = Some(Recording::Stopping(now));
+                self.sync(now);
+                Ok("stopping")
+            }
+            Some(Recording::Launching | Recording::Stopping(_)) => Ok("busy"),
+        }
+    }
+
+    fn recording_seconds(&self, now: Time) -> Option<u64> {
+        match self.recording {
+            Some(Recording::Running(since, _)) => Some((now - since).max(0.0) as u64),
+            Some(Recording::Stopping(at)) => self.record_last.map(|since| (at - since).max(0.0) as u64),
+            _ => None,
+        }
+    }
+
+    /// The app starts the recorder when 3-2-1 is over.
+    pub fn take_record_start(&mut self) -> bool {
+        std::mem::take(&mut self.record_start)
+    }
+
+    /// The app stops the recorder (SIGINT to this process).
+    pub fn take_record_stop(&mut self) -> Option<u32> {
+        self.record_stop.take()
+    }
+
+    /// The recorder reported.
+    pub fn recorder_event(&mut self, event: crate::recorder::Event, now: Time) {
+        match event {
+            crate::recorder::Event::Started { pid } => {
+                self.recording = Some(Recording::Running(now, pid));
+                self.record_last = Some(now);
+            }
+            crate::recorder::Event::Finished { path, thumb, .. } => {
+                let seconds = self.record_last.map_or(0, |since| (now - since).max(0.0) as u64);
+                self.recording = None;
+                self.record_last = None;
+                if let Some(path) = path {
+                    self.activity_art.clear();
+                    self.live_activity(activity::Event::Recording { path, thumb, seconds }, now);
+                }
+            }
+        }
+        self.sync(now);
+    }
+
+    /// A click on the red dot stops the recording.
+    pub fn click_record_at(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.record_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) { return false; }
+        let _ = self.toggle_recording(now);
+        true
+    }
+
     /// A job request from the control socket.
     pub fn task(&mut self, request: tasks::Request, now: Time) -> Result<String, String> {
         let outcome = self.tasks.apply(request, now)?;
@@ -2216,6 +2356,14 @@ impl Island {
             self.tasks_w = self.tasks.chip_width(cr, renderer, now);
         }
         let tasks_len = tasks_k * (self.tasks_w + 10.0);
+        let record_k = self.record_chip.state(now).x;
+        let record_time = self.recording_seconds(now).map(|s| format!("{}:{:02}", s / 60, s % 60));
+        if let Some(text) = &record_time {
+            let reserved: String = text.chars().map(|c| if c.is_ascii_digit() { '8' } else { c }).collect();
+            self.record_w = 16.0 + renderer.layout(cr, &reserved, Font::Small).pixel_extents().1.width() as f64;
+        }
+        let record_len = record_k * (self.record_w + 10.0);
+        self.record_rect = None;
         self.tasks_rect = None;
         self.tasks_pill_rect = None;
         self.calendar_rect = None;
@@ -2233,7 +2381,7 @@ impl Island {
         let dnd_len = if self.dnd { 21.0 } else { 0.0 };
         let mic_k = self.mic_dot.value(now).clamp(0.0, 1.2);
         let mic_len = mic_k.min(1.0) * 16.0;
-        let line_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + mic_len + 2.0 * pad;
+        let line_w = chip_len + clock_w + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
@@ -2350,7 +2498,7 @@ impl Island {
         let pill_alpha = pill_alpha_of(q);
         let sheet_k = self.quick_retiring_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + mic_len;
+            let content_w = chip_len + clock_w + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -2405,6 +2553,31 @@ impl Island {
                 self.tasks.draw_chip(cr, renderer, after_clock + 10.0, dy + line_h / 2.0, line_alpha * tasks_k, now);
                 cr.restore().unwrap();
                 after_clock += tasks_len;
+            }
+            if record_len > 0.5 {
+                if record_k > 0.95 && line_alpha > 0.95 && !self.pill_open() {
+                    self.record_rect = Some(Rect { x: after_clock + 4.0, y: dy, w: self.record_w + 10.0, h: line_h });
+                }
+                cr.save().unwrap();
+                cr.rectangle(after_clock, dy, record_len, line_h);
+                cr.clip();
+                // the red dot, and the recording's length beside it
+                let (mx, my) = (after_clock + 15.0, dy + line_h / 2.0);
+                let red = crate::menu_style::RED;
+                let stopping = matches!(self.recording, Some(Recording::Stopping(_)));
+                cr.new_path();
+                cr.arc(mx, my, 5.0, 0.0, std::f64::consts::TAU);
+                cr.set_source_rgba(red.0, red.1, red.2, line_alpha * record_k * if stopping { 0.5 } else { 1.0 });
+                let _ = cr.fill();
+                if let Some(text) = &record_time {
+                    let layout = renderer.layout(cr, text, Font::Small);
+                    let (_, ext) = layout.pixel_extents();
+                    crate::motion::text(cr, renderer, "record-time", text, mx + 11.0 - ext.x() as f64,
+                        my - ext.height() as f64 / 2.0 - ext.y() as f64, ext.width() as f64 + 30.0, 0.0, Font::Small,
+                        red, line_alpha * record_k);
+                }
+                cr.restore().unwrap();
+                after_clock += record_len;
             }
             if reveal > 0.0 {
                 // the bars grow out of the clock's right edge
@@ -2962,6 +3135,7 @@ impl Island {
             unread: self.center.unread(),
             dnd: self.dnd_glow.value(now),
             timer: self.timer.as_ref().map(|t| (t.remaining(now), t.running)),
+            recording: self.recorder.then_some(self.recording.is_some()),
         }
     }
 
@@ -4197,6 +4371,11 @@ mod tests {
         island.quick_hover = Some(quick::Action::Sleep);
         island.sync(12.0);
         gallery_shot_after("02b-quick-menu-armed", &mut island, 12.0, 0.6);
+        island.close_quick_menu(13.0);
+        island.recorder = true;
+        island.recorder_event(crate::recorder::Event::Started { pid: 1 }, 13.0);
+        island.open_quick_menu(14.0);
+        gallery_shot("02f-quick-menu-recording", &mut island, 14.0);
         island.quick_show(quick::View::Sound, 13.0);
         for _ in 0..100 {
             island.drain_assets(13.0, 1.5);
@@ -4225,6 +4404,19 @@ mod tests {
         let mut island = gallery_island();
         island.timer_command("25m", 10.0).unwrap();
         gallery_shot("05-timer-compact", &mut island, 10.0);
+
+        {
+            let mut island = gallery_island();
+            island.recorder = true;
+            island.toggle_recording(10.0).unwrap();
+            gallery_shot_after("05l-record-countdown", &mut island, 10.0, 1.2);
+            let mut island = gallery_island();
+            island.recorder_event(crate::recorder::Event::Started { pid: 1 }, 8.0);
+            gallery_shot("05m-recording", &mut island, 10.0);
+            island.recorder_event(crate::recorder::Event::Finished {
+                path: Some("/tmp/2026-10-05_13-40-00.mp4".into()), thumb: None }, 52.0);
+            gallery_shot("05n-recording-saved", &mut island, 52.0);
+        }
 
         {
             let mut island = gallery_island();

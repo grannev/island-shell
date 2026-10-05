@@ -50,6 +50,8 @@ pub enum Command {
     Timer(String),
     /// `task …` / `progress …`: a job shown as a live activity
     Task(crate::tasks::Request),
+    /// start (after 3-2-1) or stop a screen recording
+    Record,
     Quit,
 }
 
@@ -119,6 +121,7 @@ impl Command {
             ["timer", "start", duration] => Command::Timer(duration.to_string()),
             ["wifi"] => Command::Activity(crate::activity::Event::WifiOpen),
             ["calendar"] => Command::Activity(crate::activity::Event::CalendarOpen),
+            ["record"] => Command::Record,
             ["mic", "muted"] => Command::Activity(crate::activity::Event::MicMute { muted: true }),
             ["mic", "on"] => Command::Activity(crate::activity::Event::MicMute { muted: false }),
             ["bluetooth"] => Command::Activity(crate::activity::Event::BluetoothOpen),
@@ -131,7 +134,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",

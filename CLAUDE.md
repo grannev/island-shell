@@ -121,6 +121,8 @@ beside the clock and an unfolding pill; a job ends as interrupted when its
 owner process exits (checked once a second, outside painting).
 An orange dot shows while an application records from a microphone (sink
 monitors such as cava excluded), and mic mute changes get a short pill.
+Screen recording (`src/recorder.rs`, wf-recorder) counts down 3-2-1, shows a
+red dot with its length beside the clock and flies the first frame in when done.
 Environment readers live in `src/activity.rs`; a grim wrapper is installed
 as `~/.local/bin/island-screenshot`.
 The timer opens from the island's shortcut menu; a running
