@@ -18,6 +18,7 @@ use crate::notice_center;
 use crate::nvim::{self, Editor};
 use crate::player;
 use crate::quick;
+use crate::tasks;
 use crate::touchid;
 
 /// Height of the black box, logical px.
@@ -537,6 +538,12 @@ pub struct Island {
     timer_button_hover: [Spring; 7],
     timer_button_enabled: [Spring; 7],
     timer_last: Option<Countdown>,
+    /// jobs from `island-shell task|progress|run`: a ring beside the clock
+    pub tasks: tasks::Tasks,
+    tasks_chip: Quintic,
+    tasks_w: f64,
+    tasks_rect: Option<Rect>,
+    tasks_pill_rect: Option<Rect>,
     quick_open: bool,
     quick_rect: Option<Rect>,
     quick_hover: Option<quick::Action>,
@@ -726,6 +733,11 @@ impl Island {
             timer_button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.25, 1.0)),
             timer_button_enabled: std::array::from_fn(|i| Spring::new(if i == 4 || i == 5 { 0.0 } else { 1.0 }, 0.25, 1.0)),
             timer_last: None,
+            tasks: tasks::Tasks::default(),
+            tasks_chip: Quintic::at_rest(0.0, CHIP_DUR),
+            tasks_w: 0.0,
+            tasks_rect: None,
+            tasks_pill_rect: None,
             quick_open: false,
             quick_rect: None,
             quick_hover: None,
@@ -824,6 +836,8 @@ impl Island {
             || self.center.is_animating(now)
             || self.network_panel.as_ref().is_some_and(|p| p.is_animating(now))
             || self.timer_chip.is_moving(now)
+            || self.tasks_chip.is_moving(now)
+            || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
             || self.clock_w.as_ref().is_some_and(|s| s.is_moving(now))
@@ -948,6 +962,8 @@ impl Island {
             }
         }
         self.timer_chip.set(if timer { 1.0 } else { 0.0 }, now);
+        let jobs = !self.tasks.is_empty() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
+        self.tasks_chip.set(if jobs { 1.0 } else { 0.0 }, now);
         let editor_panel = self.want_editor_panel(now);
         if editor_panel {
             self.editor_command = self.nvim.as_ref().and_then(|e| e.cmdline.clone());
@@ -1036,6 +1052,14 @@ impl Island {
             // the mark starts drawing once the ring has (nearly) formed
             Some(Auth::Ok(since) | Auth::Fail(since)) if now - since >= MARK_DELAY => self.mark.set(1.0, now),
             _ => {}
+        }
+        if self.tasks.advance(now) {
+            changed = true;
+        }
+        // the jobs' pill has nothing left to show
+        if self.tasks.is_empty() && self.activity.as_ref().is_some_and(|a| a.event == activity::Event::Tasks) {
+            self.activity_retiring = self.activity.take();
+            changed = true;
         }
         if self.activity.as_ref().is_some_and(|a| now - a.updated_at >= a.event.hold()) {
             self.activity_retiring = self.activity.take();
@@ -1139,6 +1163,12 @@ impl Island {
         }
         if let Some(l) = &self.launcher {
             consider(l.next_caret(now));
+        }
+        if let Some(at) = self.tasks.next_change(now) {
+            consider(at);
+        }
+        if self.tasks.turning() && (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) {
+            consider(now + 1.0 / 30.0);
         }
         if let Some(since) = self.toast {
             consider(since + self.config.toast_hold);
@@ -1703,6 +1733,72 @@ impl Island {
         Ok("ok".into())
     }
 
+    /// A job request from the control socket.
+    pub fn task(&mut self, request: tasks::Request, now: Time) -> Result<String, String> {
+        let outcome = self.tasks.apply(request, now)?;
+        let reply = match outcome {
+            tasks::Outcome::Listed(text) => return Ok(text),
+            tasks::Outcome::Ended { announce: true } => {
+                self.show_tasks(now);
+                "ok".into()
+            }
+            _ => "ok".into(),
+        };
+        self.sync(now);
+        Ok(reply)
+    }
+
+    /// The running jobs' owner processes (to notice one that is gone).
+    pub fn task_owners(&self) -> Vec<(String, u32)> {
+        self.tasks.owners()
+    }
+
+    /// A job's owner exited without ending it.
+    pub fn task_orphaned(&mut self, id: &str, now: Time) {
+        if let Some(tasks::Outcome::Ended { announce }) = self.tasks.orphaned(id, now) {
+            if announce { self.show_tasks(now); }
+            self.sync(now);
+        }
+    }
+
+    fn tasks_pill_shown(&self) -> bool {
+        self.visible_activity().is_some_and(|a| a.event == activity::Event::Tasks)
+    }
+
+    /// Unfold the jobs (or keep them unfolded a while longer).
+    fn show_tasks(&mut self, now: Time) {
+        if let Some(current) = self.activity.as_mut().filter(|a| a.event == activity::Event::Tasks) {
+            current.updated_at = now;
+            return;
+        }
+        self.live_activity(activity::Event::Tasks, now);
+    }
+
+    /// A click on the jobs' ring unfolds them; a click on the unfolded
+    /// pill folds it back.
+    pub fn click_tasks_at(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let inside = |r: Option<Rect>| r.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        if inside(self.tasks_pill_rect) && self.activity.as_ref().is_some_and(|a| a.event == activity::Event::Tasks) {
+            self.activity_retiring = self.activity.take();
+            self.sync(now);
+            return true;
+        }
+        if !inside(self.tasks_rect) { return false; }
+        self.show_tasks(now);
+        self.sync(now);
+        true
+    }
+
+    /// The pointer resting on the unfolded jobs keeps them open.
+    pub fn hold_tasks_hover(&mut self, px: f64, py: f64, now: Time) {
+        let Some(r) = self.tasks_pill_rect else { return };
+        if px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h {
+            if let Some(current) = self.activity.as_mut().filter(|a| a.event == activity::Event::Tasks) {
+                current.updated_at = now;
+            }
+        }
+    }
+
     /// A left click on the compact timer pauses or resumes it.
     pub fn toggle_timer(&mut self, now: Time) -> bool {
         let Some(timer) = self.timer.as_mut() else { return false };
@@ -1996,6 +2092,13 @@ impl Island {
             self.timer_w = activity::timer_width(cr, renderer, timer.remaining(now));
         }
         let timer_len = timer_k * (self.timer_w + 10.0);
+        let tasks_k = self.tasks_chip.state(now).x;
+        if !self.tasks.is_empty() {
+            self.tasks_w = self.tasks.chip_width(cr, renderer, now);
+        }
+        let tasks_len = tasks_k * (self.tasks_w + 10.0);
+        self.tasks_rect = None;
+        self.tasks_pill_rect = None;
         self.timer_rect = None;
         self.timer_menu_rect = None;
         self.network_menu_rect = None;
@@ -2007,13 +2110,15 @@ impl Island {
         self.editor_chip_rect = None;
         let unread_len = if self.center.unread() > 0 { 18.0 } else { 0.0 };
         let dnd_len = if self.dnd { 17.0 } else { 0.0 };
-        let line_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len + 2.0 * pad;
+        let line_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
             .or_else(|| self.quick_open.then_some((quick::WIDTH, quick::height(self.quick_view, &self.controls)))).or_else(|| self.visible_activity().map(|a| {
             if matches!(a.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                 self.network_panel.as_ref().map_or(a.event.size(), |p| (crate::connections::WIDTH, p.height()))
+            } else if a.event == activity::Event::Tasks {
+                self.tasks.pill_size()
             } else { a.event.size() }
         }));
         let notice_size = self.notice.as_ref().map(|n| {
@@ -2120,7 +2225,7 @@ impl Island {
         let pill_alpha = pill_alpha_of(q);
         let sheet_k = self.quick_retiring_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + bars_len + unread_len + dnd_len;
+            let content_w = chip_len + clock_w + timer_len + tasks_len + bars_len + unread_len + dnd_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -2161,6 +2266,17 @@ impl Island {
                 }
                 cr.restore().unwrap();
                 after_clock += timer_len;
+            }
+            if tasks_len > 0.5 {
+                if !self.tasks.is_empty() && line_alpha > 0.95 && tasks_k > 0.95 && !self.pill_open() {
+                    self.tasks_rect = Some(Rect { x: after_clock + 6.0, y: dy, w: self.tasks_w + 8.0, h: line_h });
+                }
+                cr.save().unwrap();
+                cr.rectangle(after_clock, dy, tasks_len, line_h);
+                cr.clip();
+                self.tasks.draw_chip(cr, renderer, after_clock + 10.0, dy + line_h / 2.0, line_alpha * tasks_k, now);
+                cr.restore().unwrap();
+                after_clock += tasks_len;
             }
             if reveal > 0.0 {
                 // the bars grow out of the clock's right edge
@@ -2318,6 +2434,12 @@ impl Island {
                     activity::draw_timer_menu(cr, renderer, mx, dy + climb + enter,
                         self.timer.as_ref().map(|t| (t.remaining(now), t.running)), &std::array::from_fn(|i| self.timer_button_hover[i].value(now).clamp(0.0, 1.0)),
                         &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), content_alpha, activity.since, now);
+                }
+                if activity.event == activity::Event::Tasks {
+                    if content_alpha > 0.9 {
+                        self.tasks_pill_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: bh });
+                    }
+                    self.tasks.draw_pill(cr, renderer, x0, dy + climb + enter, x1 - x0, content_alpha, activity.since, now);
                 }
                 if matches!(activity.event, activity::Event::WifiOpen | activity::Event::BluetoothOpen) {
                     let (w, _) = activity.event.size();
@@ -3923,6 +4045,27 @@ mod tests {
         let mut island = gallery_island();
         island.timer_command("25m", 10.0).unwrap();
         gallery_shot("05-timer-compact", &mut island, 10.0);
+
+        {
+            use crate::tasks::{Op, Request};
+            let req = |id: &str, op| Request { id: id.into(), op, owner: None };
+            let mut island = gallery_island();
+            island.task(req("build", Op::Start { title: "cargo build".into() }), 4.0).unwrap();
+            gallery_shot_after("05b-task-running", &mut island, 10.0, 1.0);
+            island.task(req("copy", Op::Start { title: "Копирование фото".into() }), 10.0).unwrap();
+            island.task(req("copy", Op::Set { progress: Some(0.4), detail: Some("412 из 1030 файлов".into()) }), 10.0).unwrap();
+            gallery_shot_after("05c-task-progress", &mut island, 10.0, 1.0);
+            island.task(req("backup", Op::Start { title: "Резервная копия".into() }), 11.0).unwrap();
+            island.task(req("backup", Op::Fail { detail: Some("диск отключён".into()) }), 11.5).unwrap();
+            island.click_tasks_at(-1.0, -1.0, 11.5);
+            island.show_tasks(12.0);
+            gallery_shot_after("05d-task-pill", &mut island, 12.0, 1.0);
+            island.task(req("build", Op::Done { detail: None }), 20.0).unwrap();
+            let mut done = gallery_island();
+            done.task(req("build", Op::Start { title: "cargo build".into() }), 1.0).unwrap();
+            done.task(req("build", Op::Done { detail: None }), 1.5).unwrap();
+            gallery_shot_after("05e-task-done", &mut done, 1.5, 1.0);
+        }
 
         let wifi = || vec![
             Device { connected: true, ..device("home", "Home Wi-Fi", true, "WPA2", 82, "") },

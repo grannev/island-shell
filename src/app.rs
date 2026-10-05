@@ -316,6 +316,7 @@ pub struct App {
     quick_was_open: bool,
     /// refreshes the sound page's applications while it is open
     sound_poll: Option<RegistrationToken>,
+    task_poll: Option<RegistrationToken>,
     pub exit: bool,
 }
 
@@ -434,6 +435,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         controls,
         quick_was_open: false,
         sound_poll: None,
+        task_poll: None,
         exit: false,
     };
 
@@ -634,6 +636,8 @@ fn read_muted() -> bool {
 
 /// How often the open sound page re-reads the playing applications.
 const SOUND_POLL: Duration = Duration::from_millis(1000);
+/// how often running jobs' owners are checked
+const TASK_POLL: Duration = Duration::from_millis(1000);
 
 /// Logical pixels a notch of the wheel scrolls a list: about one row, as
 /// GTK and browsers do for a list this size.
@@ -917,6 +921,14 @@ impl App {
                 self.after_change();
                 return "ok".into();
             }
+            Command::Task(request) => {
+                let reply = match self.island.task(request, now) {
+                    Ok(reply) => reply,
+                    Err(error) => return format!("error: {error}"),
+                };
+                self.after_change();
+                return reply;
+            }
             Command::Timer(command) => {
                 let reply = match self.island.timer_command(&command, now) {
                     Ok(reply) => reply,
@@ -1143,6 +1155,24 @@ impl App {
             }).ok();
         } else if !sound {
             if let Some(token) = self.sound_poll.take() { self.loop_handle.remove(token); }
+        }
+        // a job whose owner process is gone ends as interrupted
+        let owned = !self.island.task_owners().is_empty();
+        if owned && self.task_poll.is_none() {
+            self.task_poll = self.loop_handle.insert_source(Timer::from_duration(TASK_POLL), |_, _, app: &mut App| {
+                let now = app.clock.predict(false);
+                let gone: Vec<String> = app.island.task_owners().into_iter()
+                    .filter(|(_, pid)| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+                    .map(|(id, _)| id).collect();
+                for id in &gone { app.island.task_orphaned(id, now); }
+                if !gone.is_empty() { app.after_change(); }
+                if app.island.task_owners().is_empty() {
+                    app.task_poll = None;
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(TASK_POLL)
+                }
+            }).ok();
         }
         // whoever closed the launcher (a key, Touch ID, the compositor),
         // the keyboard goes back when it is gone
@@ -1767,6 +1797,7 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_at = event.position;
+                    self.island.hold_tasks_hover(event.position.0, event.position.1, self.clock.predict(false));
                     if self.island.set_timer_hover(event.position.0, event.position.1) {
                         changed = true;
                     }
@@ -1903,6 +1934,10 @@ impl PointerHandler for App {
                         continue;
                     }
                     if button == BTN_LEFT && self.island.click_timer_at(event.position.0, event.position.1, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if button == BTN_LEFT && self.island.click_tasks_at(event.position.0, event.position.1, now) {
                         changed = true;
                         continue;
                     }

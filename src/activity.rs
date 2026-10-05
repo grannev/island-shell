@@ -37,6 +37,8 @@ pub enum Event {
     TimerMenu,
     WifiOpen,
     BluetoothOpen,
+    /// the jobs from `island-shell task|progress|run`, unfolded
+    Tasks,
 }
 
 impl Event {
@@ -50,6 +52,8 @@ impl Event {
             Event::Screenshot { .. } => (390.0, 106.0),
             Event::TimerDone => (270.0, PILL_H),
             Event::TimerMenu => (TIMER_MENU_W, 176.0),
+            // sized by the island from its jobs (tasks::Tasks::pill_size)
+            Event::Tasks => (crate::tasks::PILL_W, PILL_H),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
         }
     }
@@ -62,6 +66,7 @@ impl Event {
             Event::Bluetooth { .. } | Event::Wifi { .. } => 3.2,
             Event::Screenshot { .. } => 4.0,
             Event::TimerDone => 4.0,
+            Event::Tasks => 4.5,
             Event::TimerMenu => f64::INFINITY,
             Event::WifiOpen | Event::BluetoothOpen => f64::INFINITY,
         }
@@ -572,6 +577,8 @@ pub fn draw_pill(
         }
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}
+        // drawn by the island, which holds the jobs
+        Event::Tasks => {}
     }
 }
 

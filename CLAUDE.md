@@ -114,6 +114,9 @@ repository (~/it/coding/ivim).
 Live activities are native too: volume and brightness sliders, charging
 and low-battery states, Bluetooth and Wi-Fi connection changes, screenshot
 thumbnails, and a compact clickable countdown / Pomodoro beside the clock.
+Jobs from `island-shell task|progress|run` (`src/tasks.rs`) are a ring
+beside the clock and an unfolding pill; a job ends as interrupted when its
+owner process exits (checked once a second, outside painting).
 Environment readers live in `src/activity.rs`; a grim wrapper is installed
 as `~/.local/bin/island-screenshot`.
 The timer opens from the island's shortcut menu; a running

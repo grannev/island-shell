@@ -48,6 +48,8 @@ pub enum Command {
     Activity(crate::activity::Event),
     /// `timer <duration|pause|resume|toggle|cancel|status>`.
     Timer(String),
+    /// `task …` / `progress …`: a job shown as a live activity
+    Task(crate::tasks::Request),
     Quit,
 }
 
@@ -117,6 +119,8 @@ impl Command {
             ["timer", "start", duration] => Command::Timer(duration.to_string()),
             ["wifi"] => Command::Activity(crate::activity::Event::WifiOpen),
             ["bluetooth"] => Command::Activity(crate::activity::Event::BluetoothOpen),
+            ["task", rest @ ..] => Command::Task(crate::tasks::parse(rest, false)?),
+            ["progress", rest @ ..] => Command::Task(crate::tasks::parse(rest, true)?),
             ["quit"] => Command::Quit,
             _ => return None,
         })
@@ -126,6 +130,7 @@ impl Command {
 pub const USAGE: &str = concat!(
     "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
+    "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",
 );
 
@@ -135,13 +140,15 @@ pub fn socket_path() -> PathBuf {
     dir.join(format!("island-shell-{display}.sock"))
 }
 
-/// Client side: send one command, return the daemon's reply line.
+/// Client side: send one command, return the daemon's reply (one line,
+/// or several for a listing; the daemon closes the connection after it).
 pub fn send(cmd: &str) -> io::Result<String> {
+    use std::io::Read;
     let mut stream = UnixStream::connect(socket_path())?;
     stream.write_all(cmd.as_bytes())?;
     stream.write_all(b"\n")?;
     let mut reply = String::new();
-    BufReader::new(stream).read_line(&mut reply)?;
+    stream.read_to_string(&mut reply)?;
     Ok(reply.trim_end().to_string())
 }
 
@@ -248,5 +255,7 @@ mod tests {
             }))
         );
         assert_eq!(Command::parse("timer start 25m"), Some(Command::Timer("25m".into())));
+        assert!(matches!(Command::parse("progress --pid=9 Сборка 40%"), Some(Command::Task(r)) if r.owner == Some(9)));
+        assert!(Command::parse("task frobnicate x").is_none());
     }
 }

@@ -43,6 +43,33 @@ preview the activities without changing hardware state:
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
 
+**Jobs** from anywhere become live activities. A running job is a small
+ring beside the clock: it fills with the job's percentage, or an arc turns
+beside the time it has been running when the job does not say how far it
+is. When other jobs are running too, a «+N» follows the value. A click on the
+ring unfolds every job into a pill: a ring well, the title, its status line,
+the percentage and a progress bar. Click the pill to fold it again;
+it stays open while the pointer rests on it. A job that ends turns its ring
+into a green tick («Готово») or a red cross («Ошибка»), which stays for four
+seconds. A job that ran for three seconds or more also unfolds the pill
+with its outcome and duration, even over a fullscreen window:
+
+    island-shell run -- cargo build --release   # the command, as a job
+    island-shell run --title "Бэкап" -- rsync -a ~/docs /mnt/backup
+    island-shell progress "Копирование" 40%     # start/update; 100% ends it
+    island-shell task start build "Сборка"      # explicit control by ID
+    island-shell task set build 60% linking     # percentage and/or detail
+    island-shell task done build | task fail build disk full
+    island-shell task cancel build | task list
+
+`run` passes the command's input, output and exit status through untouched.
+A failure shows «код N», or «прервано» when the command was killed by a
+signal; without a running island the command simply runs. Every job belongs to
+the process that started it: the calling shell or script for `task` and
+`progress`, the `run` wrapper itself for `run`. When that process exits without
+ending the job, the job ends as «прервано». Pass `--pid=<pid>` right
+after `task`/`progress` to name another owner; `--pid=0` detaches the job.
+
 Click the ordinary compact island to open the **Control Center**: modules
 for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
 a Display and a Sound module with Control Center sliders (press anywhere
@@ -366,6 +393,9 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
+    island-shell run [--title T] -- <command>   # a command as a live job
+    island-shell progress <title> <n>%          # a job by its percentage
+    island-shell task start|set|done|fail|cancel <id> … | task list
     island-shell status | quit
 
 ### Configuration
@@ -435,6 +465,7 @@ while the compact island remains hidden.
     src/iconload.rs icon-theme lookup and loading
     src/nvim.rs     the Neovim protocol, its state and the calls back into it
     src/editor.rs   the mode chip and the editor panel
+    src/tasks.rs    jobs from task/progress/run: the ring, the pill, owners
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
     systemd/        the user service
