@@ -596,6 +596,7 @@ pub struct Island {
     catalog: crate::apps::Catalog,
     launcher_icons: std::rc::Rc<crate::iconload::Icons>,
     file_search: std::rc::Rc<crate::files::Search>,
+    clip_search: std::rc::Rc<crate::clipboard::Search>,
     /// Neovim (the companion plugin): the editor's state, the chip that
     /// shows it beside the clock, and the panel it opens into
     nvim: Option<Editor>,
@@ -783,6 +784,7 @@ impl Island {
             catalog: crate::apps::Catalog::new(),
             launcher_icons: std::rc::Rc::new(crate::iconload::Icons::new()),
             file_search: std::rc::Rc::new(crate::files::Search::new()),
+            clip_search: std::rc::Rc::new(crate::clipboard::Search::new()),
             nvim: None,
             nvim_seen: 0.0,
             nvim_saved: None,
@@ -1384,7 +1386,8 @@ impl Island {
             self.activity_queued = None;
             self.toast = None;
             self.catalog.refresh();
-            self.launcher = Some(Launcher::new(now, self.catalog.apps.clone(), self.launcher_icons.clone(), self.file_search.clone()));
+            self.launcher = Some(Launcher::new(now, self.catalog.apps.clone(), self.launcher_icons.clone(), self.file_search.clone(),
+                self.clip_search.clone()));
         }
         self.sync(now);
         self.launcher.is_some()
@@ -1417,6 +1420,7 @@ impl Island {
         self.catalog.set_waker(tx.clone());
         self.launcher_icons.set_waker(tx.clone());
         self.file_search.set_waker(tx.clone());
+        self.clip_search.set_waker(tx.clone());
         self.art.set_waker(tx.clone());
         self.activity_art.set_waker(tx);
     }
@@ -1441,6 +1445,11 @@ impl Island {
         for (generation, reply) in self.file_search.drain() {
             if let Some(launcher) = &mut self.launcher {
                 files |= launcher.receive_files(generation, reply, now);
+            }
+        }
+        for (generation, history) in self.clip_search.drain() {
+            if let Some(launcher) = &mut self.launcher {
+                files |= launcher.receive_clips(generation, history, now);
             }
         }
         ((catalog || icons) && (self.launcher.is_some() || self.notice.is_some() || self.center.open)) || art || activity || files
@@ -3737,6 +3746,11 @@ impl Corner {
 /// default format. The process never calls setlocale, so names stay in the
 /// C locale like the old island's clock.
 pub fn strftime(format: &str) -> String {
+    strftime_at(format, -1)
+}
+
+/// `strftime` for the Unix time `at` (now when negative), in local time.
+pub fn strftime_at(format: &str, at: i64) -> String {
     #[repr(C)]
     struct Tm {
         tm_sec: i32, tm_min: i32, tm_hour: i32, tm_mday: i32, tm_mon: i32, tm_year: i32,
@@ -3755,7 +3769,7 @@ pub fn strftime(format: &str) -> String {
     };
     let mut out = [0u8; 256];
     let len = unsafe {
-        time(&mut t);
+        if at < 0 { time(&mut t); } else { t = at; }
         localtime_r(&t, &mut tm);
         strftime(out.as_mut_ptr(), out.len(), format.as_ptr(), &tm)
     };
@@ -4388,6 +4402,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         gallery_shot("15-launcher", &mut island, 10.0);
+        island.launcher.as_mut().unwrap().push("2*(17+5)^2", 12.0);
+        gallery_shot("15b-launcher-calc", &mut island, 12.0);
+        island.launcher.as_mut().unwrap().clear(14.0);
+        island.launcher.as_mut().unwrap().push("5 миль в км", 14.0);
+        gallery_shot("15c-launcher-convert", &mut island, 14.0);
+        island.launcher.as_mut().unwrap().clear(16.0);
+        island.launcher.as_mut().unwrap().push("clip:", 16.0);
+        for _ in 0..200 {
+            island.drain_assets(16.0, 1.5);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        gallery_shot("15d-launcher-clipboard", &mut island, 16.0);
 
         let mut island = gallery_island();
         let editor = Editor {

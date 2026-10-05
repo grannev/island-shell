@@ -3,7 +3,9 @@
 //! command it talks to the running one (see `ctl`).
 
 mod anim;
+mod calc;
 mod calendar;
+mod clipboard;
 mod app;
 mod apps;
 mod activity;

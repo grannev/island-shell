@@ -252,6 +252,28 @@ ignore-file exclusions, `node_modules`, `target` and `__pycache__` are skipped;
 symlinked directories are not traversed. Partial results are labelled so the
 query can be narrowed. The best five app matches precede file results, with
 remaining app matches still accessible below them.
+**Answers.** As in Spotlight, a calculation or a conversion becomes the
+launcher's first row (an orange calculator tile), and `Enter` copies the
+number with `wl-copy`. The number uses a dot and no grouping, so it pastes
+into code. Arithmetic supports brackets, `^`/`**`, `!` and `mod`, functions
+such as `sqrt 2`, `sin`, `ln`, `log`, `round`, and the constants `pi` and
+`e`; `2400 + 15%` gives 2760 and `15% от 2400` gives 360. Units convert with
+`в`/`to`/`in`/`->`: length, mass, temperature, data (`GB` decimal, `GiB`
+binary), time, volume, speed and area, in Russian and English names
+(`5 миль в км`, `100 f to c`, `90 км/ч в м/с`). Currencies (`100 usd в rub`,
+`$50 в евро`, any ISO code) use the open.er-api.com rates. They are fetched
+with `curl` on a background thread when the launcher opens, at most every 12
+hours, and cached in `~/.cache/island-shell/rates.json`; the row says the
+date of the rate. A bare number or a word asks nothing; a time such as `12:30`
+is not a division.
+
+**Clipboard history.** `clip:` (or `буфер:`) lists the clipboard's history
+from `cliphist`, newest first; text after the prefix filters it. Images show
+a thumbnail, and `Enter` puts the entry back on the clipboard. `cliphist` needs
+`sudo sh scripts/02-install-clipboard-history.sh`. The sway config feeds it
+with `wl-paste --watch cliphist store` once it is installed. Until then,
+`clip:` says how to install it.
+
 The launcher selection stops at the first and last result. Arrow keys and the
 mouse wheel share a resisted rubber-band pull at the list edges instead of
 wrapping or snapping. `Ctrl+Backspace` deletes the previous word in its
@@ -492,6 +514,8 @@ while the compact island remains hidden.
     src/editor.rs   the mode chip and the editor panel
     src/tasks.rs    jobs from task/progress/run: the ring, the pill, owners
     src/calendar.rs the month sheet: dates, grid, selection, month motion
+    src/calc.rs     the launcher's answers: arithmetic, units, currencies
+    src/clipboard.rs  wl-copy and the cliphist history for "clip:"
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
     systemd/        the user service

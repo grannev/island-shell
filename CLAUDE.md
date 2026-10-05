@@ -166,6 +166,10 @@ folders; ordinary queries combine apps and files. `files.rs` owns cancellable
 search and shell-free, asynchronous opening. Directories use Alacritty;
 text uses Neovim inside Alacritty; PDF uses Evince; office formats use
 LibreOffice; other formats or missing openers fall back to xdg-open.
+Calculations and unit/currency conversions answer first (`src/calc.rs`,
+rates cached by a background `curl`); `clip:` lists the `cliphist` history
+(`src/clipboard.rs`, read on a worker). Copying goes through `wl-copy` in a
+systemd scope.
 MIME probing with `file` runs only on opening the selected file, off the UI
 thread; search itself never probes contents. Query generations and Launcher::drop cancel
 stale work; results arrive through the existing asset wake channel. Never

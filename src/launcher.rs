@@ -59,15 +59,51 @@ struct EdgePull {
 enum Entry {
     Application(App),
     File(crate::files::FileHit),
+    /// a calculation or a conversion (Enter copies it)
+    Answer(crate::calc::Answer),
+    /// a clipboard history entry (Enter puts it back)
+    Clip(crate::clipboard::Clip),
+    /// a row that only informs (cliphist is missing)
+    Hint(String, String),
 }
 
 impl Entry {
     fn id(&self) -> String {
-        match self { Self::Application(a) => a.id.clone(), Self::File(f) => format!("file:{:?}", f.path) }
+        match self {
+            Self::Application(a) => a.id.clone(),
+            Self::File(f) => format!("file:{:?}", f.path),
+            // one answer row, its text updating as you type
+            Self::Answer(_) => "answer".into(),
+            Self::Clip(c) => format!("clip:{}", c.id),
+            Self::Hint(title, _) => format!("hint:{title}"),
+        }
     }
-    fn name(&self) -> &str { match self { Self::Application(a) => &a.name, Self::File(f) => &f.name } }
-    fn subtitle(&self) -> &str { match self { Self::Application(a) => &a.subtitle, Self::File(f) => &f.subtitle } }
-    fn icon(&self) -> Option<&str> { match self { Self::Application(a) => a.icon.as_deref(), Self::File(_) => None } }
+    fn name(&self) -> &str {
+        match self {
+            Self::Application(a) => &a.name,
+            Self::File(f) => &f.name,
+            Self::Answer(a) => &a.shown,
+            Self::Clip(c) => &c.preview,
+            Self::Hint(title, _) => title,
+        }
+    }
+    fn subtitle(&self) -> &str {
+        match self {
+            Self::Application(a) => &a.subtitle,
+            Self::File(f) => &f.subtitle,
+            Self::Answer(a) => &a.detail,
+            Self::Clip(c) if c.image.is_some() => "Буфер обмена · изображение",
+            Self::Clip(_) => "Буфер обмена",
+            Self::Hint(_, detail) => detail,
+        }
+    }
+    fn icon(&self) -> Option<&str> {
+        match self {
+            Self::Application(a) => a.icon.as_deref(),
+            Self::Clip(c) => c.thumb.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// One row on screen: which app it shows, where it is heading and how far
@@ -88,6 +124,9 @@ pub struct Launcher {
     icons: Rc<Icons>,
     file_search: Rc<crate::files::Search>,
     files: Vec<crate::files::FileHit>,
+    clip_search: Rc<crate::clipboard::Search>,
+    clips: Option<crate::clipboard::History>,
+    clip_request: Option<u64>,
     file_request: Option<u64>,
     file_due: Option<Time>,
     file_note: Option<String>,
@@ -106,12 +145,18 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    pub fn new(now: Time, all: Arc<Vec<App>>, icons: Rc<Icons>, file_search: Rc<crate::files::Search>) -> Launcher {
+    pub fn new(now: Time, all: Arc<Vec<App>>, icons: Rc<Icons>, file_search: Rc<crate::files::Search>,
+        clip_search: Rc<crate::clipboard::Search>) -> Launcher {
+        // currencies are ready by the time a conversion is typed
+        crate::calc::refresh_rates();
         let mut l = Launcher {
             all,
             icons,
             file_search,
             files: Vec::new(),
+            clip_search,
+            clips: None,
+            clip_request: None,
             file_request: None,
             file_due: None,
             file_note: None,
@@ -146,7 +191,11 @@ impl Launcher {
         self.file_request = None;
         self.files.clear();
         self.file_note = None;
-        self.file_due = (crate::files::query(&self.query).0.chars().count() >= 2).then_some(now + FILE_DEBOUNCE);
+        // the clipboard's history is read anew for every query (it is quick)
+        let clip = crate::clipboard::query(&self.query).map(str::to_string);
+        self.clip_request = clip.clone().and_then(|q| self.clip_search.request(q));
+        if clip.is_none() { self.clips = None; }
+        self.file_due = (clip.is_none() && crate::files::query(&self.query).0.chars().count() >= 2).then_some(now + FILE_DEBOUNCE);
         self.refresh(now);
     }
 
@@ -163,6 +212,14 @@ impl Launcher {
         self.file_request = None;
         self.files = reply.files;
         self.file_note = reply.note;
+        self.refresh(now);
+        true
+    }
+
+    pub fn receive_clips(&mut self, generation: u64, history: crate::clipboard::History, now: Time) -> bool {
+        if self.clip_request != Some(generation) { return false; }
+        self.clip_request = None;
+        self.clips = Some(history);
         self.refresh(now);
         true
     }
@@ -196,14 +253,32 @@ impl Launcher {
     /// places, rows that go fade out where they are, new ones fade in.
     pub fn refresh(&mut self, now: Time) {
         let (query, files_only) = crate::files::query(&self.query);
-        let mut hits: Vec<Entry> = if files_only { Vec::new() } else {
-            apps::search(&self.all, query, MAX_MATCHES).into_iter().cloned().map(Entry::Application).collect()
+        let hits: Vec<Entry> = if crate::clipboard::query(&self.query).is_some() {
+            match &self.clips {
+                Some(crate::clipboard::History::Entries(clips)) if clips.is_empty() =>
+                    vec![Entry::Hint("Ничего не найдено".into(), "История буфера обмена".into())],
+                Some(crate::clipboard::History::Entries(clips)) => clips.iter().cloned().map(Entry::Clip).collect(),
+                Some(crate::clipboard::History::Missing) => vec![Entry::Hint("История буфера недоступна".into(),
+                    "Нужен cliphist: sudo sh scripts/02-install-clipboard-history.sh".into())],
+                // still reading: keep what is shown
+                None => self.rows.iter().filter(|r| !r.leaving && matches!(r.entry, Entry::Clip(_) | Entry::Hint(..)))
+                    .map(|r| r.entry.clone()).collect(),
+            }
+        } else {
+            let mut hits: Vec<Entry> = if files_only { Vec::new() } else {
+                apps::search(&self.all, query, MAX_MATCHES).into_iter().cloned().map(Entry::Application).collect()
+            };
+            if !self.files.is_empty() {
+                let other_apps = hits.split_off(hits.len().min(5));
+                hits.extend(self.files.iter().cloned().map(Entry::File));
+                hits.extend(other_apps);
+            }
+            // a calculation answers first, as in Spotlight
+            if let Some(answer) = (!files_only).then(|| crate::calc::answer(query)).flatten() {
+                hits.insert(0, Entry::Answer(answer));
+            }
+            hits
         };
-        if !self.files.is_empty() {
-            let other_apps = hits.split_off(hits.len().min(5));
-            hits.extend(self.files.iter().cloned().map(Entry::File));
-            hits.extend(other_apps);
-        }
         let ids: Vec<_> = hits.iter().map(Entry::id).collect();
         let present: std::collections::HashSet<_> = ids.iter().map(String::as_str).collect();
         self.matches = hits.len();
@@ -407,6 +482,9 @@ impl Launcher {
                 match &row.entry {
                     Entry::Application(app) => { apps::launch(app); true }
                     Entry::File(file) => crate::files::open(&file.path),
+                    Entry::Answer(answer) => { crate::clipboard::copy(&answer.copy); true }
+                    Entry::Clip(clip) => { crate::clipboard::restore(clip.id); true }
+                    Entry::Hint(..) => false,
                 }
             }
             None => false,
@@ -458,7 +536,7 @@ impl Launcher {
         // the caret sits ahead of the placeholder, not on top of it
         let placeholder_shift = 10.0;
         let (query, placeholder) = if self.query.is_empty() {
-            ("Приложения и файлы".to_string(), true)
+            ("Приложения, файлы, вычисления".to_string(), true)
         } else {
             (self.query.clone(), false)
         };
@@ -575,6 +653,8 @@ impl Launcher {
             None => match &row.entry {
                 Entry::File(file) => file_icon(cr, file.directory, icon_x, icon_y, ICON * pop, alpha),
                 Entry::Application(app) => monogram(cr, renderer, &app.name, icon_x, icon_y, ICON * pop, alpha),
+                Entry::Answer(_) => calculator_icon(cr, icon_x, icon_y, ICON * pop, alpha),
+                Entry::Clip(_) | Entry::Hint(..) => clipboard_icon(cr, icon_x, icon_y, ICON * pop, alpha),
             },
         }
 
@@ -610,7 +690,8 @@ mod tests {
     use super::*;
 
     fn launcher() -> Launcher {
-        Launcher::new(0.0, Arc::new(Vec::new()), Rc::new(Icons::new()), Rc::new(crate::files::Search::new()))
+        Launcher::new(0.0, Arc::new(Vec::new()), Rc::new(Icons::new()), Rc::new(crate::files::Search::new()),
+            Rc::new(crate::clipboard::Search::new()))
     }
     fn reply(name: &str) -> crate::files::Reply {
         crate::files::Reply { files: vec![crate::files::FileHit {
@@ -765,6 +846,49 @@ fn file_icon(cr: &Context, directory: bool, x: f64, y: f64, size: f64, alpha: f6
 }
 
 /// An app with no icon of its own gets a monogram tile.
+/// Calculator's tile: orange, with an equals sign.
+fn calculator_icon(cr: &Context, x: f64, y: f64, size: f64, alpha: f64) {
+    let (x, y) = (x + (ICON - size) / 2.0, y + (ICON - size) / 2.0);
+    rounded(cr, x, y, size, size, size * 0.25);
+    let o = crate::menu_style::ORANGE;
+    cr.set_source_rgba(o.0, o.1, o.2, alpha);
+    let _ = cr.fill();
+    let s = size / 38.0;
+    let (cx, cy) = (x + size / 2.0, y + size / 2.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    cr.set_line_width(3.0 * s);
+    cr.set_line_cap(cairo::LineCap::Round);
+    cr.move_to(cx - 8.0 * s, cy - 3.5 * s);
+    cr.line_to(cx + 8.0 * s, cy - 3.5 * s);
+    cr.move_to(cx - 8.0 * s, cy + 3.5 * s);
+    cr.line_to(cx + 8.0 * s, cy + 3.5 * s);
+    let _ = cr.stroke();
+    cr.new_path();
+}
+
+/// A clipboard on a grey tile, for history rows without a picture.
+fn clipboard_icon(cr: &Context, x: f64, y: f64, size: f64, alpha: f64) {
+    let (x, y) = (x + (ICON - size) / 2.0, y + (ICON - size) / 2.0);
+    rounded(cr, x, y, size, size, size * 0.25);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha);
+    let _ = cr.fill();
+    let s = size / 38.0;
+    let (cx, cy) = (x + size / 2.0, y + size / 2.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha);
+    cr.set_line_width(2.0 * s);
+    cr.set_line_join(cairo::LineJoin::Round);
+    rounded(cr, cx - 8.0 * s, cy - 9.0 * s, 16.0 * s, 20.0 * s, 3.0 * s);
+    let _ = cr.stroke();
+    rounded(cr, cx - 4.5 * s, cy - 11.5 * s, 9.0 * s, 5.0 * s, 2.0 * s);
+    let _ = cr.fill();
+    for dy in [-1.0, 4.0] {
+        cr.move_to(cx - 4.5 * s, cy + dy * s);
+        cr.line_to(cx + 4.5 * s, cy + dy * s);
+    }
+    let _ = cr.stroke();
+    cr.new_path();
+}
+
 fn monogram(cr: &Context, renderer: &Renderer, name: &str, x: f64, y: f64, size: f64, alpha: f64) {
     let letter: String = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     // a stable colour per name
