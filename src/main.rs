@@ -38,6 +38,7 @@ mod notify_kinds;
 mod sway;
 mod tasks;
 mod touchid;
+mod weather;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

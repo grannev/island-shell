@@ -161,6 +161,9 @@ pub struct Config {
     pub dodge: f64,
     /// Night mode's colour temperature, K.
     pub night_temp: u32,
+    /// Where the calendar's weather is for: auto (the time zone's city),
+    /// a city, "lat,lon", or off.
+    pub weather: String,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -179,14 +182,15 @@ impl Default for Config {
             silent_after: SILENT_AFTER,
             dodge: DODGE,
             night_temp: 4500,
+            weather: "auto".into(),
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 11] = [
+    pub const KEYS: [&'static str; 12] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp",
+        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -224,6 +228,12 @@ impl Config {
                 let kelvin: f64 = value.trim_end_matches(['K', 'k']).parse().map_err(|_| format!("bad value {value:?} for {key}"))?;
                 self.night_temp = kelvin.clamp(1500.0, 6500.0) as u32;
             }
+            "weather" => {
+                let value = value.trim_matches('"');
+                if value.is_empty() { return Err("weather: auto, off, a city or lat,lon".into()); }
+                self.weather = value.into();
+                crate::weather::configure(value);
+            }
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -234,9 +244,9 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
-            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp,
+            hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
         )
     }
 
@@ -717,6 +727,7 @@ pub fn smoothstep(x: f64) -> f64 {
 impl Island {
     pub fn new(config: Config) -> Self {
         let dnd = notice_center::load_dnd();
+        crate::weather::configure(&config.weather);
         Island {
             hide: Quintic::at_rest(0.0, HIDE_DUR),
             dodge: Quintic::at_rest(0.0, DODGE_DUR),
@@ -1496,6 +1507,7 @@ impl Island {
         self.launcher_icons.set_waker(tx.clone());
         self.file_search.set_waker(tx.clone());
         self.clip_search.set_waker(tx.clone());
+        crate::weather::set_waker(tx.clone());
         self.art.set_waker(tx.clone());
         self.activity_art.set_waker(tx);
     }
@@ -1516,7 +1528,8 @@ impl Island {
         let icons = self.launcher_icons.drain();
         let art = self.art.drain();
         let activity = self.activity_art.drain();
-        let mut files = false;
+        // a forecast arrived: the open calendar shows it
+        let mut files = crate::weather::take_fresh() && self.calendar_open();
         for (generation, reply) in self.file_search.drain() {
             if let Some(launcher) = &mut self.launcher {
                 files |= launcher.receive_files(generation, reply, now);
@@ -4459,6 +4472,12 @@ mod tests {
             island.open_calendar(10.0);
             island.calendar = Some(Calendar::at(calendar::Date { year: 2026, month: 10, day: 5 }, 10.0));
             gallery_shot("05f-calendar", &mut island, 10.0);
+            crate::weather::inject(r#"{"current":{"temperature_2m":11.6,"weather_code":2,"is_day":1},
+                "daily":{"time":["2026-10-05","2026-10-06","2026-10-07","2026-10-08","2026-10-09","2026-10-10","2026-10-11"],
+                "weather_code":[2,61,3,0,95,71,45],
+                "temperature_2m_max":[14.2,9.8,8.0,12.5,15.1,1.0,6.0],"temperature_2m_min":[5.1,3.6,2.0,1.5,7.7,-4.2,0.5]}}"#, "Самара");
+            island.calendar = Some(Calendar::at(calendar::Date { year: 2026, month: 10, day: 5 }, 10.0));
+            gallery_shot("05f2-calendar-weather", &mut island, 10.0);
             island.calendar.as_mut().unwrap().key("Down", 12.0);
             island.calendar.as_mut().unwrap().key("Right", 12.0);
             island.calendar.as_mut().unwrap().pointer(200.0, 230.0, 12.0);

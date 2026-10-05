@@ -86,7 +86,8 @@ Sound page (outputs, per-application levels, microphone), keyboard layout, Lock/
 press) opens from a normal left click on the ordinary compact body;
 `src/control.rs` is its environment worker (never block the UI on it). mod+d still opens the
 launcher directly. A right click on the clock opens the calendar sheet
-(`src/calendar.rs`). Music controls are scoped to the equaliser on the compact
+(`src/calendar.rs`), with open-meteo weather under the month (`src/weather.rs`,
+place from the time zone, fetched by a background `curl`). Music controls are scoped to the equaliser on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.

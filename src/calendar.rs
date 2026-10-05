@@ -20,6 +20,8 @@ const GRID_TOP: f64 = 96.0;
 const ROW_H: f64 = 40.0;
 const DAY_R: f64 = 17.0;
 const FOOTER_H: f64 = 34.0;
+/// the weather card between the grid and the footer, when there is one
+const WEATHER_H: f64 = 74.0;
 const SWITCH: Time = 0.36;
 /// the wheel turns a month per notch (or per this much touchpad travel)
 const WHEEL_STEP: f64 = 52.0;
@@ -73,7 +75,7 @@ impl Date {
     }
 
     /// Monday 0 … Sunday 6.
-    fn weekday(self) -> usize {
+    pub fn weekday(self) -> usize {
         (self.days() + 3).rem_euclid(7) as usize
     }
 
@@ -150,6 +152,7 @@ pub struct Calendar {
 
 impl Calendar {
     pub fn new(now: Time) -> Calendar {
+        crate::weather::refresh();
         let today = Date::today();
         Calendar::at(today, now)
     }
@@ -166,7 +169,8 @@ impl Calendar {
     }
 
     fn height_for(&self, month: Month) -> f64 {
-        GRID_TOP + rows(month) as f64 * ROW_H + 6.0 + FOOTER_H + 16.0
+        let weather = if crate::weather::current().is_some() { WEATHER_H + 8.0 } else { 0.0 };
+        GRID_TOP + rows(month) as f64 * ROW_H + 6.0 + weather + FOOTER_H + 16.0
     }
 
     pub fn is_animating(&self, now: Time) -> bool {
@@ -199,12 +203,13 @@ impl Calendar {
         if near(close_x + size / 2.0, mid) { return Some(Hit::Close); }
         if near(close_x - 8.0 - size / 2.0, mid) { return Some(Hit::Next); }
         if near(close_x - 8.0 - size - 6.0 - size / 2.0, mid) { return Some(Hit::Previous); }
-        let footer = GRID_TOP + rows(self.shown) as f64 * ROW_H + 6.0;
+        let footer = self.height() - 16.0 - FOOTER_H;
+        let grid_bottom = GRID_TOP + rows(self.shown) as f64 * ROW_H;
         if y >= footer && y < footer + FOOTER_H && x >= WIDTH - RAIL - TODAY_W && !self.at_today() {
             return Some(Hit::Today);
         }
         let col_w = (WIDTH - 2.0 * RAIL) / 7.0;
-        if y >= GRID_TOP && y < footer - 6.0 && x >= RAIL && x < WIDTH - RAIL {
+        if y >= GRID_TOP && y < grid_bottom && x >= RAIL && x < WIDTH - RAIL {
             let (col, row) = (((x - RAIL) / col_w) as i64, ((y - GRID_TOP) / ROW_H) as i64);
             let first = Date { year: self.shown.0, month: self.shown.1, day: 1 };
             let day = first.plus(row * 7 + col - first.weekday() as i64);
@@ -345,16 +350,71 @@ impl Calendar {
             _ => self.height(),
         };
         let footer = y + bottom - 16.0 - FOOTER_H;
+        let forecast = crate::weather::current();
+        if let Some(forecast) = &forecast {
+            self.draw_weather(cr, renderer, forecast, x, footer - 8.0 - WEATHER_H, alpha, now);
+        }
         let sel = self.selected;
-        let line = format!("{}, {} {} · {}", WEEKDAY_NAMES[sel.weekday()], sel.day, MONTHS_OF[sel.month as usize - 1],
+        let mut line = format!("{}, {} {} · {}", WEEKDAY_NAMES[sel.weekday()], sel.day, MONTHS_OF[sel.month as usize - 1],
             relative(sel.days() - self.today.days()));
+        if let Some(day) = forecast.as_ref().and_then(|f| f.on(sel)) {
+            line += &format!(" · {}/{}", crate::weather::degrees(day.high), crate::weather::degrees(day.low));
+        }
         let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
+        let reserve = if self.at_today() { 0.0 } else { TODAY_W };
         crate::motion::text(cr, renderer, &format!("{key}:footer"), &line, x + RAIL + 4.0, footer + (FOOTER_H - sub_h) / 2.0,
-            WIDTH - 2.0 * RAIL - TODAY_W - 4.0, 0.0, Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
+            WIDTH - 2.0 * RAIL - reserve - 4.0, 0.0, Font::Subhead, (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
         if !self.at_today() {
             menu_style::button(cr, renderer, "Сегодня",
                 (x + WIDTH - RAIL - TODAY_W, footer + (FOOTER_H - menu_style::SMALL_BUTTON_H) / 2.0, TODAY_W, menu_style::SMALL_BUTTON_H),
                 ButtonKind::Plain, hover(Hit::Today), alpha);
+        }
+    }
+
+    /// The weather card: now on the left (the symbol, the temperature, the
+    /// sky and the place, today's high and low), the next four days on the
+    /// right; the selected day's column is lit.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_weather(&self, cr: &Context, renderer: &Renderer, f: &crate::weather::Forecast, x: f64, y: f64, alpha: f64, now: Time) {
+        let k = smoothstep((now - self.opened - 0.12) / 0.35);
+        let alpha = alpha * k;
+        if alpha <= 0.002 { return; }
+        let (cx, w) = (x + RAIL, WIDTH - 2.0 * RAIL);
+        menu_style::group(cr, cx, y, w, WEATHER_H, 0.0, alpha);
+        crate::weather::icon(cr, f.code, f.day, cx + 30.0, y + WEATHER_H / 2.0, 34.0, alpha);
+        let title_h = menu_style::line_height(cr, renderer, Font::Title);
+        let sub_h = menu_style::line_height(cr, renderer, Font::Footnote);
+        let top = y + (WEATHER_H - title_h - 2.0 * sub_h) / 2.0;
+        let tx = cx + 56.0;
+        crate::motion::text(cr, renderer, "weather-now", &crate::weather::degrees(f.temperature), tx, top, 80.0, 0.0,
+            Font::Title, (1.0, 1.0, 1.0), alpha);
+        let sky = crate::weather::condition(f.code);
+        // the next four days take the right; the words keep the rest
+        let col = 34.0;
+        let right = cx + w - 10.0;
+        let days: Vec<_> = f.days.iter().filter(|d| d.date > self.today).take(4).collect();
+        let text_w = right - days.len() as f64 * col - 6.0 - tx;
+        let place = if f.place.is_empty() { sky.to_string() } else { format!("{sky} · {}", f.place) };
+        menu_style::text(cr, renderer, &place, tx, top + title_h, text_w, Font::Footnote, (1.0, 1.0, 1.0),
+            menu_style::SECONDARY * alpha);
+        if let Some(today) = f.on(self.today) {
+            let range = format!("↑{}  ↓{}", crate::weather::degrees(today.high), crate::weather::degrees(today.low));
+            menu_style::text(cr, renderer, &range, tx, top + title_h + sub_h, text_w, Font::Footnote, (1.0, 1.0, 1.0),
+                menu_style::SECONDARY * alpha);
+        }
+        for (i, day) in days.iter().enumerate() {
+            let colx = right - (days.len() - i) as f64 * col;
+            if day.date == self.selected {
+                menu_style::rounded(cr, colx + 1.0, y + 6.0, col - 2.0, WEATHER_H - 12.0, 9.0);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.08 * alpha);
+                let _ = cr.fill();
+            }
+            let a = if day.date.weekday() >= 5 { menu_style::TERTIARY } else { menu_style::SECONDARY };
+            menu_style::centred(cr, renderer, WEEKDAYS[day.date.weekday()], (colx, y + 6.0, col, 18.0), Font::Footnote,
+                (1.0, 1.0, 1.0), a * alpha + 0.0);
+            crate::weather::icon(cr, day.code, true, colx + col / 2.0, y + WEATHER_H / 2.0, 18.0, alpha);
+            menu_style::centred(cr, renderer, &crate::weather::degrees(day.high), (colx - 4.0, y + WEATHER_H - 26.0, col + 8.0, 18.0),
+                Font::Footnote, (1.0, 1.0, 1.0), alpha);
         }
     }
 

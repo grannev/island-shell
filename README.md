@@ -116,6 +116,16 @@ disc). The footer names the selected day and its distance from today
 the keyboard: arrows move by a day or a week, crossing into the
 neighbouring month; `PageUp`/`PageDown` turn the month; `Home` goes to
 today; `Escape` closes. `island-shell calendar` opens it too.
+Under the month sits the **weather**, from open-meteo.com (no key). On the
+left is now: the sky's symbol, the temperature, the sky and the place,
+today's high and low. On the right are the next four days, with the selected
+day's column lit. The footer adds the selected day's high/low when it is
+forecast. The place is the config's `weather`: `auto` (default) takes the
+city of the system time zone (Europe/Samara → Самара) and finds it with
+open-meteo's geocoder, so no IP lookup is made. It can also be a city
+(`set weather Казань`), `lat,lon`, or `off`. `curl` fetches the forecast on a
+background thread at most every 30 minutes and caches it in
+`~/.cache/island-shell/weather.json`.
 
 Click the ordinary compact island to open the **Control Center**: modules
 for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
@@ -492,6 +502,7 @@ at the beginning of a line or as a separate word), read at start;
     silent_after = 15     # seconds of pause / mute before the bars fold away
     dodge = 240           # px the island moves left for the ⋯ drawer
     night_temp = 4500     # night mode's colour temperature, K
+    weather = auto        # the calendar's weather: auto, a city, lat,lon or off
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a
@@ -547,6 +558,7 @@ while the compact island remains hidden.
     src/calc.rs     the launcher's answers: arithmetic, units, currencies
     src/clipboard.rs  wl-copy and the cliphist history for "clip:"
     src/recorder.rs wf-recorder: start, stop (SIGINT), the first frame
+    src/weather.rs  open-meteo forecast for the calendar, sky symbols
     nvim/           the companion plugin (lua/island.lua), a lazy.nvim `dir`
     scripts/        install.sh, island-cmd.sh (the sway bindings' entry)
     shell/          island.bash: long shell commands as live activities
