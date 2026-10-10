@@ -5,6 +5,14 @@ For menu and sheet controls, follow the role-based, permissive visual guide
 in `docs/interface-style.md`; homogeneous controls share a style, while new
 control types remain allowed when their interaction calls for one.
 
+## Design reference
+Since 2026-10 new ideas and the look follow Vorssaint's Dynamic Island
+(open-source macOS, github.com/vorssaint/vorssaint-utils, GPL-3.0, Swift;
+the island is `Sources/Vorssaint/{UI,Services}/Notch`). Rebuild its design in
+Rust/cairo from observation and its measurements; do not copy its code. The
+island keeps the hanging silhouette (Vorssaint's "notch" mode), not the
+floating capsule.
+
 ## Goal
 A single lightweight program (Rust preferred: wayland-client +
 smithay-client-toolkit, layer-shell; cairo/tiny-skia + pango for drawing;
@@ -87,7 +95,9 @@ press) opens from a normal left click on the ordinary compact body;
 `src/control.rs` is its environment worker (never block the UI on it). mod+d still opens the
 launcher directly. A right click on the clock opens the calendar sheet
 (`src/calendar.rs`), with open-meteo weather under the month (`src/weather.rs`,
-place from the time zone, fetched by a background `curl`). Music controls are scoped to the equaliser on the compact
+place from the time zone, fetched by a background `curl`). The config key
+`compact` (`island-shell compact <item> on|off`, persisted) chooses what the
+closed island shows; without the clock it rests as a short empty capsule. Music controls are scoped to the equaliser on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.

@@ -479,6 +479,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell calendar                       # the month (right click on the clock)
     island-shell record                         # 3-2-1, record the screen; again stops
     island-shell night [on|off|toggle|status]   # night mode (gammastep)
+    island-shell compact [<item> on|off|toggle] # what the closed island shows (saved)
     island-shell run [--title T] -- <command>   # a command as a live job
     island-shell progress <title> <n>%          # a job by its percentage
     island-shell task start|set|done|fail|cancel <id> … | task list
@@ -503,6 +504,13 @@ at the beginning of a line or as a separate word), read at start;
     dodge = 240           # px the island moves left for the ⋯ drawer
     night_temp = 4500     # night mode's colour temperature, K
     weather = auto        # the calendar's weather: auto, a city, lat,lon or off
+    compact = all         # what the closed island shows: all, none, or a list of
+                          # clock editor timer tasks record music unread dnd mic
+
+Without `clock` the closed island rests as a short black capsule (150 px), and
+a right click on any free part of it opens the calendar. `island-shell compact
+clock off` (or `on`, `toggle`) changes one item in the running island and writes
+the new list to the config file, so it survives a restart.
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a

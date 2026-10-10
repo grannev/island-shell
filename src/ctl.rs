@@ -54,6 +54,9 @@ pub enum Command {
     Record,
     /// `night [on|off|toggle|status]`: night mode (gammastep)
     Night(String),
+    /// `compact [all|none|<item> [on|off|toggle]]`: what the closed island
+    /// shows at rest, kept in the config file
+    Compact(Vec<String>),
     Quit,
 }
 
@@ -126,6 +129,7 @@ impl Command {
             ["record"] => Command::Record,
             ["night"] => Command::Night("toggle".into()),
             ["night", state @ ("on" | "off" | "toggle" | "status")] => Command::Night(state.to_string()),
+            ["compact", rest @ ..] if rest.len() <= 2 => Command::Compact(rest.iter().map(|w| w.to_string()).collect()),
             ["mic", "muted"] => Command::Activity(crate::activity::Event::MicMute { muted: true }),
             ["mic", "on"] => Command::Activity(crate::activity::Event::MicMute { muted: false }),
             ["bluetooth"] => Command::Activity(crate::activity::Event::BluetoothOpen),
@@ -138,7 +142,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",

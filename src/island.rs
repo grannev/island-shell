@@ -113,6 +113,9 @@ const TRACK_HOVER: f64 = 0.45;
 const TOAST_HOLD: f64 = 4.0;
 /// the gap between the clock and the compact bars
 const BARS_GAP: f64 = 12.0;
+/// The narrowest the closed island's content gets (a bare resting capsule
+/// is this plus the padding: 150 px).
+const REST_CONTENT_W: f64 = 118.0;
 const BARS_W: f64 = 26.0;
 const BARS_H: f64 = 14.0;
 const DODGE_DUR: f64 = 0.25;
@@ -131,6 +134,77 @@ fn slider_of(kind: activity::SliderKind) -> quick::Slider {
 const SLIDER_SPRING: f64 = 0.16;
 /// the window for the logout button's confirming second press
 const LOGOUT_CONFIRM: f64 = 3.0;
+
+/// What the closed island shows at rest (`compact = clock music …`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Compact {
+    pub clock: bool,
+    pub editor: bool,
+    pub timer: bool,
+    pub tasks: bool,
+    pub record: bool,
+    pub music: bool,
+    pub unread: bool,
+    pub dnd: bool,
+    pub mic: bool,
+}
+
+impl Compact {
+    pub const NAMES: [&'static str; 9] = ["clock", "editor", "timer", "tasks", "record", "music", "unread", "dnd", "mic"];
+    pub const ALL: Compact = Compact {
+        clock: true, editor: true, timer: true, tasks: true, record: true, music: true, unread: true, dnd: true, mic: true,
+    };
+    pub const NONE: Compact = Compact {
+        clock: false, editor: false, timer: false, tasks: false, record: false, music: false, unread: false, dnd: false, mic: false,
+    };
+
+    fn slot(&mut self, name: &str) -> Option<&mut bool> {
+        Some(match name {
+            "clock" => &mut self.clock,
+            "editor" | "nvim" => &mut self.editor,
+            "timer" => &mut self.timer,
+            "tasks" | "jobs" => &mut self.tasks,
+            "record" | "recording" => &mut self.record,
+            "music" | "bars" => &mut self.music,
+            "unread" => &mut self.unread,
+            "dnd" => &mut self.dnd,
+            "mic" => &mut self.mic,
+            _ => return None,
+        })
+    }
+
+    pub fn get(&self, name: &str) -> Option<bool> {
+        let mut copy = *self;
+        copy.slot(name).map(|v| *v)
+    }
+
+    /// Turn one item on or off.
+    pub fn set(&mut self, name: &str, on: bool) -> Result<(), String> {
+        *self.slot(name).ok_or_else(|| format!("unknown item {name:?} (known: {})", Self::NAMES.join(", ")))? = on;
+        Ok(())
+    }
+
+    /// "all", "none" or the items, separated by spaces or commas.
+    pub fn parse(value: &str) -> Result<Compact, String> {
+        let words: Vec<&str> = value.split([',', ' ']).filter(|w| !w.is_empty()).collect();
+        match words.as_slice() {
+            ["all"] => return Ok(Self::ALL),
+            ["none"] | [] => return Ok(Self::NONE),
+            _ => {}
+        }
+        let mut compact = Self::NONE;
+        for word in words {
+            compact.set(word, true)?;
+        }
+        Ok(compact)
+    }
+
+    pub fn describe(&self) -> String {
+        if *self == Self::ALL { return "all".into(); }
+        let names: Vec<&str> = Self::NAMES.iter().copied().filter(|n| self.get(n) == Some(true)).collect();
+        if names.is_empty() { "none".into() } else { names.join(",") }
+    }
+}
 
 /// Tunables (config file / `island-shell set`).
 #[derive(Clone, Debug)]
@@ -164,6 +238,8 @@ pub struct Config {
     /// Where the calendar's weather is for: auto (the time zone's city),
     /// a city, "lat,lon", or off.
     pub weather: String,
+    /// What the closed island shows at rest.
+    pub compact: Compact,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -183,14 +259,15 @@ impl Default for Config {
             dodge: DODGE,
             night_temp: 4500,
             weather: "auto".into(),
+            compact: Compact::ALL,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 12] = [
+    pub const KEYS: [&'static str; 13] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather",
+        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -234,6 +311,7 @@ impl Config {
                 self.weather = value.into();
                 crate::weather::configure(value);
             }
+            "compact" => self.compact = Compact::parse(value.trim_matches('"'))?,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -244,9 +322,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
+            self.compact.describe(),
         )
     }
 
@@ -652,6 +731,11 @@ pub struct Island {
     nvim_saved: Option<Time>,
     chip: Quintic,
     chip_w: f64,
+    /// The clock and the bars at rest, as `compact` keeps or removes them.
+    clock_chip: Quintic,
+    music_chip: Quintic,
+    /// The closed line, for a right click when the clock is not on it.
+    line_rect: Option<Rect>,
     /// the clock's width, eased so the box follows its digits rolling
     clock_w: Option<Spring>,
     editor_panel: Quintic,
@@ -848,6 +932,9 @@ impl Island {
             nvim_saved: None,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
+            clock_chip: Quintic::at_rest(if config.compact.clock { 1.0 } else { 0.0 }, CHIP_DUR),
+            music_chip: Quintic::at_rest(if config.compact.music { 1.0 } else { 0.0 }, CHIP_DUR),
+            line_rect: None,
             clock_w: None,
             editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
             editor_diagnostics: false,
@@ -918,6 +1005,8 @@ impl Island {
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
+            || self.clock_chip.is_moving(now)
+            || self.music_chip.is_moving(now)
             || self.clock_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.editor_panel.is_moving(now)
             || self.launcher.as_ref().is_some_and(|l| l.is_animating(now))
@@ -1028,9 +1117,12 @@ impl Island {
             spring.set(if lit { 1.0 } else { 0.0 }, now);
         }
         // the editor's chip rides beside the clock while Neovim is in front
-        let chip = self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
+        let shown = self.config.compact;
+        self.clock_chip.set(if shown.clock { 1.0 } else { 0.0 }, now);
+        self.music_chip.set(if shown.music { 1.0 } else { 0.0 }, now);
+        let chip = shown.editor && self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
-        let timer = self.timer.is_some() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
+        let timer = shown.timer && self.timer.is_some() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         for (i, (command, ..)) in activity::TIMER_BUTTONS.iter().enumerate() {
             let enabled = !matches!(*command, "toggle" | "cancel") || self.timer.is_some();
             self.timer_button_hover[i].set(if enabled && self.timer_menu_hover == Some(command) { 1.0 } else { 0.0 }, now);
@@ -1051,10 +1143,10 @@ impl Island {
             }
         }
         self.timer_chip.set(if timer { 1.0 } else { 0.0 }, now);
-        let rec = matches!(self.recording, Some(Recording::Running(..) | Recording::Stopping(_)))
+        let rec = shown.record && matches!(self.recording, Some(Recording::Running(..) | Recording::Stopping(_)))
             && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         self.record_chip.set(if rec { 1.0 } else { 0.0 }, now);
-        let jobs = !self.tasks.is_empty() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
+        let jobs = shown.tasks && !self.tasks.is_empty() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         self.tasks_chip.set(if jobs { 1.0 } else { 0.0 }, now);
         let editor_panel = self.want_editor_panel(now);
         if editor_panel {
@@ -2049,9 +2141,13 @@ impl Island {
     }
 
     /// Is (px, py) on the compact clock?
+    /// Without a clock at rest, any free part of the closed island stands in for it.
     pub fn clock_at(&self, px: f64, py: f64) -> bool {
-        self.accepts_quick_menu_click()
-            && self.clock_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+        let inside = |r: &Rect| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+        if !self.accepts_quick_menu_click() { return false; }
+        if self.config.compact.clock { return self.clock_rect.is_some_and(|r| inside(&r)); }
+        self.line_rect.is_some_and(|r| inside(&r))
+            && ![self.eq_rect, self.timer_rect, self.tasks_rect, self.record_rect, self.editor_chip_rect].iter().flatten().any(inside)
     }
 
     pub fn set_calendar_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
@@ -2303,7 +2399,7 @@ impl Island {
         let hide = self.hide.state(now);
         let dodge = self.dodge.state(now);
         let hover_pad = self.hover_pad.value(now);
-        let reveal = self.reveal.state(now).x;
+        let reveal = self.reveal.state(now).x * self.music_chip.state(now).x;
         let q = self.pill.state(now).x;
         // the pill, the player, the editor's panel and the launcher are the
         // shapes the box can take besides the plain line; they never overlap
@@ -2369,6 +2465,8 @@ impl Island {
             }
         };
         let clock_h = clock_ext.height() as f64;
+        let clock_k = self.clock_chip.state(now).x;
+        let clock_len = clock_k * clock_w;
         let bars_len = reveal * (BARS_GAP + BARS_W);
         // Neovim's mode chip grows out on the other side of the clock
         let chip_k = self.chip.state(now).x;
@@ -2399,6 +2497,7 @@ impl Island {
         self.tasks_pill_rect = None;
         self.calendar_rect = None;
         self.clock_rect = None;
+        self.line_rect = None;
         self.timer_rect = None;
         self.timer_menu_rect = None;
         self.network_menu_rect = None;
@@ -2408,11 +2507,15 @@ impl Island {
         self.eq_rect = None;
         self.player_rect = None;
         self.editor_chip_rect = None;
-        let unread_len = if self.center.unread() > 0 { 18.0 } else { 0.0 };
-        let dnd_len = if self.dnd { 21.0 } else { 0.0 };
-        let mic_k = self.mic_dot.value(now).clamp(0.0, 1.2);
+        let shown = self.config.compact;
+        let unread_len = if shown.unread && self.center.unread() > 0 { 18.0 } else { 0.0 };
+        let dnd_len = if shown.dnd && self.dnd { 21.0 } else { 0.0 };
+        let mic_k = if shown.mic { self.mic_dot.value(now).clamp(0.0, 1.2) } else { 0.0 };
         let mic_len = mic_k.min(1.0) * 16.0;
-        let line_w = chip_len + clock_w + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len + 2.0 * pad;
+        let content_w = chip_len + clock_len + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
+        // without the clock the island keeps a resting width of its own,
+        // a short black capsule, rather than shrinking to its padding
+        let line_w = content_w.max(REST_CONTENT_W) + 2.0 * pad;
 
         // --- the pill: Touch ID, a live activity, or a notification ---
         let activity_size = self.center.open.then_some((notice_center::WIDTH, self.center.height()))
@@ -2528,8 +2631,10 @@ impl Island {
             * if self.hidden.any() && self.launcher.is_none() { 0.0 } else { 1.0 };
         let pill_alpha = pill_alpha_of(q);
         let sheet_k = self.quick_retiring_at.map_or(1.0, |since| min_jerk(((now - since) / SHEET_SWAP).clamp(0.0, 1.0)));
+        if line_alpha > 0.95 && !self.pill_open() {
+            self.line_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
+        }
         if line_alpha > 0.0 {
-            let content_w = chip_len + clock_w + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
             let content_x = cx - content_w / 2.0;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
@@ -2546,12 +2651,20 @@ impl Island {
             }
             let clock_x = renderer.snap(content_x + chip_len - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
-            crate::motion::text(cr, renderer, "clock", &self.clock, clock_x, ty,
-                clock_w.max(clock_target) + clock_ext.x() as f64 + 8.0, 0.0, Font::Text, (1.0, 1.0, 1.0), line_alpha);
-            if line_alpha > 0.95 && !self.pill_open() {
+            if clock_k > 0.001 {
+                // leaving, the clock shrinks toward its middle as its room closes
+                cr.save().unwrap();
+                cr.rectangle(content_x + chip_len, dy, clock_len, line_h);
+                cr.clip();
+                let squeeze = (clock_w - clock_len) / 2.0;
+                crate::motion::text(cr, renderer, "clock", &self.clock, clock_x - squeeze, ty,
+                    clock_w.max(clock_target) + clock_ext.x() as f64 + 8.0, 0.0, Font::Text, (1.0, 1.0, 1.0), line_alpha * clock_k * clock_k);
+                cr.restore().unwrap();
+            }
+            if line_alpha > 0.95 && clock_k > 0.95 && !self.pill_open() {
                 self.clock_rect = Some(Rect { x: clock_x + clock_ext.x() as f64 - 6.0, y: dy, w: clock_w + 12.0, h: line_h });
             }
-            let mut after_clock = clock_x + clock_ext.x() as f64 + clock_w;
+            let mut after_clock = clock_x + clock_ext.x() as f64 + clock_len;
             if timer_len > 0.5 {
                 if self.timer.is_some() && line_alpha > 0.95 && timer_k > 0.95 && !self.pill_open() {
                     self.timer_rect = Some(Rect { x: after_clock + 6.0, y: dy, w: self.timer_w + 8.0, h: line_h });
@@ -2628,7 +2741,7 @@ impl Island {
                 cr.set_source_rgba(0.40, 0.82, 1.0, line_alpha);
                 let _ = cr.fill();
             }
-            if self.dnd {
+            if dnd_len > 0.0 {
                 let mx = after_clock + bars_len + unread_len + 12.0;
                 let my = dy + line_h / 2.0;
                 cr.save().unwrap();
@@ -4410,6 +4523,15 @@ mod tests {
         island.reveal.set_at(1.0, 10.0);
         island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
         gallery_shot("01-compact-music", &mut island, 10.0);
+        island.config.compact.clock = false;
+        island.sync(10.0);
+        gallery_shot("01b-compact-music-no-clock", &mut island, 11.0);
+        island.config.compact = Compact::NONE;
+        island.sync(11.0);
+        gallery_shot("01c-compact-resting", &mut island, 12.0);
+        island.config.compact = Compact::ALL;
+        island.sync(12.0);
+        island.advance(13.0);
 
         let controls = crate::control::Snapshot {
             volume: Some((0.45, false)),
@@ -5448,5 +5570,35 @@ mod command_tests {
         island.hidden.user = false;
         island.auth_started(1.2);
         assert!(!island.set_cmdline("one", command(), 1.3));
+    }
+
+    #[test]
+    fn compact_items_parse_and_describe() {
+        assert_eq!(Compact::parse("all"), Ok(Compact::ALL));
+        assert_eq!(Compact::parse("none"), Ok(Compact::NONE));
+        let some = Compact::parse("music, timer mic").unwrap();
+        assert!(some.music && some.timer && some.mic && !some.clock && !some.dnd);
+        assert_eq!(some.describe(), "timer,music,mic");
+        assert!(Compact::parse("clock weather").is_err());
+        let mut config = Config::default();
+        config.set("compact", "timer,music").unwrap();
+        assert!(!config.compact.clock);
+        assert!(config.describe().contains("compact=timer,music"));
+    }
+
+    #[test]
+    fn without_the_clock_the_island_rests_as_a_short_capsule_and_right_click_opens_the_month() {
+        let mut config = Config::default();
+        config.compact.clock = false;
+        let mut island = Island::new(config);
+        island.advance(1.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        island.draw(&cr, &renderer, 490.0, 1.0);
+        let line = island.line_rect.expect("the closed line");
+        assert!((line.w - (REST_CONTENT_W + 2.0 * PAD)).abs() < 1.0, "resting width {}", line.w);
+        assert!(island.clock_rect.is_none());
+        assert!(island.clock_at(line.x + line.w / 2.0, line.y + 10.0));
     }
 }

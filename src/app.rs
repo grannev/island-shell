@@ -737,6 +737,30 @@ fn config_path() -> std::path::PathBuf {
     base.join("island-shell").join("config")
 }
 
+/// Write `key = value` into the config file: the key's last line is
+/// replaced in place, or the line is added at the end.
+fn persist_setting(key: &str, value: &str) -> std::io::Result<()> {
+    let path = config_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = with_setting(&text, key, value);
+    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, updated)?;
+    std::fs::rename(temp, path)
+}
+
+fn with_setting(text: &str, key: &str, value: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let found = lines.iter().rposition(|line| {
+        strip_comment(line).split_once('=').is_some_and(|(k, _)| k.trim() == key)
+    });
+    match found {
+        Some(i) => lines[i] = format!("{key} = {value}"),
+        None => lines.push(format!("{key} = {value}")),
+    }
+    lines.join("\n") + "\n"
+}
+
 /// A `#` starts a comment at the beginning of a line, or as a separate
 /// word after a value; `accent = #66D9FF` keeps its colour.
 fn strip_comment(line: &str) -> &str {
@@ -958,6 +982,41 @@ impl App {
                 }
                 self.after_change();
                 return if want { "on".into() } else { "off".into() };
+            }
+            Command::Compact(words) => {
+                let mut compact = self.island.config.compact;
+                let words: Vec<&str> = words.iter().map(String::as_str).collect();
+                match words.as_slice() {
+                    [] => return compact.describe(),
+                    [set @ ("all" | "none")] => compact = crate::island::Compact::parse(set).unwrap_or(compact),
+                    [item] | [item, "status"] => {
+                        return match compact.get(item) {
+                            Some(on) => if on { "on".into() } else { "off".into() },
+                            None => format!("error: unknown item {item:?} (known: {})", crate::island::Compact::NAMES.join(", ")),
+                        };
+                    }
+                    [item, state] => {
+                        let Some(on) = compact.get(item) else {
+                            return format!("error: unknown item {item:?} (known: {})", crate::island::Compact::NAMES.join(", "));
+                        };
+                        let want = match *state {
+                            "on" => true,
+                            "off" => false,
+                            "toggle" => !on,
+                            _ => return "error: expected on, off, toggle or status".into(),
+                        };
+                        let _ = compact.set(item, want);
+                    }
+                    _ => return "error: compact [all|none|<item> [on|off|toggle]]".into(),
+                }
+                self.island.config.compact = compact;
+                let value = compact.describe();
+                if let Err(e) = persist_setting("compact", &value) {
+                    eprintln!("island-shell: config: {e}");
+                }
+                self.island.sync(now);
+                self.after_change();
+                return value;
             }
             Command::Record => {
                 let reply = match self.island.toggle_recording(now) {
@@ -2392,6 +2451,18 @@ smithay_client_toolkit::delegate_dispatch2!(App);
 
 #[cfg(test)]
 mod tests {
+    use super::with_setting;
+
+    #[test]
+    fn a_setting_is_replaced_in_place_or_added() {
+        let text = "# island\nhover = 1\ncompact = all  # everything\n";
+        assert_eq!(with_setting(text, "compact", "music"), "# island\nhover = 1\ncompact = music\n");
+        assert_eq!(with_setting("hover = 1\n", "compact", "none"), "hover = 1\ncompact = none\n");
+        assert_eq!(with_setting("", "compact", "none"), "compact = none\n");
+        // a commented-out example stays as it was
+        assert_eq!(with_setting("# compact = clock\n", "compact", "none"), "# compact = clock\ncompact = none\n");
+    }
+
     use super::*;
 
     #[test]
