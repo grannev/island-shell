@@ -44,15 +44,15 @@ preview the activities without changing hardware state:
     island-shell bluetooth 84 Headphones
     island-shell wifi My network
 
-**Night mode.** The display module's «Ночной режим» capsule (or `mod+n`,
+**Night mode.** The Control Center's «Ночь» tile (or `mod+n`,
 which runs `island-shell night`) tints the screen warm with `gammastep -O
-<night_temp>` (4500 K by default; `set night_temp 3800`). The capsule warms to
-orange and its moon bounces. From the keyboard a short pill says
+<night_temp>` (4500 K by default; `set night_temp 3800`). The tile's well warms to
+orange and its sunset symbol bounces. From the keyboard a short pill says
 «Включён»/«Выключен». gammastep runs in its own systemd scope, so the tint
 survives an island restart; switching off kills it. `island-shell night
 on|off|toggle|status` works from scripts too.
 
-**Screen recording.** «Запись» in the Control Center's bottom row (or
+**Screen recording.** The «Запись» tile in the Control Center (or
 `island-shell record`) counts down 3-2-1 in a pill: a red ring empties and the
 digit rolls down. `Escape` cancels. Once the pill has folded away,
 `wf-recorder` records the island's output. A red dot and the recording's
@@ -127,21 +127,27 @@ open-meteo's geocoder, so no IP lookup is made. It can also be a city
 background thread at most every 30 minutes and caches it in
 `~/.cache/island-shell/weather.json`.
 
-Click the ordinary compact island to open the **Control Center**: modules
-for Wi-Fi, Bluetooth, Timer, Launcher, Notifications and Do Not Disturb;
-while something plays, a **Now playing** module with the art, the title
-over the artist, and previous / play-pause / next buttons (also in the
-keyboard order, after the tiles; a new track's title rises in);
-a Display and a Sound module with Control Center sliders (press anywhere
-on a slider to jump there, drag to adjust; moving the volume unmutes); the
-sound module's output button opens the **Sound** page: the audio outputs
+Click the ordinary compact island to open the **Control Center**, laid out
+as Vorssaint's open island (560 px): the title «Управление» with a faint ⋯
+at the end of its row that turns into the collapse chevron under the
+pointer; a row of cards — while something plays, a **Now playing** card
+with the art, the title over the artist and previous / play-pause / next
+(first in the keyboard order; a new track's title rises in) beside one slim
+card holding the Sound and Display levels, otherwise a Sound card and a
+Display card of their own. Press anywhere on a slider to jump there, drag to
+adjust; moving the volume unmutes. The Sound level's output name opens the
+**Sound** page (a chevron back to the main page beside its title): the audio outputs
 (unplugged HDMI ports hidden; a click switches the default sink), every
 application playing with its own level slider (all of an application's
 streams move together; notification chimes are left out), and the default
 microphone with its level and a mute button on its symbol (struck through
 and red while muted); the page re-reads the applications once a second
-while it is open. Below the modules,
-the keyboard layout (click for the next one), Lock (`loginctl
+while it is open. Under the cards, a rail of twelve round shortcut tiles
+(a 40 px well over a one-line label, a light wash and a small lift under
+the pointer; a tile that is on takes its colour): Wi-Fi, Bluetooth, Timer
+(its remaining time in orange while it runs), Notifications (the unread
+count, red), Do Not Disturb (purple), Night mode (orange), Search (the
+launcher), Record, the keyboard layout (click for the next one), Lock (`loginctl
 lock-session`), Sleep (`systemctl suspend`) and Log out (sway `exit`,
 only on a second press within three seconds — the button turns red and
 asks «Точно?»). While the menu is open, volume and brightness keys move its
@@ -149,7 +155,7 @@ sliders instead of raising an OSD. A worker thread (`src/control.rs`) does
 all reading and writing — `wpctl`, `pactl`, the backlight in sysfs (the
 video group may write it), sway IPC — and coalesces slider drags to the
 latest value. Arrow keys and Enter walk
-every control on the page; Escape, × or a click outside closes the menu. Changing text animates the
+every control on the page; Escape, the collapse chevron or a click outside closes the menu. Changing text animates the
 Apple way (`src/motion.rs`): digits roll — the clock's minutes, the
 countdown, percentages, counts — and changed words lift away as the new
 one rises in («Вкл.» ↔ «Выкл.», the layout's name). Pressed controls dip

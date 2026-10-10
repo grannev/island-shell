@@ -3643,7 +3643,7 @@ impl Island {
     pub fn quick_drag_to(&mut self, px: f64, now: Time) -> Option<(quick::Slider, f64)> {
         let slider = self.quick_drag?;
         let rect = self.quick_rect?;
-        let value = quick::slider_fraction(slider, px - rect.x);
+        let value = quick::slider_fraction(slider, &self.controls, px - rect.x);
         self.set_control_level(slider, value, now);
         Some((slider, value))
     }
@@ -3785,15 +3785,12 @@ impl Island {
     fn quick_keys(&self) -> Vec<quick::Action> {
         match self.quick_view {
             quick::View::Main => {
-                let media = self.controls.media.is_some();
-                quick::ACTIONS.iter().copied()
-                    .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty())
-                    .flat_map(|a| {
-                        // the transport buttons come after the tiles
-                        let after = (a == quick::Action::Dnd && media).then_some([
-                            quick::Action::MediaPrevious, quick::Action::MediaPlayPause, quick::Action::MediaNext]);
-                        std::iter::once(a).chain(after.into_iter().flatten())
-                    })
+                // the music card's buttons come first, as the card does
+                let media = self.controls.media.is_some().then_some([
+                    quick::Action::MediaPrevious, quick::Action::MediaPlayPause, quick::Action::MediaNext]);
+                media.into_iter().flatten()
+                    .chain(quick::ACTIONS.iter().copied()
+                        .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty()))
                     .collect()
             }
             quick::View::Sound => (0..self.controls.sinks.len()).map(quick::Action::Sink)
@@ -5103,18 +5100,17 @@ mod tests {
         assert!(island.keyboard_panel_open());
         island.draw(&cr, &renderer, 490.0, 10.7);
         let r = island.quick_rect.expect("menu should accept pointer input after unfolding");
-        let tiles = [quick::Action::Wifi, quick::Action::Bluetooth, quick::Action::Timer,
-            quick::Action::Launcher, quick::Action::Notifications, quick::Action::Dnd];
-        for (i, action) in tiles.iter().enumerate() {
-            let x = r.x + 38.0 + (i % 2) as f64 * 202.0;
-            let y = r.y + 90.0 + (i / 2) as f64 * 64.0;
-            assert_eq!(island.quick_action_at(x, y), Some(*action));
+        for i in 0..12 {
+            let (action, x, y) = quick::shortcut_centre(i);
+            assert_eq!(island.quick_action_at(r.x + x, r.y + y), Some(action));
         }
-        island.set_quick_hover(r.x + 38.0, r.y + 90.0, 10.7);
+        let (first, x, y) = quick::shortcut_centre(0);
+        assert_eq!(first, quick::Action::Wifi);
+        island.set_quick_hover(r.x + x, r.y + y, 10.7);
         assert!(island.quick_hover_springs[&quick::Action::Wifi].value(10.8) > 0.0);
         island.close_quick_menu(10.8);
         assert!(!island.keyboard_panel_open());
-        assert_eq!(island.quick_action_at(r.x + 38.0, r.y + 84.0), None);
+        assert_eq!(island.quick_action_at(r.x + x, r.y + y), None);
     }
 
     #[test]

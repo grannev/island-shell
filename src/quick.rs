@@ -1,37 +1,45 @@
-//! The island's Control Center: shortcut modules, display and sound
-//! sliders with the audio output picker, the keyboard layout and the
-//! session buttons — reached from the compact island.
+//! The island's Control Center, laid out as Vorssaint's open island: a
+//! title row whose actions show under the pointer, a row of cards (what is
+//! playing, sound and display levels) and a rail of round shortcut tiles;
+//! the sound page lists outputs, applications and the microphone.
 use cairo::Context;
 
 use crate::control::{App, Sink, SinkKind};
 use crate::island::{Font, Renderer};
-use crate::menu_style::{self, RAIL};
+use crate::menu_style;
 
-pub const WIDTH: f64 = 440.0;
+pub const WIDTH: f64 = 560.0;
+/// the side inset of every page
+const RAIL: f64 = 24.0;
 const INNER: f64 = WIDTH - 2.0 * RAIL;
-const GAP: f64 = 8.0;
-const TILE_W: f64 = (INNER - GAP) / 2.0;
-const TILE_H: f64 = 56.0;
-const MODULE_GAP: f64 = 10.0;
-/// "Now playing" sits under the tiles while something plays; the modules
-/// below it move down by its height (see `shift`)
-const MEDIA_Y: f64 = menu_style::CONTENT_TOP + 3.0 * TILE_H + 2.0 * GAP + MODULE_GAP;
-const MEDIA_H: f64 = 72.0;
-const MEDIA_ART: f64 = 48.0;
-const MEDIA_BUTTON: f64 = 38.0;
-const DISPLAY_Y: f64 = MEDIA_Y;
-const MODULE_H: f64 = 62.0;
-const SOUND_Y: f64 = DISPLAY_Y + MODULE_H + MODULE_GAP;
-const BOTTOM_Y: f64 = SOUND_Y + MODULE_H + MODULE_GAP;
-const BOTTOM_H: f64 = 70.0;
-const SMALL_W: f64 = (INNER - 4.0 * GAP) / 5.0;
-/// the main page without "Now playing"
-pub const HEIGHT: f64 = BOTTOM_Y + BOTTOM_H + RAIL;
-/// the sliders: inset in their module, below its title
-const SLIDER_X: f64 = RAIL + 12.0;
-const SLIDER_W: f64 = INNER - 24.0;
-const SLIDER_DY: f64 = 32.0;
-const SLIDER_H: f64 = 22.0;
+/// the title row
+const HEADER_TOP: f64 = 12.0;
+const HEADER_H: f64 = 36.0;
+/// where a page's content starts, under the title row
+const PAGE_TOP: f64 = HEADER_TOP + HEADER_H + 12.0;
+const BOTTOM: f64 = 16.0;
+/// between the card row and the rail
+const ROW_GAP: f64 = 10.0;
+/// the card row
+const CARD_Y: f64 = PAGE_TOP;
+const CARD_H: f64 = 96.0;
+const CARD_R: f64 = 18.0;
+/// the level card beside the music card
+const LEVELS_W: f64 = 184.0;
+const ART: f64 = CARD_H - 24.0;
+const MEDIA_BUTTON: f64 = 36.0;
+/// the shortcut rail: round wells over a one-line label
+const RAIL_Y: f64 = CARD_Y + CARD_H + ROW_GAP;
+const PER_ROW: usize = 6;
+const SHORTCUT_GAP: f64 = 4.0;
+const SHORTCUT_W: f64 = (INNER - (PER_ROW - 1) as f64 * SHORTCUT_GAP) / PER_ROW as f64;
+const SHORTCUT_H: f64 = 74.0;
+const SHORTCUT_R: f64 = 14.0;
+const WELL_R: f64 = 20.0;
+/// the main page
+pub const HEIGHT: f64 = RAIL_Y + 2.0 * SHORTCUT_H + SHORTCUT_GAP + BOTTOM;
+/// the title row's trailing button (collapse / close)
+const CLOSE: f64 = 28.0;
 /// the sound page: section captions, rows and their compact sliders
 const CAPTION_H: f64 = 24.0;
 const SECTION_GAP: f64 = 14.0;
@@ -87,11 +95,6 @@ pub struct Media {
     pub playing: bool,
 }
 
-/// How far the modules under the tiles move down for "Now playing".
-fn shift(controls: &Controls) -> f64 {
-    if controls.media.is_some() { MEDIA_H + MODULE_GAP } else { 0.0 }
-}
-
 impl Controls {
     pub fn current_sink(&self) -> Option<&Sink> {
         self.sinks.iter().find(|s| s.name == self.default_sink)
@@ -127,14 +130,14 @@ struct SoundPage {
 }
 
 fn sound_page(controls: &Controls) -> SoundPage {
-    let top = menu_style::CONTENT_TOP;
+    let top = PAGE_TOP;
     let sinks = top + CAPTION_H;
     let apps_caption = sinks + controls.sinks.len().max(1) as f64 * SINK_H + SECTION_GAP;
     let apps = apps_caption + CAPTION_H;
     let app_rows = controls.apps.len().min(MAX_APPS);
     let apps_h = if app_rows == 0 { SINK_H } else { app_rows as f64 * APP_H };
     let mic = apps + apps_h + SECTION_GAP + CAPTION_H;
-    SoundPage { sinks, apps, app_rows, mic, height: mic + MIC_H + RAIL }
+    SoundPage { sinks, apps, app_rows, mic, height: mic + MIC_H + BOTTOM }
 }
 
 /// Everything a frame of the menu needs besides geometry.
@@ -210,67 +213,121 @@ pub enum Hit {
     Slider(Slider, f64),
 }
 
-/// Keyboard order of the main page.
-pub const ACTIONS: [Action; 13] = [
-    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd,
-    Action::Night, Action::Outputs, Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout,
+/// The shortcut rail, in reading (and keyboard) order.
+const SHORTCUTS: [Action; 12] = [
+    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night,
+    Action::Launcher, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
 ];
-const TILES: [Action; 6] = [Action::Wifi, Action::Bluetooth, Action::Timer, Action::Launcher, Action::Notifications, Action::Dnd];
-const SMALL: [Action; 5] = [Action::Layout, Action::Record, Action::Lock, Action::Sleep, Action::Logout];
+/// Keyboard order of the main page (the transport buttons come first
+/// while something plays, see the island's `quick_keys`).
+pub const ACTIONS: [Action; 13] = [
+    Action::Outputs, Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night,
+    Action::Launcher, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+];
 
 pub fn height(view: View, controls: &Controls) -> f64 {
     match view {
-        View::Main => HEIGHT + shift(controls),
+        View::Main => HEIGHT,
         View::Sound => sound_page(controls).height,
     }
 }
 
-fn tile(i: usize) -> (f64, f64) {
-    (RAIL + (i % 2) as f64 * (TILE_W + GAP), menu_style::CONTENT_TOP + (i / 2) as f64 * (TILE_H + GAP))
+type Rect = (f64, f64, f64, f64);
+
+/// A shortcut tile; a short last row is centred, as Vorssaint's rails are.
+fn shortcut(i: usize) -> Rect {
+    let (row, col) = (i / PER_ROW, i % PER_ROW);
+    let in_row = (SHORTCUTS.len() - row * PER_ROW).min(PER_ROW);
+    let lead = (PER_ROW - in_row) as f64 * (SHORTCUT_W + SHORTCUT_GAP) / 2.0;
+    (RAIL + lead + col as f64 * (SHORTCUT_W + SHORTCUT_GAP), RAIL_Y + row as f64 * (SHORTCUT_H + SHORTCUT_GAP), SHORTCUT_W, SHORTCUT_H)
 }
 
-fn small(i: usize) -> f64 {
-    RAIL + i as f64 * (SMALL_W + GAP)
+/// A shortcut's centre and the action it holds (for the island's tests).
+#[cfg(test)]
+pub fn shortcut_centre(i: usize) -> (Action, f64, f64) {
+    let (x, y, w, h) = shortcut(i);
+    (SHORTCUTS[i], x + w / 2.0, y + h / 2.0)
 }
 
-/// The output button on the sound module's title line.
-fn outputs_button(controls: &Controls) -> (f64, f64, f64, f64) {
-    (RAIL + INNER - 12.0 - 170.0, SOUND_Y + shift(controls) + 4.0, 170.0, 24.0)
+fn music_card() -> Rect {
+    (RAIL, CARD_Y, INNER - LEVELS_W - ROW_GAP, CARD_H)
 }
 
-/// Night mode's capsule on the display module's title line.
-fn night_button(controls: &Controls) -> (f64, f64, f64, f64) {
-    (RAIL + INNER - 10.0 - 146.0, DISPLAY_Y + shift(controls) + 4.0, 146.0, 22.0)
+/// The card a level lives in: beside the music card both share one slim
+/// card; alone, each has a card of its own.
+fn level_card(slider: Slider, media: bool) -> Rect {
+    if media {
+        return (RAIL + INNER - LEVELS_W, CARD_Y, LEVELS_W, CARD_H);
+    }
+    let half = (INNER - ROW_GAP) / 2.0;
+    let x = if slider == Slider::Volume { RAIL } else { RAIL + half + ROW_GAP };
+    (x, CARD_Y, half, CARD_H)
 }
 
-/// The transport buttons' centres in "Now playing".
+/// A level's label line and its slider.
+struct Level {
+    label: Rect,
+    slider: Rect,
+}
+
+fn level(slider: Slider, media: bool) -> Level {
+    let (cx, cy, cw, ch) = level_card(slider, media);
+    if media {
+        let top = cy + 10.0 + if slider == Slider::Volume { 0.0 } else { 42.0 };
+        Level { label: (cx + 14.0, top, cw - 28.0, 16.0), slider: (cx + 14.0, top + 20.0, cw - 28.0, 16.0) }
+    } else {
+        Level { label: (cx + 16.0, cy + 14.0, cw - 32.0, 22.0), slider: (cx + 16.0, cy + ch - 16.0 - 26.0, cw - 32.0, 26.0) }
+    }
+}
+
+/// The output picker: the volume's label line.
+fn outputs_button(controls: &Controls) -> Rect {
+    level(Slider::Volume, controls.media.is_some()).label
+}
+
+/// The title row's trailing button.
+fn close_button() -> Rect {
+    (WIDTH - RAIL - CLOSE + 4.0, HEADER_TOP + (HEADER_H - CLOSE) / 2.0, CLOSE, CLOSE)
+}
+
+/// The sound page's way back: a chevron and its title.
+fn back_button() -> Rect {
+    (RAIL - 6.0, HEADER_TOP, 120.0, HEADER_H)
+}
+
+/// The transport buttons' centres in the music card.
 const MEDIA_ACTIONS: [Action; 3] = [Action::MediaPrevious, Action::MediaPlayPause, Action::MediaNext];
 
 fn media_button(i: usize) -> (f64, f64) {
-    (RAIL + INNER - 10.0 - MEDIA_BUTTON / 2.0 - (2 - i) as f64 * MEDIA_BUTTON, MEDIA_Y + MEDIA_H / 2.0)
+    let (x, y, _, h) = music_card();
+    let text_x = x + 12.0 + ART + 14.0;
+    (text_x + MEDIA_BUTTON / 2.0 - 8.0 + i as f64 * (MEDIA_BUTTON + 4.0), y + h - 12.0 - MEDIA_BUTTON / 2.0)
 }
 
-fn inside(x: f64, y: f64, rect: (f64, f64, f64, f64)) -> bool {
+fn inside(x: f64, y: f64, rect: Rect) -> bool {
     x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
 }
 
 /// Where along `slider` the menu-relative `x` falls (0..1); also used
 /// while dragging.
-pub fn slider_fraction(slider: Slider, x: f64) -> f64 {
+pub fn slider_fraction(slider: Slider, controls: &Controls, x: f64) -> f64 {
     let (sx, sw) = match slider {
-        Slider::Brightness | Slider::Volume => (SLIDER_X, SLIDER_W),
+        Slider::Brightness | Slider::Volume => {
+            let (sx, _, sw, _) = level(slider, controls.media.is_some()).slider;
+            (sx, sw)
+        }
         Slider::App(_) | Slider::Mic => (ROW_SLIDER_X, ROW_SLIDER_W),
     };
     ((x - sx) / sw).clamp(0.0, 1.0)
 }
 
 pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
-    let (cx, cy, size) = menu_style::close_rect(WIDTH);
-    if inside(x, y, (cx - 6.0, cy - 6.0, size + 12.0, size + 12.0)) {
+    let (cx, cy, cw, ch) = close_button();
+    if inside(x, y, (cx - 6.0, cy - 6.0, cw + 12.0, ch + 12.0)) {
         return Some(Hit::Action(Action::Close));
     }
     if view == View::Sound {
-        if inside(x, y, (RAIL - 6.0, cy - 6.0, 110.0, size + 12.0)) {
+        if inside(x, y, back_button()) {
             return Some(Hit::Action(Action::Back));
         }
         if !(RAIL..RAIL + INNER).contains(&x) {
@@ -285,54 +342,44 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
         // a row's slider takes the press anywhere right of its icon
         if row >= 0.0 && (row as usize) < page.app_rows && x >= ROW_SLIDER_X - 8.0 {
             let app = Slider::App(row as usize);
-            return Some(Hit::Slider(app, slider_fraction(app, x)));
+            return Some(Hit::Slider(app, slider_fraction(app, controls, x)));
         }
         if controls.mic.is_some() && (page.mic..page.mic + MIC_H).contains(&y) {
             return Some(if x < ROW_SLIDER_X - 8.0 {
                 Hit::Action(Action::MicMute)
             } else {
-                Hit::Slider(Slider::Mic, slider_fraction(Slider::Mic, x))
+                Hit::Slider(Slider::Mic, slider_fraction(Slider::Mic, controls, x))
             });
         }
         return None;
     }
-    for (i, action) in TILES.iter().enumerate() {
-        let (tx, ty) = tile(i);
-        if inside(x, y, (tx, ty, TILE_W, TILE_H)) {
+    for (i, action) in SHORTCUTS.iter().enumerate() {
+        if inside(x, y, shortcut(i)) {
             return Some(Hit::Action(*action));
         }
     }
-    if controls.media.is_some() {
+    let media = controls.media.is_some();
+    if media {
         for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
             let (cx, cy) = media_button(i);
-            if (x - cx).abs() <= MEDIA_BUTTON / 2.0 && (y - cy).abs() <= 22.0 {
+            if (x - cx).abs() <= MEDIA_BUTTON / 2.0 + 2.0 && (y - cy).abs() <= MEDIA_BUTTON / 2.0 + 4.0 {
                 return Some(Hit::Action(*action));
             }
         }
     }
-    if inside(x, y, night_button(controls)) {
-        return Some(Hit::Action(Action::Night));
-    }
     if !controls.sinks.is_empty() && inside(x, y, outputs_button(controls)) {
         return Some(Hit::Action(Action::Outputs));
     }
-    let dy = shift(controls);
-    for (slider, top, present) in [
-        (Slider::Brightness, DISPLAY_Y + dy, controls.brightness.is_some()),
-        (Slider::Volume, SOUND_Y + dy, controls.volume.is_some()),
-    ] {
-        // the whole lower part of the module grabs the slider
-        if present && inside(x, y, (RAIL, top + SLIDER_DY - 8.0, INNER, SLIDER_H + 16.0)) {
-            return Some(Hit::Slider(slider, slider_fraction(slider, x)));
-        }
-    }
-    for (i, action) in SMALL.iter().enumerate() {
-        if inside(x, y, (small(i), BOTTOM_Y + dy, SMALL_W, BOTTOM_H)) {
-            return Some(Hit::Action(*action));
+    for (slider, present) in [(Slider::Volume, controls.volume.is_some()), (Slider::Brightness, controls.brightness.is_some())] {
+        let (sx, sy, sw, sh) = level(slider, media).slider;
+        // a little room around the slider grabs it too
+        if present && inside(x, y, (sx - 8.0, sy - 8.0, sw + 16.0, sh + 16.0)) {
+            return Some(Hit::Slider(slider, slider_fraction(slider, controls, x)));
         }
     }
     None
 }
+
 fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
     cr.save().unwrap();
     cr.translate(x, y);
@@ -388,11 +435,15 @@ fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
             let _ = cr.fill();
         }
         Action::Dnd => {
+            // moon.fill: a disc with a bite taken from its upper right
+            cr.save().unwrap();
             cr.set_fill_rule(cairo::FillRule::EvenOdd);
-            cr.arc(0.0, 0.0, 11.0, 0.0, std::f64::consts::TAU);
-            cr.new_sub_path();
-            cr.arc(5.0, -4.0, 10.0, 0.0, std::f64::consts::TAU);
+            cr.rectangle(-20.0, -20.0, 40.0, 40.0);
+            cr.arc(6.5, -5.5, 8.5, 0.0, std::f64::consts::TAU);
+            cr.clip();
+            cr.arc(0.0, 0.0, 10.5, 0.0, std::f64::consts::TAU);
             let _ = cr.fill();
+            cr.restore().unwrap();
         }
         _ => {}
     }
@@ -493,6 +544,21 @@ fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64
             cr.line_to(3.5, 3.4);
             let _ = cr.stroke();
         }
+        "sunset" => {
+            // night mode: half a sun sinking behind the horizon
+            cr.arc(0.0, 3.0, 5.0, std::f64::consts::PI, tau);
+            let _ = cr.fill();
+            for i in 1..4 {
+                let a = std::f64::consts::PI + i as f64 * std::f64::consts::PI / 4.0;
+                cr.move_to(7.6 * a.cos(), 3.0 + 7.6 * a.sin());
+                cr.line_to(9.8 * a.cos(), 3.0 + 9.8 * a.sin());
+            }
+            cr.move_to(-9.5, 3.0);
+            cr.line_to(9.5, 3.0);
+            cr.move_to(-5.5, 7.0);
+            cr.line_to(5.5, 7.0);
+            let _ = cr.stroke();
+        }
         "record" => {
             // a ring around a dot (screen recording)
             cr.arc(0.0, 0.0, 7.5, 0.0, tau);
@@ -569,250 +635,290 @@ fn slider(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, symbol: &str
     glyph(cr, symbol, x + h / 2.0 + 1.0, y + h / 2.0, level, (0.0, 0.0, 0.0, 0.62 * alpha));
 }
 
-fn module(cr: &Context, renderer: &Renderer, title: &str, x: f64, y: f64, alpha: f64) {
-    if alpha <= 0.002 {
-        return;
-    }
-    menu_style::group(cr, x + RAIL, y, INNER, MODULE_H, 0.0, alpha);
-    menu_style::label(cr, renderer, title, x + RAIL + 12.0, y + 8.0, 160.0, Font::Label, alpha);
+/// A card of the open island: a faint white wash, no outline.
+fn card(cr: &Context, rect: Rect, r: f64, alpha: f64) {
+    menu_style::rounded(cr, rect.0, rect.1, rect.2, rect.3, r);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.065 * alpha);
+    let _ = cr.fill();
 }
 
-/// The menu at `x`, `y`; `view_k` fades a page in or out during a switch.
+/// The title row: the page's title, and at its end a faint ellipsis that
+/// becomes the collapse button under the pointer (a title, not a toolbar).
+fn header(cr: &Context, renderer: &Renderer, x: f64, y: f64, title: &str, lead: f64, close_hover: f64, alpha: f64) {
+    let title_h = menu_style::line_height(cr, renderer, Font::Title);
+    menu_style::text(cr, renderer, title, x + RAIL + lead, y + HEADER_TOP + (HEADER_H - title_h) / 2.0, 260.0, Font::Title,
+        (1.0, 1.0, 1.0), alpha);
+    let (bx, by, bw, bh) = close_button();
+    let (cx, cy) = (x + bx + bw / 2.0, y + by + bh / 2.0);
+    let lit = close_hover.clamp(0.0, 1.0);
+    if lit > 0.0 {
+        menu_style::rounded(cr, x + bx, y + by, bw, bh, 8.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.09 * lit * alpha);
+        let _ = cr.fill();
+    }
+    // the dots gather into the chevron
+    let dots = 1.0 - lit;
+    if dots > 0.01 {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.35 * dots * alpha);
+        for i in -1..=1 {
+            cr.new_path();
+            cr.arc(cx + i as f64 * 5.0 * dots, cy, 1.4, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+    }
+    if lit > 0.01 {
+        menu_style::chevron(cr, cx, cy + 1.5, 5.0 * (0.6 + 0.4 * lit), -std::f64::consts::FRAC_PI_2, lit * alpha);
+    }
+}
+
+/// The menu at `x`, `y`.
 pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, view: View, close_hover: f64, frame: &Frame) {
     if alpha <= 0.002 {
         return;
     }
-    let (cx, cy, size) = menu_style::close_rect(WIDTH);
     match view {
         View::Main => {
-            menu_style::header(cr, renderer, x, y, WIDTH, None, "Пункт управления", None, 60.0, alpha);
+            header(cr, renderer, x, y, "Управление", 0.0, close_hover, alpha);
             draw_main(cr, renderer, x, y, alpha, frame);
         }
-        View::Sound => draw_sound(cr, renderer, x, y, alpha, frame),
+        View::Sound => {
+            let back = (frame.hover)(Action::Back).clamp(0.0, 1.0);
+            let (bx, by, _, bh) = back_button();
+            menu_style::chevron(cr, x + bx + 12.0, y + by + bh / 2.0, 6.5, std::f64::consts::PI, alpha * (0.7 + 0.3 * back));
+            header(cr, renderer, x, y, "Звук", 18.0, close_hover, alpha);
+            draw_sound(cr, renderer, x, y, alpha, frame);
+        }
     }
-    menu_style::close(cr, x + cx, y + cy, size, close_hover, alpha);
 }
 
 fn draw_main(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame) {
+    let controls = frame.controls;
+    let media = controls.media.is_some();
+    // the cards, then the rail's two rows arrive in a wave
+    let (card_alpha, rise) = frame.arrival(0, alpha);
+    if let Some(m) = &controls.media {
+        draw_media(cr, renderer, x, y + rise, card_alpha, frame, m);
+    }
+    if media {
+        card(cr, offset(level_card(Slider::Volume, true), x, y + rise), CARD_R, card_alpha);
+    } else {
+        for slider in [Slider::Volume, Slider::Brightness] {
+            card(cr, offset(level_card(slider, false), x, y + rise), CARD_R, card_alpha);
+        }
+    }
+    draw_level(cr, renderer, x, y + rise, card_alpha, frame, Slider::Volume);
+    draw_level(cr, renderer, x, y + rise, card_alpha, frame, Slider::Brightness);
+    for (i, action) in SHORTCUTS.iter().enumerate() {
+        let (alpha, rise) = frame.arrival(1 + i / PER_ROW, alpha);
+        if alpha > 0.002 {
+            draw_shortcut(cr, renderer, offset(shortcut(i), x, y + rise), *action, i, alpha, frame);
+        }
+    }
+}
+
+fn offset(rect: Rect, x: f64, y: f64) -> Rect {
+    (rect.0 + x, rect.1 + y, rect.2, rect.3)
+}
+
+/// A level: its name (and for sound, the output, which opens the sound
+/// page), and the slider.
+fn draw_level(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame, slider: Slider) {
+    let controls = frame.controls;
+    let media = controls.media.is_some();
+    let part = level(slider, media);
+    let (lx, ly, lw, lh) = offset(part.label, x, y);
+    let font = if media { Font::Footnote } else { Font::Headline };
+    let line = menu_style::line_height(cr, renderer, font);
+    let (name, present) = match slider {
+        Slider::Volume => ("Звук", controls.volume.is_some()),
+        _ => ("Дисплей", controls.brightness.is_some()),
+    };
+    let name_w = renderer.layout(cr, name, font).pixel_extents().1.width() as f64;
+    menu_style::text(cr, renderer, name, lx, ly + (lh - line) / 2.0, lw, font, (1.0, 1.0, 1.0),
+        alpha * if media { menu_style::SECONDARY } else { 1.0 });
+    if slider == Slider::Volume {
+        if let Some(sink) = controls.current_sink() {
+            // the output, right-aligned after the name, with a chevron
+            let lit = (frame.hover)(Action::Outputs).clamp(0.0, 1.0);
+            let sub = Font::Footnote;
+            let sub_h = menu_style::line_height(cr, renderer, sub);
+            let room = lw - name_w - 12.0 - 14.0;
+            let label_w = renderer.layout(cr, &sink.label, sub).pixel_extents().1.width() as f64;
+            let text_w = label_w.min(room).max(0.0);
+            let right = lx + lw;
+            menu_style::chevron(cr, right - 3.0, ly + lh / 2.0, 3.5, 0.0, alpha * (0.45 + 0.55 * lit));
+            if room > 24.0 {
+                crate::motion::text(cr, renderer, &frame.key("sink"), &sink.label, right - 12.0 - room, ly + (lh - sub_h) / 2.0,
+                    room, 1.0, sub, (1.0, 1.0, 1.0), alpha * (menu_style::SECONDARY + (1.0 - menu_style::SECONDARY) * lit));
+                if !media {
+                    glyph(cr, sink_glyph(sink.kind), right - 24.0 - text_w, ly + lh / 2.0, 1.0,
+                        (1.0, 1.0, 1.0, alpha * (menu_style::SECONDARY + 0.4 * lit)));
+                }
+            }
+        }
+    }
+    let (sx, sy, sw, sh) = offset(part.slider, x, y);
+    let (symbol, value) = match slider {
+        Slider::Volume if controls.muted => ("speaker-muted", 0.0),
+        Slider::Volume => ("speaker", (frame.level)(Slider::Volume)),
+        _ => ("sun", (frame.level)(Slider::Brightness)),
+    };
+    let fade = if present { 1.0 } else { 0.35 };
+    if media {
+        thin_slider(cr, sx, sy, sw, sh, value, symbol, (frame.level)(slider), alpha * fade, (frame.grow)(slider));
+    } else {
+        self::slider(cr, sx, sy, sw, sh, value, symbol, (frame.level)(slider), alpha * fade, (frame.grow)(slider));
+    }
+}
+
+/// The slim card's slider: the symbol stands before the track.
+#[allow(clippy::too_many_arguments)]
+fn thin_slider(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, symbol: &str, level: f64, alpha: f64, grow: f64) {
+    glyph(cr, symbol, x + 8.0, y + h / 2.0, level, (1.0, 1.0, 1.0, 0.85 * alpha));
+    let track = x + 24.0;
+    row_slider_sized(cr, track, y + (h - 8.0) / 2.0, w - 24.0, 8.0, value, alpha, grow, (1.0, 1.0, 1.0));
+}
+
+/// A shortcut tile: a round well over a one-line label; on, the well takes
+/// its colour. The label reads the tile's state when it has one.
+#[allow(clippy::too_many_arguments)]
+fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, i: usize, alpha: f64, frame: &Frame) {
     let status = frame.status;
     let controls = frame.controls;
+    let (tx, ty, tw, th) = rect;
+    let lit = (frame.hover)(action).clamp(0.0, 1.0);
+    let missing = action == Action::Record && status.recording.is_none();
+    let alpha = if missing { alpha * 0.4 } else { alpha };
     let dnd = status.dnd.clamp(0.0, 1.0);
-    let base_alpha = alpha;
-    for (i, action) in TILES.iter().enumerate() {
-        let (alpha, rise) = frame.arrival(i / 2, base_alpha);
-        if alpha <= 0.002 {
-            continue;
-        }
-        let (tx, ty) = tile(i);
-        let (tx, ty) = (x + tx, y + ty + rise);
-        let h = (frame.hover)(*action).clamp(0.0, 1.0);
-        let press = menu_style::press_scale((frame.pressed)(*action));
-        cr.save().unwrap();
-        cr.translate(tx + TILE_W / 2.0, ty + TILE_H / 2.0);
-        cr.scale(press, press);
-        cr.translate(-(tx + TILE_W / 2.0), -(ty + TILE_H / 2.0));
-        menu_style::group(cr, tx, ty, TILE_W, TILE_H, h, alpha);
-        let accent = match action {
-            Action::Wifi | Action::Bluetooth => Some(menu_style::BLUE),
-            Action::Timer => Some(menu_style::ORANGE),
-            Action::Notifications => Some(menu_style::RED),
-            _ => None,
-        };
-        let (wx, wy) = (tx + 12.0 + 16.0, ty + TILE_H / 2.0);
-        menu_style::well(cr, wx, wy, 16.0, accent, alpha);
-        if *action == Action::Dnd && dnd > 0.0 {
-            menu_style::well(cr, wx, wy, 16.0, Some(menu_style::PURPLE), alpha * dnd);
-        }
-        let bounce = menu_style::bounce_scale((frame.bounced)(*action));
-        icon(cr, *action, wx, wy, alpha, (0.7 + 0.03 * h) * bounce);
-        let (title, subtitle) = match action {
-            Action::Wifi => ("Wi-Fi", "Сети".to_string()),
-            Action::Bluetooth => ("Bluetooth", "Устройства".to_string()),
-            Action::Timer => ("Таймер", match status.timer {
-                Some((left, true)) => clock(left),
-                Some((left, false)) => format!("Пауза · {}", clock(left)),
-                None => "Выкл.".to_string(),
-            }),
-            Action::Launcher => ("Лаунчер", "Приложения".to_string()),
-            Action::Notifications => ("Уведомления", match status.unread {
-                0 => "Нет новых".to_string(),
-                n => format!("{} новых", n.min(99)),
-            }),
-            Action::Dnd => ("Тишина", if dnd > 0.5 { "Вкл.".to_string() } else { "Выкл.".to_string() }),
-            _ => unreachable!(),
-        };
-        two_lines(cr, renderer, title, &subtitle, tx + 56.0, ty, TILE_W - 64.0, TILE_H, alpha,
-            &frame.key(&format!("{action:?}")));
-        cr.restore().unwrap();
-    }
-
-    // what is playing, then the modules below it
-    let media_rows = usize::from(controls.media.is_some());
-    if let Some(media) = &controls.media {
-        let (alpha, rise) = frame.arrival(3, base_alpha);
-        draw_media(cr, renderer, x, y + MEDIA_Y + rise, alpha, frame, media);
-    }
-    let y = y + shift(controls);
-
-    // Display
-    let (alpha, rise) = frame.arrival(3 + media_rows, base_alpha);
-    module(cr, renderer, "Дисплей", x, y + DISPLAY_Y + rise, alpha);
-    // night mode: a capsule that warms to orange, its moon bouncing
-    {
-        let (bx, by, bw, bh) = night_button(controls);
-        let by = by - shift(controls) + rise;
-        let night = status.night.clamp(0.0, 1.0);
-        let lit = (frame.hover)(Action::Night).clamp(0.0, 1.0);
-        let press = menu_style::press_scale((frame.pressed)(Action::Night));
-        let (cx, cy) = (x + bx + bw / 2.0, y + by + bh / 2.0);
-        menu_style::transformed(cr, cx, cy, press, 0.0, || {
-            menu_style::rounded(cr, x + bx, y + by, bw, bh, bh / 2.0);
-            let o = menu_style::ORANGE;
-            cr.set_source_rgba(1.0, 1.0, 1.0, (0.10 + 0.06 * lit) * (1.0 - night) * alpha);
-            let _ = cr.fill_preserve();
-            cr.set_source_rgba(o.0, o.1, o.2, (0.28 + 0.08 * lit) * night * alpha);
+    let night = status.night.clamp(0.0, 1.0);
+    let recording = status.recording == Some(true);
+    let armed = action == Action::Logout && frame.logout_armed;
+    // how "on" the tile is, and its colour then
+    let (on, accent) = match action {
+        Action::Timer => (if status.timer.is_some() { 1.0 } else { 0.0 }, menu_style::ORANGE),
+        Action::Notifications => (if status.unread > 0 { 1.0 } else { 0.0 }, menu_style::RED),
+        Action::Dnd => (dnd, menu_style::PURPLE),
+        Action::Night => (night, menu_style::ORANGE),
+        Action::Record => (if recording { 1.0 } else { 0.0 }, menu_style::RED),
+        Action::Logout => (if armed { 1.0 } else { 0.0 }, menu_style::RED),
+        Action::Wifi | Action::Bluetooth => (1.0, menu_style::BLUE),
+        _ => (0.0, menu_style::BLUE),
+    };
+    // hovered, the tile lifts a touch under a light wash; pressed, it dips
+    let press = menu_style::press_scale((frame.pressed)(action)) * (1.0 + 0.022 * lit);
+    let (cx, cy) = (tx + tw / 2.0, ty + th / 2.0);
+    menu_style::transformed(cr, cx, cy, press, 0.0, || {
+        if lit > 0.0 {
+            menu_style::rounded(cr, tx, ty, tw, th, SHORTCUT_R);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.09 * lit * alpha);
             let _ = cr.fill();
-            let colour = (1.0 + (o.0 - 1.0) * night, 1.0 + (o.1 - 1.0) * night, 1.0 + (o.2 - 1.0) * night);
-            let mx = x + bx + 16.0;
-            menu_style::transformed(cr, mx, cy, menu_style::bounce_scale((frame.bounced)(Action::Night)), 0.0, || {
-                cr.save().unwrap();
-                cr.set_fill_rule(cairo::FillRule::EvenOdd);
-                cr.new_path();
-                cr.arc(mx, cy, 6.0, 0.0, std::f64::consts::TAU);
-                cr.new_sub_path();
-                cr.arc(mx + 3.4, cy - 2.6, 5.2, 0.0, std::f64::consts::TAU);
-                cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
-                let _ = cr.fill();
-                cr.restore().unwrap();
-            });
-            let lh = menu_style::line_height(cr, renderer, Font::Subhead);
-            menu_style::text(cr, renderer, "Ночной режим", mx + 12.0, cy - lh / 2.0, bw - 34.0, Font::Subhead, colour,
-                alpha * (0.75 + 0.25 * night.max(lit)));
-        });
-    }
-    let present = controls.brightness.is_some();
-    slider(cr, x + SLIDER_X, y + DISPLAY_Y + SLIDER_DY + rise, SLIDER_W, SLIDER_H, (frame.level)(Slider::Brightness),
-        "sun", 1.0, alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Brightness));
-
-    // Sound, with the output it plays through
-    let (alpha, rise) = frame.arrival(4 + media_rows, base_alpha);
-    let y = y + rise;
-    module(cr, renderer, "Звук", x, y + SOUND_Y, alpha);
-    if let Some(sink) = controls.current_sink() {
-        let (bx, by, bw, bh) = outputs_button(controls);
-        let by = by - shift(controls);
-        let lit = (frame.hover)(Action::Outputs).clamp(0.0, 1.0);
-        let label_w = renderer.layout(cr, &sink.label, Font::Subhead).pixel_extents().1.width() as f64;
-        let text_w = label_w.min(bw - 30.0);
-        let right = x + bx + bw;
-        menu_style::chevron(cr, right - 5.0, y + by + bh / 2.0, 4.0, 0.0, alpha * (0.55 + 0.45 * lit));
-        crate::motion::text(cr, renderer, &frame.key("sink"), &sink.label, right - 16.0 - (bw - 30.0),
-            y + by + (bh - menu_style::line_height(cr, renderer, Font::Subhead)) / 2.0, bw - 30.0, 1.0, Font::Subhead,
-            (1.0, 1.0, 1.0), alpha * (menu_style::SECONDARY + (1.0 - menu_style::SECONDARY) * lit));
-        glyph(cr, sink_glyph(sink.kind), right - 30.0 - text_w, y + by + bh / 2.0, 1.0,
-            (1.0, 1.0, 1.0, alpha * (menu_style::SECONDARY + 0.4 * lit)));
-    }
-    let present = controls.volume.is_some();
-    let symbol = if controls.muted { "speaker-muted" } else { "speaker" };
-    slider(cr, x + SLIDER_X, y + SOUND_Y + SLIDER_DY, SLIDER_W, SLIDER_H,
-        if controls.muted { 0.0 } else { (frame.level)(Slider::Volume) }, symbol, (frame.level)(Slider::Volume),
-        alpha * if present { 1.0 } else { 0.35 }, (frame.grow)(Slider::Volume));
-    let y = y - rise;
-
-    // the keyboard layout and the session
-    let (alpha, rise) = frame.arrival(5 + media_rows, base_alpha);
-    for (i, action) in SMALL.iter().enumerate() {
-        let sx = x + small(i);
-        let sy = y + BOTTOM_Y + rise;
-        let h = (frame.hover)(*action).clamp(0.0, 1.0);
-        let recording = *action == Action::Record && status.recording == Some(true);
-        let armed = *action == Action::Logout && frame.logout_armed || recording;
-        let missing = *action == Action::Record && status.recording.is_none();
-        let alpha = if missing { alpha * 0.4 } else { alpha };
-        let press = menu_style::press_scale((frame.pressed)(*action));
-        cr.save().unwrap();
-        cr.translate(sx + SMALL_W / 2.0, sy + BOTTOM_H / 2.0);
-        cr.scale(press, press);
-        cr.translate(-(sx + SMALL_W / 2.0), -(sy + BOTTOM_H / 2.0));
-        menu_style::group(cr, sx, sy, SMALL_W, BOTTOM_H, h, alpha);
-        let (name, label) = match action {
-            Action::Layout => ("keyboard", controls.layout.as_deref().map(crate::control::layout_label)
-                .unwrap_or_else(|| "Раскладка".into())),
-            Action::Record => ("record", if recording { "Стоп".into() } else { "Запись".into() }),
-            Action::Lock => ("lock", "Блокировка".into()),
-            Action::Sleep => ("sleep", "Сон".into()),
-            _ => ("logout", if frame.logout_armed { "Точно?".into() } else { "Выйти".into() }),
-        };
-        let wy = sy + 25.0;
-        let since = (frame.bounced)(*action);
+        }
+        let (wx, wy) = (cx, ty + 4.0 + WELL_R);
+        let since = (frame.bounced)(action);
         let (scale, angle) = match action {
             // asking to confirm, the symbol shakes its head
             Action::Logout => (1.0, menu_style::wiggle_angle(since)),
             _ => (menu_style::bounce_scale(since), 0.0),
         };
-        menu_style::transformed(cr, sx + SMALL_W / 2.0, wy, scale, angle, || {
-            menu_style::well(cr, sx + SMALL_W / 2.0, wy, 16.0, armed.then_some(menu_style::RED), alpha);
-            glyph(cr, name, sx + SMALL_W / 2.0, wy, 1.0, (1.0, 1.0, 1.0, alpha));
+        menu_style::transformed(cr, wx, wy, scale, angle, || {
+            cr.new_path();
+            cr.arc(wx, wy, WELL_R, 0.0, std::f64::consts::TAU);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.075 * (1.0 - on) * alpha);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgba(accent.0, accent.1, accent.2, on * alpha);
+            let _ = cr.fill();
+            match action {
+                Action::Wifi | Action::Bluetooth | Action::Timer | Action::Launcher | Action::Notifications | Action::Dnd => {
+                    icon(cr, action, wx, wy, alpha, 0.68);
+                }
+                Action::Night => glyph(cr, "sunset", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Record => glyph(cr, "record", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Layout => glyph(cr, "keyboard", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Lock => glyph(cr, "lock", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Sleep => glyph(cr, "sleep", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                _ => glyph(cr, "logout", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+            }
         });
-        let colour = if armed { menu_style::RED } else { (1.0, 1.0, 1.0) };
+        let label = match action {
+            Action::Wifi => "Wi-Fi".to_string(),
+            Action::Bluetooth => "Bluetooth".to_string(),
+            Action::Timer => match status.timer {
+                Some((left, true)) => clock(left),
+                Some((left, false)) => format!("‖ {}", clock(left)),
+                None => "Таймер".to_string(),
+            },
+            Action::Notifications => match status.unread {
+                0 => "Уведомления".to_string(),
+                n => format!("{} новых", n.min(99)),
+            },
+            Action::Dnd => "Тишина".to_string(),
+            Action::Night => "Ночь".to_string(),
+            Action::Launcher => "Поиск".to_string(),
+            Action::Record => if recording { "Стоп".to_string() } else { "Запись".to_string() },
+            Action::Layout => controls.layout.as_deref().map(crate::control::layout_label).unwrap_or_else(|| "Раскладка".into()),
+            Action::Lock => "Блокировка".to_string(),
+            Action::Sleep => "Сон".to_string(),
+            _ => if armed { "Точно?".to_string() } else { "Выйти".to_string() },
+        };
+        let colour = match action {
+            Action::Timer if status.timer.is_some() => menu_style::ORANGE,
+            Action::Logout if armed => menu_style::RED,
+            Action::Record if recording => menu_style::RED,
+            _ => (1.0, 1.0, 1.0),
+        };
         let lh = menu_style::line_height(cr, renderer, Font::Footnote);
-        crate::motion::text(cr, renderer, &frame.key(&format!("small{i}")), &label, sx + 1.0, sy + 44.0 + (18.0 - lh) / 2.0,
-            SMALL_W - 2.0, 0.5, Font::Footnote, colour, alpha * if armed { 1.0 } else { 0.85 });
-        cr.restore().unwrap();
-    }
+        crate::motion::text(cr, renderer, &frame.key(&format!("shortcut{i}")), &label, tx + 2.0, ty + 4.0 + 2.0 * WELL_R + 6.0 + (16.0 - lh) / 2.0,
+            tw - 4.0, 0.5, Font::Footnote, colour, alpha * if colour == (1.0, 1.0, 1.0) { 0.85 } else { 1.0 });
+    });
 }
 
 /// "Now playing": the art, the title over the artist, and previous /
-/// play-pause / next; a new track's title rises in, a pressed button dips.
+/// play-pause / next under them; a new track's title rises in, a pressed
+/// button dips.
 fn draw_media(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame, media: &Media) {
     if alpha <= 0.002 {
         return;
     }
-    menu_style::group(cr, x + RAIL, y, INNER, MEDIA_H, 0.0, alpha);
-    let (ax, ay) = (x + RAIL + 12.0, y + (MEDIA_H - MEDIA_ART) / 2.0);
-    crate::player::art_tile(cr, renderer, frame.art, &media.art_url, ax, ay, MEDIA_ART, 10.0, alpha);
-    let tx = ax + MEDIA_ART + 12.0;
-    let tw = x + media_button(0).0 - MEDIA_BUTTON / 2.0 - 6.0 - tx;
+    let (mx, my, mw, mh) = offset(music_card(), x, y);
+    card(cr, (mx, my, mw, mh), CARD_R, alpha);
+    let (ax, ay) = (mx + 12.0, my + (mh - ART) / 2.0);
+    crate::player::art_tile(cr, renderer, frame.art, &media.art_url, ax, ay, ART, 14.0, alpha);
+    let tx = ax + ART + 14.0;
+    let tw = mx + mw - 12.0 - tx;
     let title_h = menu_style::line_height(cr, renderer, Font::Headline);
-    let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
-    let top = y + (MEDIA_H - title_h - sub_h) / 2.0;
+    let top = my + 14.0;
     let second = if media.artist.is_empty() { media.app.clone() } else { media.artist.clone() };
     crate::motion::text(cr, renderer, &frame.key("media-title"), &media.title, tx, top, tw, 0.0, Font::Headline,
         (1.0, 1.0, 1.0), alpha);
-    crate::motion::text(cr, renderer, &frame.key("media-artist"), &second, tx, top + title_h, tw, 0.0, Font::Subhead,
+    crate::motion::text(cr, renderer, &frame.key("media-artist"), &second, tx, top + title_h, tw, 0.0, Font::Footnote,
         (1.0, 1.0, 1.0), menu_style::SECONDARY * alpha);
     for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
         let (cx, cy) = media_button(i);
-        let (cx, cy) = (x + cx, y - MEDIA_Y + cy);
+        let (cx, cy) = (x + cx, y + cy);
         let lit = (frame.hover)(*action).clamp(0.0, 1.0);
         if lit > 0.0 {
-            menu_style::well(cr, cx, cy, 17.0, None, 0.8 * lit * alpha);
+            menu_style::well(cr, cx, cy, MEDIA_BUTTON / 2.0, None, 0.8 * lit * alpha);
         }
         let control = match action {
             Action::MediaPrevious => crate::player::Control::Previous,
             Action::MediaPlayPause => crate::player::Control::PlayPause,
             _ => crate::player::Control::Next,
         };
-        let size = if control == crate::player::Control::PlayPause { 0.78 } else { 0.62 };
+        let size = if control == crate::player::Control::PlayPause { 0.74 } else { 0.58 };
         let press = menu_style::press_scale((frame.pressed)(*action));
         crate::player::control_glyph(cr, control, media.playing, cx, cy, size * press, alpha * (0.85 + 0.15 * lit));
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn two_lines(cr: &Context, renderer: &Renderer, title: &str, subtitle: &str, x: f64, y: f64, w: f64, h: f64, alpha: f64, key: &str) {
-    let title_h = menu_style::line_height(cr, renderer, Font::Headline);
-    let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
-    let top = y + (h - title_h - sub_h) / 2.0;
-    menu_style::label(cr, renderer, title, x, top, w, Font::Headline, alpha);
-    crate::motion::text(cr, renderer, key, subtitle, x, top + title_h, w, 0.0, Font::Subhead, (1.0, 1.0, 1.0),
-        menu_style::SECONDARY * alpha);
-}
-
 /// A thin slider for a list row (no symbol inside); grows when held.
 fn row_slider(cr: &Context, x: f64, y: f64, w: f64, value: f64, alpha: f64, grow: f64, colour: (f64, f64, f64)) {
+    row_slider_sized(cr, x, y, w, ROW_SLIDER_H, value, alpha, grow, colour);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_slider_sized(cr: &Context, x: f64, y: f64, w: f64, h: f64, value: f64, alpha: f64, grow: f64, colour: (f64, f64, f64)) {
     let swell = 4.0 * grow.clamp(0.0, 1.2);
-    let (x, y, w, h) = (x - swell * 0.5, y - swell * 0.5, w + swell, ROW_SLIDER_H + swell);
+    let (x, y, w, h) = (x - swell * 0.5, y - swell * 0.5, w + swell, h + swell);
     menu_style::rounded(cr, x, y, w, h, h / 2.0);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha);
     let _ = cr.fill();
@@ -864,13 +970,6 @@ pub fn mic(cr: &Context, cx: f64, cy: f64, muted: bool, alpha: f64) {
 
 fn draw_sound(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, frame: &Frame) {
     let controls = frame.controls;
-    let back = (frame.hover)(Action::Back);
-    menu_style::chevron(cr, x + RAIL + 5.0, y + menu_style::HEADER_MID, 7.0, std::f64::consts::PI, alpha * (0.8 + 0.2 * back));
-    menu_style::text(cr, renderer, "Назад", x + RAIL + 16.0,
-        y + menu_style::HEADER_MID - menu_style::line_height(cr, renderer, Font::Body) / 2.0, 80.0, Font::Body,
-        menu_style::BLUE, alpha * (0.85 + 0.15 * back));
-    menu_style::centred(cr, renderer, "Звук", (x + 110.0, y + menu_style::HEADER_MID - 12.0, WIDTH - 220.0, 24.0),
-        Font::Title, (1.0, 1.0, 1.0), alpha);
     let page = sound_page(controls);
     let body_h = menu_style::line_height(cr, renderer, Font::Body);
     let label_h = menu_style::line_height(cr, renderer, Font::Label);
@@ -997,39 +1096,42 @@ mod tests {
     #[test]
     fn every_control_is_hit_inside_its_target_only() {
         let c = controls();
-        for (i, action) in TILES.iter().enumerate() {
-            let (x, y) = tile(i);
-            assert_eq!(hit(View::Main, &c, x + 20.0, y + 20.0), Some(Hit::Action(*action)));
+        for (i, action) in SHORTCUTS.iter().enumerate() {
+            let (x, y, w, h) = shortcut(i);
+            assert!(x >= RAIL - 0.01 && x + w <= RAIL + INNER + 0.01, "tile {i} inside the page");
+            assert_eq!(hit(View::Main, &c, x + w / 2.0, y + h / 2.0), Some(Hit::Action(*action)));
         }
-        for (i, action) in SMALL.iter().enumerate() {
-            assert_eq!(hit(View::Main, &c, small(i) + 30.0, BOTTOM_Y + 30.0), Some(Hit::Action(*action)));
+        let (bx, by, bw, bh) = outputs_button(&c);
+        assert_eq!(hit(View::Main, &c, bx + bw - 10.0, by + bh / 2.0), Some(Hit::Action(Action::Outputs)));
+        for media in [false, true] {
+            let mut c = c.clone();
+            if media { c.media = Some(Media { title: "Says".into(), playing: true, ..Media::default() }); }
+            for slider in [Slider::Volume, Slider::Brightness] {
+                let (sx, sy, sw, sh) = level(slider, media).slider;
+                assert_eq!(hit(View::Main, &c, sx, sy + sh / 2.0), Some(Hit::Slider(slider, 0.0)));
+                assert_eq!(hit(View::Main, &c, sx + sw, sy + sh / 2.0), Some(Hit::Slider(slider, 1.0)));
+            }
+            assert_eq!(height(View::Main, &c), HEIGHT);
         }
-        let (bx, by, bw, _) = outputs_button(&c);
-        assert_eq!(hit(View::Main, &c, bx + bw - 10.0, by + 10.0), Some(Hit::Action(Action::Outputs)));
-        assert_eq!(hit(View::Main, &c, SLIDER_X, SOUND_Y + SLIDER_DY + 10.0), Some(Hit::Slider(Slider::Volume, 0.0)));
-        assert_eq!(hit(View::Main, &c, SLIDER_X + SLIDER_W, DISPLAY_Y + SLIDER_DY + 10.0),
-            Some(Hit::Slider(Slider::Brightness, 1.0)));
-        assert_eq!(hit(View::Main, &c, WIDTH - 37.0, 40.0), Some(Hit::Action(Action::Close)));
-        // with something playing, its buttons take their place and the
-        // modules below move down by the module's height
+        let (cx, cy, cw, ch) = close_button();
+        assert_eq!(hit(View::Main, &c, cx + cw / 2.0, cy + ch / 2.0), Some(Hit::Action(Action::Close)));
+        // with something playing, the music card's buttons answer
         let mut playing = c.clone();
         playing.media = Some(Media { title: "Says".into(), playing: true, ..Media::default() });
         for (i, action) in MEDIA_ACTIONS.iter().enumerate() {
             let (cx, cy) = media_button(i);
             assert_eq!(hit(View::Main, &playing, cx, cy), Some(Hit::Action(*action)));
         }
-        let dy = MEDIA_H + MODULE_GAP;
-        assert_eq!(hit(View::Main, &playing, small(0) + 30.0, BOTTOM_Y + dy + 30.0), Some(Hit::Action(Action::Layout)));
-        assert_eq!(height(View::Main, &playing), HEIGHT + dy);
-        assert_eq!(hit(View::Main, &c, WIDTH / 2.0, HEIGHT - 8.0), None);
+        assert_eq!(hit(View::Main, &c, WIDTH / 2.0, HEIGHT - 4.0), None);
         let page = sound_page(&c);
         assert_eq!(hit(View::Sound, &c, 200.0, page.sinks + SINK_H + 10.0), Some(Hit::Action(Action::Sink(1))));
-        assert_eq!(hit(View::Sound, &c, 40.0, 40.0), Some(Hit::Action(Action::Back)));
+        assert_eq!(hit(View::Sound, &c, 40.0, HEADER_TOP + HEADER_H / 2.0), Some(Hit::Action(Action::Back)));
         assert_eq!(hit(View::Sound, &c, ROW_SLIDER_X + ROW_SLIDER_W, page.apps + 40.0), Some(Hit::Slider(Slider::App(0), 1.0)));
         assert_eq!(hit(View::Sound, &c, 40.0, page.mic + 20.0), Some(Hit::Action(Action::MicMute)));
         assert_eq!(hit(View::Sound, &c, ROW_SLIDER_X, page.mic + 30.0), Some(Hit::Slider(Slider::Mic, 0.0)));
         assert_eq!(page.height, height(View::Sound, &c));
         let without = Controls { volume: None, ..controls() };
-        assert_eq!(hit(View::Main, &without, SLIDER_X + 50.0, SOUND_Y + SLIDER_DY + 10.0), None);
+        let (sx, sy, _, sh) = level(Slider::Volume, false).slider;
+        assert_eq!(hit(View::Main, &without, sx + 50.0, sy + sh / 2.0), None);
     }
 }

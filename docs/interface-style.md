@@ -48,8 +48,15 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   lock, battery, time) and what a click does only under the pointer.
 - **Cards**: notifications are separate `group` platters, as in
   Notification Center; time and an unread dot on the right, × on hover.
-- **Quick-menu tiles**: Control Center modules — a round coloured well, a
-  `Headline` title and a `Subhead` status line.
+- **Open-island pages** (Control Center, after Vorssaint): a 24 px inset,
+  a 36 px title row at y 12 (title left; at its end a faint ⋯ that becomes a
+  28 px collapse chevron under the pointer, or a back chevron before the
+  title on a sub-page), content from y 60, 16 px at the bottom. **Cards**
+  are a white 6.5 % wash with 18 px corners and no outline.
+- **Shortcut tiles**: a 40 px round well (white 7.5 %, or the tile's colour
+  when it is on) over a one-line `Footnote` label that reads the tile's
+  state when it has one; under the pointer a white 9 % wash with 14 px
+  corners and a 2 % lift; pressed, a dip.
 - **Segmented controls, switches, fields** (`segmented`, `toggle`,
   `field`): the iOS shapes; focus is a blue ring, selection a grey thumb.
 - **Message field** (`reply_field`): a capsule with a dim placeholder,

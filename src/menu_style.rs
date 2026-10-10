@@ -199,18 +199,6 @@ pub fn header_keyed(
     header_with(cr, renderer, x, y, width, icon, title, subtitle, reserve, alpha, Some(key));
 }
 
-/// A sheet header: optional icon tile (its glyph drawn by `glyph` at the
-/// tile's centre), title, optional subtitle, all on HEADER_MID; `reserve`
-/// is the width kept free on the right for controls and the close button.
-#[allow(clippy::too_many_arguments)]
-pub fn header(
-    cr: &Context, renderer: &Renderer, x: f64, y: f64, width: f64,
-    icon: Option<(Rgb, &dyn Fn(&Context, f64, f64))>, title: &str, subtitle: Option<&str>,
-    reserve: f64, alpha: f64,
-) {
-    header_with(cr, renderer, x, y, width, icon, title, subtitle, reserve, alpha, None);
-}
-
 #[allow(clippy::too_many_arguments)]
 fn header_with(
     cr: &Context, renderer: &Renderer, x: f64, y: f64, width: f64,
