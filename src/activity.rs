@@ -501,19 +501,17 @@ pub fn draw_timer_menu(
     }
 }
 
-pub fn draw_timer(
-    cr: &Context,
-    renderer: &Renderer,
-    x: f64,
-    cy: f64,
-    remaining: f64,
-    fraction: f64,
-    running: bool,
-    alpha: f64,
-) {
+/// The countdown's colour: orange, red in the last minute.
+fn timer_colour(remaining: f64) -> (f64, f64, f64) {
+    if remaining <= 60.0 { (1.0, 0.23, 0.19) } else { (1.0, 0.62, 0.12) }
+}
+
+/// The timer chip's ring, 20 px wide from `x`: the time left as an arc,
+/// with pause bars inside while it is paused.
+pub fn draw_timer_ring(cr: &Context, x: f64, cy: f64, remaining: f64, fraction: f64, running: bool, alpha: f64) {
     cr.save().unwrap();
     cr.set_line_cap(cairo::LineCap::Round);
-    let colour = if remaining <= 60.0 { (1.0, 0.23, 0.19) } else { (1.0, 0.62, 0.12) };
+    let colour = timer_colour(remaining);
     cr.set_line_width(2.4);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.18 * alpha);
     cr.new_sub_path();
@@ -537,14 +535,22 @@ pub fn draw_timer(
         }
         let _ = cr.stroke();
     }
+    cr.restore().unwrap();
+}
+
+/// The timer chip's reading from `x`; `tint` 0..1 takes it from white to
+/// the countdown's own colour (the wings wear it, as Vorssaint's strip does).
+pub fn draw_timer_reading(cr: &Context, renderer: &Renderer, x: f64, cy: f64, remaining: f64, tint: f64, alpha: f64) {
     // the seconds roll down as they count down
     let label = timer_text(remaining);
     let text = renderer.layout(cr, &label, Font::Small);
     let (_, ext) = text.pixel_extents();
-    crate::motion::text(cr, renderer, "timer", &label, x + 30.0 - ext.x() as f64,
+    let c = timer_colour(remaining);
+    let t = tint.clamp(0.0, 1.0);
+    let colour = (1.0 + (c.0 - 1.0) * t, 1.0 + (c.1 - 1.0) * t, 1.0 + (c.2 - 1.0) * t);
+    crate::motion::text(cr, renderer, "timer", &label, x - ext.x() as f64,
         cy - ext.height() as f64 / 2.0 - ext.y() as f64, ext.width() as f64 + 30.0, 0.0, Font::Small,
-        (1.0, 1.0, 1.0), 0.92 * alpha);
-    cr.restore().unwrap();
+        colour, (0.92 + 0.08 * t) * alpha);
 }
 
 fn timer_text(remaining: f64) -> String {
@@ -1017,7 +1023,8 @@ mod tests {
         round_rect(&cr, 20.0, 980.0, 220.0, 32.0, 14.0);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         cr.fill().unwrap();
-        draw_timer(&cr, &renderer, 32.0, 996.0, 42.0, 0.7, true, 1.0);
+        draw_timer_ring(&cr, 32.0, 996.0, 42.0, 0.7, true, 1.0);
+        draw_timer_reading(&cr, &renderer, 62.0, 996.0, 42.0, 0.0, 1.0);
         surface.flush();
         if std::env::var_os("ISLAND_ACTIVITY_PREVIEW").is_some() {
             let mut file = std::fs::File::create("target/activity-preview.png").unwrap();

@@ -254,12 +254,13 @@ one motion, and a touchpad moves it 1:1. The selection is a light card,
 like a hovered notification.
 
 A left click on the ordinary compact body opens the four-button menu immediately.
-Left, right and middle clicks over the compact equaliser or the open music panel
+Left, right and middle clicks over the compact equaliser (or the cover, in the
+wings without the clock) or the open music panel
 pause/resume, skip forward and skip back respectively. The wheel changes tracks
 only over that music area. Timer controls, seek dragging, authentication,
 notifications and other modal sheets keep their own interactions.
 The music panel opens only from the equaliser on the right of the compact
-island; Neovim's details open only from its chip on the left. Once a panel
+island (and from the cover in the wings); Neovim's details open only from its chip on the left. Once a panel
 opens, moving the pointer across it keeps it open until the pointer leaves.
 Hovering the clock or another ordinary part gently widens the compact island,
 including when music or Neovim is active; the transition into either detailed
@@ -521,7 +522,12 @@ at the beginning of a line or as a separate word), read at start;
                           # clock editor timer tasks record music unread dnd mic
 
 Without `clock` the closed island rests as a short black capsule (150 px), and
-a right click on any free part of it opens the calendar. `island-shell compact
+a right click on any free part of it opens the calendar. Its activities then
+part into wings, as on Vorssaint's island: the song's cover and the timer's
+ring at the left end, the bars and the orange reading at the right, and the
+song's title in the middle where the clock was (the shorter wing evens up a
+little so the title stays centred). The cover answers like the equaliser, and
+the ring like the timer's reading. `island-shell compact
 clock off` (or `on`, `toggle`) changes one item in the running island and writes
 the new list to the config file, so it survives a restart.
 

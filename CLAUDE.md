@@ -97,8 +97,10 @@ launcher directly. A right click on the clock opens the calendar sheet
 (`src/calendar.rs`), with open-meteo weather under the month (`src/weather.rs`,
 place from the time zone, fetched by a background `curl`). The config key
 `compact` (`island-shell compact <item> on|off`, persisted) chooses what the
-closed island shows; without the clock it rests as a short empty capsule. Open
-pages carry Vorssaint's floating drop buttons (`src/floating.rs`) on both sides. Music controls are scoped to the equaliser on the compact
+closed island shows; without the clock it rests as a short empty capsule and
+activities part into Vorssaint's wings (cover and timer ring left, bars and
+orange reading right, the song's title in the middle). Open
+pages carry Vorssaint's floating drop buttons (`src/floating.rs`) on both sides. Music controls are scoped to the equaliser (and the wings' cover) on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.
@@ -152,7 +154,7 @@ keyboard focus. A temporary transparent layer surface catches outside clicks,
 with an input-region hole that follows the island's animated geometry; the
 closing click is consumed. Timer and Bluetooth icons are matched SVG assets
 in `assets/waybar`, installed under `~/.local/share/island-shell/icons`.
-The compact equaliser on the right is the only hover trigger for music;
+The compact equaliser on the right (and the wings' cover) is the only hover trigger for music;
 Neovim's chip on the left is the hover trigger for editor details. An already
 open panel stays open while the pointer moves across it.
 Hovering the ordinary compact body still widens its side padding on a spring,

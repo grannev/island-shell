@@ -125,6 +125,20 @@ const FLOAT_DELAY: f64 = 0.16;
 const REST_CONTENT_W: f64 = 118.0;
 const BARS_W: f64 = 26.0;
 const BARS_H: f64 = 14.0;
+/// Without the clock the closed island lays its activities out as
+/// Vorssaint's wings: the song's cover and the timer's ring at the left end,
+/// the bars and the timer's reading at the right, and the song's title in
+/// the middle where the clock was. Around a title the shorter wing evens up
+/// with the wider one (within WING_BALANCE), so the title stays centred.
+const COVER: f64 = 20.0;
+const COVER_R: f64 = 6.0;
+const COVER_GAP: f64 = 10.0;
+/// the timer's ring and its gap, when it moves to the left wing
+const RING_LEN: f64 = 30.0;
+/// the middle at its widest, while a song names itself there
+const MIDDLE_MAX: f64 = 196.0;
+/// the most room the shorter wing leaves to keep the middle centred
+const WING_BALANCE: f64 = 64.0;
 const DODGE_DUR: f64 = 0.25;
 /// Hover: a spring with a little overshoot, like the CSS
 /// cubic-bezier(0.2, 0.9, 0.3, 1.25) it replaces (peak ~250 ms in).
@@ -650,6 +664,8 @@ pub struct Island {
     timer_chip: Quintic,
     timer_w: f64,
     timer_rect: Option<Rect>,
+    /// the timer's ring when the wings put it at the left end
+    timer_mark_rect: Option<Rect>,
     timer_hovered: bool,
     timer_menu_rect: Option<Rect>,
     timer_menu_hover: Option<&'static str>,
@@ -719,6 +735,8 @@ pub struct Island {
     sheet_corners: bool,
     quick_returned_at: Option<Time>,
     eq_rect: Option<Rect>,
+    /// the song's cover at the left wing's end
+    cover_rect: Option<Rect>,
     player_rect: Option<Rect>,
     eq_hovered: bool,
     editor_chip_rect: Option<Rect>,
@@ -753,6 +771,10 @@ pub struct Island {
     line_rect: Option<Rect>,
     /// the clock's width, eased so the box follows its digits rolling
     clock_w: Option<Spring>,
+    /// the middle between the wings, eased as titles change
+    middle_w: Option<Spring>,
+    /// the last song's title and cover, kept while its wings fold away
+    wing_song: (String, String),
     editor_panel: Quintic,
     editor_opened: Time,
     editor_diagnostics: bool,
@@ -881,6 +903,7 @@ impl Island {
             timer_chip: Quintic::at_rest(0.0, CHIP_DUR),
             timer_w: 0.0,
             timer_rect: None,
+            timer_mark_rect: None,
             timer_hovered: false,
             timer_menu_rect: None,
             timer_menu_hover: None,
@@ -932,6 +955,7 @@ impl Island {
             sheet_corners: false,
             quick_returned_at: None,
             eq_rect: None,
+            cover_rect: None,
             player_rect: None,
             eq_hovered: false,
             editor_chip_rect: None,
@@ -956,6 +980,8 @@ impl Island {
             music_chip: Quintic::at_rest(if config.compact.music { 1.0 } else { 0.0 }, CHIP_DUR),
             line_rect: None,
             clock_w: None,
+            middle_w: None,
+            wing_song: (String::new(), String::new()),
             editor_panel: Quintic::at_rest(0.0, PLAYER_DUR),
             editor_diagnostics: false,
             editor_command: None,
@@ -2189,7 +2215,18 @@ impl Island {
         if !self.accepts_quick_menu_click() { return false; }
         if self.config.compact.clock { return self.clock_rect.is_some_and(|r| inside(&r)); }
         self.line_rect.is_some_and(|r| inside(&r))
-            && ![self.eq_rect, self.timer_rect, self.tasks_rect, self.record_rect, self.editor_chip_rect].iter().flatten().any(inside)
+            && ![self.eq_rect, self.cover_rect, self.timer_rect, self.timer_mark_rect, self.tasks_rect, self.record_rect,
+                self.editor_chip_rect].iter().flatten().any(inside)
+    }
+
+    /// The timer's chip: its reading, and its ring when the wings part them.
+    fn on_timer(&self, px: f64, py: f64) -> bool {
+        [self.timer_rect, self.timer_mark_rect].iter().flatten().any(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+    }
+
+    /// The song on the closed island: its bars, and its cover in the wings.
+    fn on_music(&self, px: f64, py: f64) -> bool {
+        [self.eq_rect, self.cover_rect].iter().flatten().any(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
     }
 
     pub fn set_calendar_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
@@ -2245,8 +2282,7 @@ impl Island {
         if self.pill_open() || self.launcher.is_some() || self.hidden.any() {
             return false;
         }
-        let Some(rect) = self.timer_rect else { return false };
-        if px < rect.x || px > rect.x + rect.w || py < rect.y || py > rect.y + rect.h {
+        if !self.on_timer(px, py) {
             return false;
         }
         if !self.toggle_timer(now) {
@@ -2260,7 +2296,7 @@ impl Island {
         if self.pill_open() || self.launcher.is_some() || self.hidden.any() {
             return false;
         }
-        if !self.timer_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+        if !self.on_timer(px, py) {
             return false;
         }
         self.live_activity(activity::Event::TimerMenu, now);
@@ -2289,9 +2325,7 @@ impl Island {
         let menu_hover = self.timer_menu_rect.and_then(|r| activity::timer_menu_hit(px - r.x, py - r.y));
         let changed = self.timer_menu_hover != menu_hover;
         self.timer_menu_hover = menu_hover;
-        let hovered = self.timer_rect.is_some_and(|rect| {
-            px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h
-        });
+        let hovered = self.on_timer(px, py);
         if hovered == self.timer_hovered {
             return changed;
         }
@@ -2541,6 +2575,8 @@ impl Island {
         self.clock_rect = None;
         self.line_rect = None;
         self.timer_rect = None;
+        self.timer_mark_rect = None;
+        self.cover_rect = None;
         self.timer_menu_rect = None;
         self.network_menu_rect = None;
         self.quick_rect = None;
@@ -2554,7 +2590,43 @@ impl Island {
         let dnd_len = if shown.dnd && self.dnd { 21.0 } else { 0.0 };
         let mic_k = if shown.mic { self.mic_dot.value(now).clamp(0.0, 1.2) } else { 0.0 };
         let mic_len = mic_k.min(1.0) * 16.0;
-        let content_w = chip_len + clock_len + timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
+        // --- without the clock: the wings (see COVER) ---
+        let wing = 1.0 - clock_k;
+        if let Some(song) = &self.song {
+            if self.wing_song.0 != song.now.title || self.wing_song.1 != song.now.art_url {
+                self.wing_song = (song.now.title.clone(), song.now.art_url.clone());
+            }
+        }
+        let cover_k = wing * reveal;
+        let cover_len = cover_k * (COVER + COVER_GAP);
+        let ring_len = wing * timer_k * RING_LEN;
+        let timer_len = timer_len - ring_len;
+        let title_fit = if self.wing_song.0.is_empty() {
+            REST_CONTENT_W
+        } else {
+            let w = renderer.layout(cr, &self.wing_song.0, Font::Small).pixel_extents().1.width() as f64;
+            (w + 28.0).clamp(REST_CONTENT_W, MIDDLE_MAX)
+        };
+        let title_fit = match &mut self.middle_w {
+            Some(spring) => {
+                spring.set(title_fit, now);
+                spring.value(now)
+            }
+            None => {
+                self.middle_w = Some(Spring::new(title_fit, crate::motion::DURATION, 1.0));
+                title_fit
+            }
+        };
+        let middle_len = clock_len + wing * (REST_CONTENT_W + (title_fit - REST_CONTENT_W) * reveal);
+        let left_len = chip_len + cover_len + ring_len;
+        let right_len = timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
+        // the shorter wing keeps its items at its end and leaves the room
+        // beside the middle, so a song's title stays centred; only a little
+        // room, though: a wide editor chip must not leave a long empty wing
+        let balance = wing * reveal;
+        let left_pad = balance * (right_len - left_len).clamp(0.0, WING_BALANCE);
+        let right_pad = balance * (left_len - right_len).clamp(0.0, WING_BALANCE);
+        let content_w = left_len + left_pad + middle_len + right_pad + right_len;
         // without the clock the island keeps a resting width of its own,
         // a short black capsule, rather than shrinking to its padding
         let line_w = content_w.max(REST_CONTENT_W) + 2.0 * pad;
@@ -2709,12 +2781,50 @@ impl Island {
                     cr.restore().unwrap();
                 }
             }
-            let clock_x = renderer.snap(content_x + chip_len - clock_ext.x() as f64);
+            // the left wing: the song's cover, then the timer's ring
+            let cover_x = content_x + chip_len;
+            let ring_x = cover_x + cover_len;
+            if cover_len > 0.5 {
+                if cover_k > 0.95 && line_alpha > 0.95 && pl < 0.05 && self.song.is_some() {
+                    self.cover_rect = Some(Rect { x: cover_x - 5.0, y: dy, w: COVER + 10.0, h: line_h });
+                }
+                cr.save().unwrap();
+                cr.rectangle(cover_x, dy, cover_len, line_h);
+                cr.clip();
+                // it opens from its middle, as the clock closes to its own
+                let room = cover_len * COVER / (COVER + COVER_GAP);
+                let mut x = cover_x + (room - COVER) / 2.0;
+                if cover_k > 0.999 {
+                    x = renderer.snap(x);
+                }
+                let y = renderer.snap(dy + (line_h - COVER) / 2.0);
+                player::art_tile(cr, renderer, &self.art, &self.wing_song.1, x, y, COVER, COVER_R, line_alpha * cover_k * cover_k);
+                cr.restore().unwrap();
+            }
+            let slot_x = ring_x + ring_len + left_pad;
+            if self.song.is_some() || reveal > 0.001 {
+                // the song names itself in the middle, where the clock was
+                let k = wing * reveal;
+                if k > 0.01 && !self.wing_song.0.is_empty() {
+                    cr.save().unwrap();
+                    cr.rectangle(slot_x, dy, middle_len, line_h);
+                    cr.clip();
+                    let layout = renderer.layout(cr, "Ag", Font::Small);
+                    let (_, ext) = layout.pixel_extents();
+                    let inner = (middle_len - 24.0).max(4.0);
+                    let ty = renderer.snap(dy + line_h / 2.0 - ext.height() as f64 / 2.0 - ext.y() as f64);
+                    crate::motion::text(cr, renderer, "wing-title", &self.wing_song.0, slot_x + 12.0, ty + 3.0 * (1.0 - k),
+                        inner, 0.5, Font::Small, (1.0, 1.0, 1.0), 0.86 * line_alpha * smoothstep((k - 0.45) / 0.55));
+                    cr.restore().unwrap();
+                }
+            }
+            let clock_room = slot_x + (middle_len - clock_len) / 2.0;
+            let clock_x = renderer.snap(clock_room - clock_ext.x() as f64);
             let ty = renderer.snap(dy + (line_h - clock_h) / 2.0 - clock_ext.y() as f64);
             if clock_k > 0.001 {
                 // leaving, the clock shrinks toward its middle as its room closes
                 cr.save().unwrap();
-                cr.rectangle(content_x + chip_len, dy, clock_len, line_h);
+                cr.rectangle(clock_room, dy, clock_len, line_h);
                 cr.clip();
                 let squeeze = (clock_w - clock_len) / 2.0;
                 crate::motion::text(cr, renderer, "clock", &self.clock, clock_x - squeeze, ty,
@@ -2724,27 +2834,35 @@ impl Island {
             if line_alpha > 0.95 && clock_k > 0.95 && !self.pill_open() {
                 self.clock_rect = Some(Rect { x: clock_x + clock_ext.x() as f64 - 6.0, y: dy, w: clock_w + 12.0, h: line_h });
             }
-            let mut after_clock = clock_x + clock_ext.x() as f64 + clock_len;
+            let mut after_clock = clock_x + clock_ext.x() as f64 + clock_len + (middle_len - clock_len) / 2.0 + right_pad;
             if timer_len > 0.5 {
                 if self.timer.is_some() && line_alpha > 0.95 && timer_k > 0.95 && !self.pill_open() {
-                    self.timer_rect = Some(Rect { x: after_clock + 6.0, y: dy, w: self.timer_w + 8.0, h: line_h });
+                    let w = self.timer_w + 8.0 - 30.0 * wing;
+                    self.timer_rect = Some(Rect { x: after_clock + 6.0, y: dy, w, h: line_h });
+                    if wing > 0.95 {
+                        self.timer_mark_rect = Some(Rect { x: ring_x - 6.0, y: dy, w: 32.0, h: line_h });
+                    }
                 }
-                cr.save().unwrap();
-                cr.rectangle(after_clock, dy, timer_len, line_h);
-                cr.clip();
                 if let Some(timer) = self.timer.as_ref().or(self.timer_last.as_ref()) {
-                    activity::draw_timer(
-                        cr,
-                        renderer,
-                        after_clock + 10.0,
-                        dy + line_h / 2.0,
-                        timer.remaining(now),
-                        timer.fraction(now),
-                        timer.running,
-                        line_alpha * timer_k,
-                    );
+                    let cy = dy + line_h / 2.0;
+                    // the ring crosses to the left wing as the clock leaves
+                    let ring_at = after_clock + 10.0 + (ring_x - after_clock - 10.0) * wing;
+                    cr.save().unwrap();
+                    cr.rectangle(ring_at - 2.0, dy, 24.0 * timer_k, line_h);
+                    cr.clip();
+                    // crossing over the leaving clock it dims, so the two never tangle
+                    let crossing = 1.0 - 0.85 * (std::f64::consts::PI * wing).sin();
+                    activity::draw_timer_ring(cr, ring_at, cy, timer.remaining(now), timer.fraction(now), timer.running,
+                        line_alpha * timer_k * crossing);
+                    cr.restore().unwrap();
+                    cr.save().unwrap();
+                    cr.rectangle(after_clock, dy, timer_len, line_h);
+                    cr.clip();
+                    let reading_x = after_clock + 10.0 + 30.0 * (1.0 - wing);
+                    activity::draw_timer_reading(cr, renderer, reading_x, cy, timer.remaining(now), wing,
+                        line_alpha * timer_k);
+                    cr.restore().unwrap();
                 }
-                cr.restore().unwrap();
                 after_clock += timer_len;
             }
             if tasks_len > 0.5 {
@@ -3330,7 +3448,7 @@ impl Island {
 
     pub fn music_area_at(&self, px: f64, py: f64) -> bool {
         if !self.accepts_player_clicks() { return false; }
-        self.eq_rect.or(self.player_rect).is_some_and(|r| {
+        self.on_music(px, py) || self.player_rect.is_some_and(|r| {
             px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h
         })
     }
@@ -3975,7 +4093,7 @@ impl Island {
     }
 
     pub fn set_eq_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
-        let hovered = self.eq_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        let hovered = self.on_music(px, py);
         if self.eq_hovered == hovered { return false; }
         self.eq_hovered = hovered;
         self.sync(now);
@@ -4546,7 +4664,7 @@ mod tests {
 
     fn menu_style_top() -> f64 { crate::menu_style::CONTENT_TOP }
 
-    fn gallery_song(playing: bool) -> crate::dbus::NowPlaying {
+    pub(super) fn gallery_song(playing: bool) -> crate::dbus::NowPlaying {
         crate::dbus::NowPlaying {
             bus_name: "gallery".into(), app: "Firefox".into(), playing, artist: "Nils Frahm".into(),
             title: "Says".into(), art_url: String::new(), track_id: "gallery".into(), length: 534.0,
@@ -4626,6 +4744,16 @@ mod tests {
         filmstrip("close-center", &mut island, 11.0, 12, 2.0 / 60.0);
 
         let mut island = gallery_island();
+        island.song = Some(Song { now: gallery_song(true), position: 0.0, position_at: 10.0 });
+        island.reveal.set_at(1.0, 10.0);
+        island.timer_command("15m", 10.0).unwrap();
+        island.sync(10.0);
+        island.advance(12.0);
+        island.config.compact.clock = false;
+        island.sync(12.0);
+        filmstrip("wings-part", &mut island, 12.0, 10, 3.0 / 60.0);
+
+        let mut island = gallery_island();
         island.open_quick_menu(10.0);
         gallery_shot_after("close-quick-open", &mut island, 10.0, 1.0);
         island.close_activity_panel(11.0);
@@ -4675,6 +4803,22 @@ mod tests {
         island.config.compact.clock = false;
         island.sync(10.0);
         gallery_shot("01b-compact-music-no-clock", &mut island, 11.0);
+        island.timer_command("15m", 13.0).unwrap();
+        island.sync(13.0);
+        gallery_shot("01d-wings-music-timer", &mut island, 13.0);
+        let mut timer_only = gallery_island();
+        timer_only.config.compact.clock = false;
+        timer_only.sync(10.0);
+        timer_only.timer_command("15m", 10.0).unwrap();
+        timer_only.sync(10.0);
+        gallery_shot("01e-wings-timer", &mut timer_only, 10.0);
+        let mut island = gallery_island();
+        island.song = Some(Song { now: gallery_song(true), position: 141.0, position_at: 10.0 });
+        island.reveal.set_at(1.0, 10.0);
+        island.set_eq([0.7, 0.4, 0.9, 0.5], 10.0);
+        island.config.compact.clock = false;
+        island.sync(10.0);
+        island.advance(11.0);
         island.config.compact = Compact::NONE;
         island.sync(11.0);
         gallery_shot("01c-compact-resting", &mut island, 12.0);
@@ -5748,6 +5892,40 @@ mod command_tests {
         assert!((line.w - (REST_CONTENT_W + 2.0 * PAD)).abs() < 1.0, "resting width {}", line.w);
         assert!(island.clock_rect.is_none());
         assert!(island.clock_at(line.x + line.w / 2.0, line.y + 10.0));
+    }
+
+    #[test]
+    fn without_the_clock_activities_part_into_wings_around_the_songs_title() {
+        let mut config = Config::default();
+        config.compact.clock = false;
+        let mut island = Island::new(config);
+        island.song = Some(Song { now: super::tests::gallery_song(true), position: 0.0, position_at: 1.0 });
+        island.reveal.set_at(1.0, 1.0);
+        island.timer_command("15m", 1.0).unwrap();
+        island.sync(1.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for n in 0..90 {
+            let now = 1.0 + n as f64 / 60.0;
+            island.advance(now);
+            island.draw(&cr, &renderer, 490.0, now);
+        }
+        let (cover, mark) = (island.cover_rect.expect("the cover"), island.timer_mark_rect.expect("the ring"));
+        let (eq, reading) = (island.eq_rect.expect("the bars"), island.timer_rect.expect("the reading"));
+        assert!(cover.x + cover.w < 490.0 && mark.x + mark.w < 490.0, "cover and ring on the left");
+        assert!(eq.x > 490.0 && reading.x > 490.0, "bars and reading on the right");
+        let line = island.line_rect.unwrap();
+        assert!((line.x + line.w / 2.0 - 490.0).abs() < 1.0, "the middle stays centred");
+        // the cover is the song's, the ring the timer's, the middle the island's
+        let at = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (x, y) = at(cover);
+        assert!(island.music_area_at(x, y));
+        assert!(!island.clock_at(x, y));
+        let (x, y) = at(mark);
+        assert!(island.click_timer_at(x, y, 3.0));
+        assert!(!island.timer.as_ref().unwrap().running, "the ring pauses the timer");
+        assert!(island.clock_at(490.0, line.y + 10.0));
     }
 
     #[test]
