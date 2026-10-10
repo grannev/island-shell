@@ -100,7 +100,9 @@ place from the time zone, fetched by a background `curl`). The config key
 closed island shows; without the clock it rests as a short empty capsule and
 activities part into Vorssaint's wings (cover and timer ring left, bars and
 orange reading right, the song's title in the middle). Open
-pages carry Vorssaint's floating drop buttons (`src/floating.rs`) on both sides. Music controls are scoped to the equaliser (and the wings' cover) on the compact
+pages carry Vorssaint's floating drop buttons (`src/floating.rs`) on both sides;
+the grid button opens the sections gallery (`quick::View::Sections`,
+`island-shell sections`). Music controls are scoped to the equaliser (and the wings' cover) on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.

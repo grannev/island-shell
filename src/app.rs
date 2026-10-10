@@ -856,6 +856,15 @@ impl App {
                 self.after_change();
                 return if open { "open".into() } else { "closed".into() };
             }
+            Command::Sections => {
+                if self.island.sections_open() {
+                    self.island.close_quick_menu(now);
+                } else {
+                    self.island.open_sections(now);
+                }
+                self.after_change();
+                return "ok".into();
+            }
             Command::Quick => {
                 if self.island.quick_menu_open() {
                     self.island.close_quick_menu(now);
@@ -2308,6 +2317,32 @@ impl App {
                 if self.island.arm_logout(now) {
                     self.island.close_quick_menu(now);
                     let _ = self.controls.send(Request::Logout);
+                }
+            }
+            Action::Section(section) => {
+                use crate::quick::Section;
+                match section {
+                    Section::Control => self.island.quick_show(View::Main, now),
+                    Section::Sound => {
+                        self.island.quick_show(View::Sound, now);
+                        let _ = self.controls.send(Request::Refresh);
+                    }
+                    _ => {
+                        // another sheet takes the island's place
+                        self.island.close_quick_menu(now);
+                        match section {
+                            Section::Calendar => { self.island.open_calendar(now); }
+                            Section::Notifications => { self.island.open_notification_center(now); }
+                            Section::Timer => { let _ = self.island.timer_command("menu", now); }
+                            Section::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
+                            Section::Bluetooth => {
+                                self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now)
+                            }
+                            Section::Search => { self.island.toggle_launcher(now); }
+                            Section::Files => self.island.open_launcher_with("file:", now),
+                            _ => self.island.open_launcher_with("clip:", now),
+                        }
+                    }
                 }
             }
             Action::Close => {}

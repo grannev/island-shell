@@ -26,6 +26,7 @@ pub enum Command {
     Launcher,
     /// Open the four shortcuts normally revealed by holding the island.
     Quick,
+    Sections,
     /// Open the native notification history sheet.
     Notifications,
     /// `dnd <on|off|toggle|status>` controls quiet notifications.
@@ -92,6 +93,7 @@ impl Command {
             }
             ["launcher"] => Command::Launcher,
             ["quick"] | ["menu"] => Command::Quick,
+            ["sections"] => Command::Sections,
             ["notifications"] => Command::Notifications,
             ["dnd", action] => Command::Dnd(action.to_string()),
             ["dnd"] => Command::Dnd("toggle".into()),
@@ -142,7 +144,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|sections|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
     "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",

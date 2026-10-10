@@ -1651,6 +1651,17 @@ impl Island {
         self.launcher.is_some()
     }
 
+    /// The launcher, opened with a query already typed (`file:`, `clip:`).
+    pub fn open_launcher_with(&mut self, query: &str, now: Time) {
+        if self.launcher.is_none() {
+            self.toggle_launcher(now);
+        }
+        if let Some(l) = self.launcher.as_mut() {
+            l.push(query, now);
+        }
+        self.sync(now);
+    }
+
     /// The ⋯ drawer (mod+o) needs the island to dodge; the panel cannot
     /// dodge with it, so it folds away first.
     pub fn set_dodged(&mut self, dodged: bool, now: Time) {
@@ -3773,6 +3784,7 @@ impl Island {
     /// Is the button's page the one showing?
     pub fn float_selected(&self, button: floating::Button) -> bool {
         match button {
+            floating::Button::Sections => self.sections_open(),
             floating::Button::Search => false,
             floating::Button::Timer => self.timer_menu_open(),
             floating::Button::Notifications => self.center.open,
@@ -3814,6 +3826,7 @@ impl Island {
                 self.show_quick_menu(now);
                 self.quick_view = quick::View::Sound;
             }
+            floating::Button::Sections => self.open_sections(now),
             floating::Button::Calendar => self.open_calendar(now),
         }
         self.sync(now);
@@ -3832,6 +3845,17 @@ impl Island {
         if self.activity.as_ref().is_some_and(|a| activity::takes_keyboard(&a.event)) {
             self.activity = None;
         }
+    }
+
+    pub fn sections_open(&self) -> bool {
+        self.quick_open && self.quick_view == quick::View::Sections
+    }
+
+    /// The sections gallery: the Control Center's sheet on its gallery page.
+    pub fn open_sections(&mut self, now: Time) {
+        self.open_quick_menu_shortcut(now);
+        self.quick_view = quick::View::Sections;
+        self.sync(now);
     }
 
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
@@ -4080,6 +4104,7 @@ impl Island {
             }
             quick::View::Sound => (0..self.controls.sinks.len()).map(quick::Action::Sink)
                 .chain(self.controls.mic.is_some().then_some(quick::Action::MicMute)).collect(),
+            quick::View::Sections => quick::SECTIONS.iter().map(|s| quick::Action::Section(*s)).collect(),
         }
     }
 
@@ -4901,6 +4926,11 @@ mod tests {
         island.toggle_mic(16.0);
         island.controls.apps.clear();
         gallery_shot_after("02d-quick-sound-muted", &mut island, 16.0, 1.0);
+        let mut sections = gallery_island();
+        sections.timer_command("15m", 10.0).unwrap();
+        sections.open_sections(10.0);
+        sections.quick_key("next", 10.0);
+        gallery_shot("02g-sections", &mut sections, 10.0);
 
 
         let mut island = gallery_island();
@@ -5948,6 +5978,32 @@ mod command_tests {
         assert!(island.click_timer_at(x, y, 3.0));
         assert!(!island.timer.as_ref().unwrap().running, "the ring pauses the timer");
         assert!(island.clock_at(490.0, line.y + 10.0));
+    }
+
+    #[test]
+    fn the_sections_gallery_opens_from_its_floating_button_and_lists_destinations() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let settle = |island: &mut Island, from: Time| {
+            for n in 0..90 {
+                let now = from + n as f64 / 60.0;
+                island.advance(now);
+                island.draw(&cr, &renderer, 490.0, now);
+            }
+        };
+        assert!(island.open_quick_menu(1.0));
+        settle(&mut island, 1.0);
+        island.press_float(floating::Button::Sections, 3.0);
+        settle(&mut island, 3.0);
+        assert!(island.sections_open());
+        assert!(island.float_selected(floating::Button::Sections));
+        let rect = island.quick_rect.expect("the gallery");
+        let (x, y) = quick::section_centre(quick::Section::Calendar);
+        assert_eq!(island.quick_action_at(rect.x + x, rect.y + y), Some(quick::Action::Section(quick::Section::Calendar)));
+        assert_eq!(island.quick_keys().len(), quick::SECTIONS.len());
+        assert!((rect.h - quick::height(quick::View::Sections, &island.controls)).abs() < 1.0);
     }
 
     #[test]

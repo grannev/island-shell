@@ -1,7 +1,8 @@
 //! The island's Control Center, laid out as Vorssaint's open island: a
 //! title row whose actions show under the pointer, a row of cards (what is
 //! playing, sound and display levels) and a rail of round shortcut tiles;
-//! the sound page lists outputs, applications and the microphone.
+//! the sound page lists outputs, applications and the microphone; the
+//! sections page is Vorssaint's gallery of the island's destinations.
 use cairo::Context;
 
 use crate::control::{App, Sink, SinkKind};
@@ -51,6 +52,12 @@ const ROW_SLIDER_X: f64 = RAIL + 52.0;
 const ROW_SLIDER_W: f64 = INNER - 52.0 - 14.0;
 const ROW_SLIDER_DY: f64 = 32.0;
 const ROW_SLIDER_H: f64 = 14.0;
+/// the sections gallery: rows of square-ish tiles, as Vorssaint's
+const SECTION_COLS: usize = 5;
+const GALLERY_GAP: f64 = 8.0;
+const SECTION_W: f64 = (INNER - (SECTION_COLS - 1) as f64 * GALLERY_GAP) / SECTION_COLS as f64;
+const SECTION_H: f64 = 86.0;
+const SECTION_R: f64 = 16.0;
 
 /// What the tiles' second lines report.
 #[derive(Clone, Copy, Default)]
@@ -108,6 +115,56 @@ pub enum View {
     Main,
     /// outputs, applications and the microphone
     Sound,
+    /// the gallery of destinations
+    Sections,
+}
+
+/// A destination in the sections gallery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Control,
+    Sound,
+    Calendar,
+    Notifications,
+    Timer,
+    Wifi,
+    Bluetooth,
+    Search,
+    Files,
+    Clipboard,
+}
+
+/// The gallery, in reading (and keyboard) order.
+pub const SECTIONS: [Section; 10] = [
+    Section::Control, Section::Sound, Section::Calendar, Section::Notifications, Section::Timer,
+    Section::Wifi, Section::Bluetooth, Section::Search, Section::Files, Section::Clipboard,
+];
+
+impl Section {
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Control => "Управление",
+            Section::Sound => "Звук",
+            Section::Calendar => "Календарь",
+            Section::Notifications => "Уведомления",
+            Section::Timer => "Таймер",
+            Section::Wifi => "Wi-Fi",
+            Section::Bluetooth => "Bluetooth",
+            Section::Search => "Поиск",
+            Section::Files => "Файлы",
+            Section::Clipboard => "Буфер",
+        }
+    }
+
+    /// Its symbol's colour: the calendar red, the timer orange, the rest
+    /// a soft white.
+    fn tint(self) -> (f64, f64, f64, f64) {
+        match self {
+            Section::Calendar => (menu_style::RED.0, menu_style::RED.1, menu_style::RED.2, 1.0),
+            Section::Timer => (menu_style::ORANGE.0, menu_style::ORANGE.1, menu_style::ORANGE.2, 1.0),
+            _ => (1.0, 1.0, 1.0, 0.85),
+        }
+    }
 }
 
 /// The sliders the menu can hold.
@@ -201,6 +258,8 @@ pub enum Action {
     MediaPrevious,
     MediaPlayPause,
     MediaNext,
+    /// a destination in the sections gallery
+    Section(Section),
     Back,
     Close,
 }
@@ -229,7 +288,26 @@ pub fn height(view: View, controls: &Controls) -> f64 {
     match view {
         View::Main => HEIGHT,
         View::Sound => sound_page(controls).height,
+        View::Sections => sections_height(),
     }
+}
+
+fn section_tile(i: usize) -> Rect {
+    let (row, col) = (i / SECTION_COLS, i % SECTION_COLS);
+    (RAIL + col as f64 * (SECTION_W + GALLERY_GAP), PAGE_TOP + row as f64 * (SECTION_H + GALLERY_GAP), SECTION_W, SECTION_H)
+}
+
+fn sections_height() -> f64 {
+    let rows = SECTIONS.len().div_ceil(SECTION_COLS);
+    PAGE_TOP + rows as f64 * SECTION_H + (rows - 1) as f64 * GALLERY_GAP + BOTTOM
+}
+
+/// A section tile's centre (for the island's tests).
+#[cfg(test)]
+pub fn section_centre(section: Section) -> (f64, f64) {
+    let i = SECTIONS.iter().position(|s| *s == section).unwrap();
+    let (x, y, w, h) = section_tile(i);
+    (x + w / 2.0, y + h / 2.0)
 }
 
 type Rect = (f64, f64, f64, f64);
@@ -325,6 +403,11 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
     let (cx, cy, cw, ch) = close_button();
     if inside(x, y, (cx - 6.0, cy - 6.0, cw + 12.0, ch + 12.0)) {
         return Some(Hit::Action(Action::Close));
+    }
+    if view == View::Sections {
+        return SECTIONS.iter().enumerate()
+            .find(|(i, _)| inside(x, y, section_tile(*i)))
+            .map(|(_, section)| Hit::Action(Action::Section(*section)));
     }
     if view == View::Sound {
         if inside(x, y, back_button()) {
@@ -575,6 +658,48 @@ pub fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64,
             cr.line_to(5.5, 7.0);
             let _ = cr.stroke();
         }
+        "grid" => {
+            // the sections gallery: four rounded squares
+            for (dx, dy) in [(-7.5, -7.5), (1.0, -7.5), (-7.5, 1.0), (1.0, 1.0)] {
+                menu_style::rounded(cr, dx, dy, 6.5, 6.5, 2.0);
+                let _ = cr.fill();
+            }
+        }
+        "sliders" => {
+            // the Control Center: two switches, one on and one off
+            for (y, knob) in [(-4.5, 5.5), (4.5, -5.5)] {
+                menu_style::rounded(cr, -10.0, y - 3.8, 20.0, 7.6, 3.8);
+                let _ = cr.stroke();
+                cr.arc(knob, y, 2.4, 0.0, tau);
+                let _ = cr.fill();
+            }
+        }
+        "folder" => {
+            // a folder with its tab
+            cr.move_to(-9.5, -6.5);
+            cr.line_to(-3.5, -6.5);
+            cr.line_to(-1.5, -4.0);
+            cr.line_to(9.5, -4.0);
+            cr.line_to(9.5, 7.5);
+            cr.line_to(-9.5, 7.5);
+            cr.close_path();
+            let _ = cr.stroke();
+            cr.move_to(-9.5, -1.0);
+            cr.line_to(9.5, -1.0);
+            let _ = cr.stroke();
+        }
+        "clipboard" => {
+            // a board with its clip and two lines of text
+            menu_style::rounded(cr, -7.5, -7.5, 15.0, 17.0, 2.5);
+            let _ = cr.stroke();
+            menu_style::rounded(cr, -3.5, -9.5, 7.0, 4.0, 1.5);
+            let _ = cr.fill();
+            cr.move_to(-3.5, 0.0);
+            cr.line_to(3.5, 0.0);
+            cr.move_to(-3.5, 4.0);
+            cr.line_to(1.5, 4.0);
+            let _ = cr.stroke();
+        }
         "record" => {
             // a ring around a dot (screen recording)
             cr.arc(0.0, 0.0, 7.5, 0.0, tau);
@@ -704,6 +829,73 @@ pub fn draw(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, view:
             header(cr, renderer, x, y, "Звук", 18.0, close_hover, alpha);
             draw_sound(cr, renderer, x, y, alpha, frame);
         }
+        View::Sections => {
+            header(cr, renderer, x, y, "Разделы", 0.0, close_hover, alpha);
+            for (i, section) in SECTIONS.iter().enumerate() {
+                let (alpha, rise) = frame.arrival(i / SECTION_COLS, alpha);
+                if alpha > 0.002 {
+                    draw_section(cr, renderer, offset(section_tile(i), x, y + rise), *section, alpha, frame);
+                }
+            }
+        }
+    }
+}
+
+/// A gallery tile: a faint rounded plate (lit under the pointer or the
+/// keyboard), the section's symbol in its colour, its name, and for the
+/// timer and the notifications a line of their state.
+fn draw_section(cr: &Context, renderer: &Renderer, rect: Rect, section: Section, alpha: f64, frame: &Frame) {
+    let action = Action::Section(section);
+    let lit = (frame.hover)(action).clamp(0.0, 1.0);
+    let (tx, ty, tw, th) = rect;
+    let (cx, cy) = (tx + tw / 2.0, ty + th / 2.0);
+    let press = menu_style::press_scale((frame.pressed)(action));
+    menu_style::transformed(cr, cx, cy, press, 0.0, || {
+        menu_style::rounded(cr, tx, ty, tw, th, SECTION_R);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.045 + 0.075 * lit) * alpha);
+        let _ = cr.fill();
+        menu_style::rounded(cr, tx + 0.5, ty + 0.5, tw - 1.0, th - 1.0, SECTION_R - 0.5);
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, (0.04 + 0.5 * lit) * alpha);
+        let _ = cr.stroke();
+        // the symbol, drawn white and then poured into its colour
+        let tint = section.tint();
+        cr.push_group();
+        section_symbol(cr, section, cx, ty + 27.0);
+        let symbol = cr.pop_group().unwrap();
+        cr.set_source_rgba(tint.0, tint.1, tint.2, tint.3 * alpha);
+        let _ = cr.mask(&symbol);
+        let state = match section {
+            Section::Notifications if frame.status.unread > 0 => Some(format!("{} новых", frame.status.unread.min(99))),
+            Section::Timer => frame.status.timer.map(|(left, running)| {
+                if running { clock(left) } else { format!("‖ {}", clock(left)) }
+            }),
+            _ => None,
+        };
+        let title_y = ty + if state.is_some() { 48.0 } else { 54.0 };
+        let line = menu_style::line_height(cr, renderer, Font::Footnote);
+        menu_style::centred(cr, renderer, section.title(), (tx, title_y, tw, line), Font::Footnote, (1.0, 1.0, 1.0), alpha);
+        if let Some(state) = state {
+            menu_style::centred(cr, renderer, &state, (tx, title_y + line + 1.0, tw, line), Font::Tiny,
+                (1.0, 1.0, 1.0), alpha * menu_style::SECONDARY);
+        }
+    });
+}
+
+/// A section's symbol at (cx, cy), in white.
+fn section_symbol(cr: &Context, section: Section, cx: f64, cy: f64) {
+    let white = (1.0, 1.0, 1.0, 1.0);
+    match section {
+        Section::Control => glyph(cr, "sliders", cx, cy, 1.0, white),
+        Section::Sound => menu_style::transformed(cr, cx, cy, 1.35, 0.0, || glyph(cr, "speaker", cx + 1.5, cy, 1.0, white)),
+        Section::Calendar => glyph(cr, "calendar", cx, cy, 1.0, white),
+        Section::Notifications => icon(cr, Action::Notifications, cx, cy, 1.0, 0.8),
+        Section::Timer => icon(cr, Action::Timer, cx, cy, 1.0, 0.8),
+        Section::Wifi => icon(cr, Action::Wifi, cx, cy, 1.0, 0.8),
+        Section::Bluetooth => icon(cr, Action::Bluetooth, cx, cy, 1.0, 0.75),
+        Section::Search => icon(cr, Action::Launcher, cx, cy, 1.0, 0.8),
+        Section::Files => glyph(cr, "folder", cx, cy, 1.0, white),
+        Section::Clipboard => glyph(cr, "clipboard", cx, cy, 1.0, white),
     }
 }
 

@@ -147,9 +147,15 @@ page, the notification center, the calendar and the timer — stand
 Vorssaint's **floating buttons**: 44 px black circles that drip out of the
 island's sides once the page has most of its size (a small circle tucked
 under the edge swells as it moves out, its neck thins and lets go) and fall
-back in quickly when the page closes. Left: Search and Timer; right:
-Notifications, Sound and Calendar. The page showing is lit; a click on
-another button morphs the island into that page. Under the cards, a rail of twelve round shortcut tiles
+back in quickly when the page closes. Left: Sections, Search and Timer;
+right: Notifications, Sound and Calendar. The page showing is lit; a click on
+another button morphs the island into that page. **Sections** (the grid
+button, or `island-shell sections`) is Vorssaint's gallery of destinations:
+ten tiles (Control Center, Sound, Calendar, Notifications, Timer, Wi-Fi,
+Bluetooth, Search, Files and Clipboard — the last two open the launcher with
+`file:` / `clip:` typed), the calendar's symbol red and the timer's orange,
+the timer and notifications with their state under the name; the arrow keys
+walk them and Enter opens one. Under the cards, a rail of twelve round shortcut tiles
 (a 40 px well over a one-line label, a light wash and a small lift under
 the pointer; a tile that is on takes its colour): Wi-Fi, Bluetooth, Timer
 (its remaining time in orange while it runs), Notifications (the unread
@@ -483,6 +489,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell dump <file.png>                # render the current frame off screen
     island-shell demo <app> <summary>|<body>    # fabricate a notification
     island-shell quick                          # mod+m: quick-access menu
+    island-shell sections                       # the sections gallery
     island-shell launcher                       # mod+d: unfold / fold the panel
     island-shell notifications                  # open the notification history
     island-shell dnd on|off|toggle|status       # quiet ordinary notifications

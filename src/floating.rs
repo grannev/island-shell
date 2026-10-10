@@ -21,6 +21,7 @@ const TUCK: f64 = 14.0;
 /// Where a button goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Button {
+    Sections,
     Search,
     Timer,
     Notifications,
@@ -34,12 +35,13 @@ enum Side {
     Right,
 }
 
-pub const ALL: [Button; 5] = [Button::Search, Button::Timer, Button::Notifications, Button::Sound, Button::Calendar];
+pub const ALL: [Button; 6] = [Button::Sections, Button::Search, Button::Timer, Button::Notifications, Button::Sound, Button::Calendar];
 
 fn place(button: Button) -> (Side, usize, usize) {
     match button {
-        Button::Search => (Side::Left, 0, 2),
-        Button::Timer => (Side::Left, 1, 2),
+        Button::Sections => (Side::Left, 0, 3),
+        Button::Search => (Side::Left, 1, 3),
+        Button::Timer => (Side::Left, 2, 3),
         Button::Notifications => (Side::Right, 0, 3),
         Button::Sound => (Side::Right, 1, 3),
         Button::Calendar => (Side::Right, 2, 3),
@@ -152,6 +154,7 @@ pub fn draw(cr: &Context, button: Button, body: Body, look: &Look, alpha: f64) {
     crate::menu_style::transformed(cr, cx, cy, scale, 0.0, || {
         let white = (1.0, 1.0, 1.0, a);
         match button {
+            Button::Sections => crate::quick::glyph(cr, "grid", cx, cy, 1.0, white),
             Button::Search => crate::quick::icon(cr, crate::quick::Action::Launcher, cx, cy, a, 0.62),
             Button::Timer => crate::quick::icon(cr, crate::quick::Action::Timer, cx, cy, a, 0.62),
             Button::Notifications => crate::quick::icon(cr, crate::quick::Action::Notifications, cx, cy, a, 0.66),
