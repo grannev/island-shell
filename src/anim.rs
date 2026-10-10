@@ -262,6 +262,89 @@ impl Glide {
     }
 }
 
+/// One feel of a [`Morph`]: SwiftUI's perceptual duration and bounce.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Feel {
+    pub duration: f64,
+    pub bounce: f64,
+}
+
+impl Feel {
+    /// How far past its target this feel swings, as a share of the travel.
+    pub fn overshoot(self) -> f64 {
+        if self.bounce <= 0.0 {
+            return 0.0;
+        }
+        let z = 1.0 - self.bounce;
+        (-std::f64::consts::PI * z / (1.0 - z * z).sqrt()).exp()
+    }
+
+    /// This feel with only as much bounce as keeps a swing over `travel`
+    /// within `limit`.
+    pub fn limited(self, travel: f64, limit: f64) -> Feel {
+        if self.bounce <= 0.0 || travel <= 0.0 || travel * self.overshoot() <= limit {
+            return self;
+        }
+        // overshoot = exp(-πζ/√(1-ζ²)) solved for ζ at limit / travel
+        let s = (limit.max(0.01) / travel).ln();
+        let z = -s / (std::f64::consts::PI.powi(2) + s * s).sqrt();
+        Feel { bounce: 1.0 - z, ..self }
+    }
+}
+
+/// The island's change of shape, as Vorssaint moves its island: growing it
+/// swings a little past its size and settles back, shrinking it settles
+/// without a swing; a swing never passes `limit` (in the value's own units)
+/// and the value lands exactly on its target once within `settle` of it, so
+/// edges snapped at rest stay put.
+#[derive(Clone, Debug)]
+pub struct Morph {
+    spring: Spring,
+    grow: Feel,
+    shrink: Feel,
+    limit: f64,
+    settle: f64,
+}
+
+impl Morph {
+    pub fn new(value: f64, grow: Feel, shrink: Feel, limit: f64, settle: f64) -> Self {
+        Morph { spring: Spring::new(value, shrink.duration, 1.0), grow, shrink, limit, settle }
+    }
+
+    pub fn target(&self) -> f64 {
+        self.spring.target
+    }
+
+    pub fn state(&self, now: Time) -> State {
+        let s = self.spring.state(now);
+        if (s.x - self.spring.target).abs() < self.settle && s.v.abs() < self.settle * 20.0 {
+            State { x: self.spring.target, v: 0.0, a: 0.0 }
+        } else {
+            s
+        }
+    }
+
+    pub fn is_moving(&self, now: Time) -> bool {
+        self.state(now).x != self.spring.target
+    }
+
+    /// Move to `to` with the feel its direction calls for.
+    pub fn set(&mut self, to: f64, now: Time) {
+        if self.spring.target == to {
+            return;
+        }
+        let from = self.state(now).x;
+        let feel = if to > from { self.grow } else { self.shrink };
+        let feel = feel.limited((to - from).abs(), self.limit);
+        self.spring.set_with(to, feel.duration, 1.0 - feel.bounce, now);
+    }
+
+    /// Be at `value` at once.
+    pub fn set_at(&mut self, value: f64, now: Time) {
+        self.spring = Spring { x0: value, v0: 0.0, target: value, start: now, ..self.spring.clone() };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +404,20 @@ mod tests {
         assert!(peak > 1.02 && peak < 1.15, "peak {peak}");
         assert!(!s.is_moving(3.0));
         assert!((s.value(3.0) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn morph_swings_growing_settles_shrinking_and_lands_exactly() {
+        let grow = Feel { duration: 0.44, bounce: 0.25 };
+        let shrink = Feel { duration: 0.30, bounce: 0.0 };
+        let mut m = Morph::new(150.0, grow, shrink, 12.0, 0.25);
+        m.set(1500.0, 0.0);
+        let peak = (0..400).map(|i| m.state(i as f64 * 0.005).x).fold(0.0, f64::max);
+        assert!(peak > 1500.5 && peak <= 1512.5, "a long travel swings at most the limit: {peak}");
+        assert!(!m.is_moving(2.0) && m.state(2.0).x == 1500.0);
+        m.set(150.0, 2.0);
+        let low = (0..400).map(|i| m.state(2.0 + i as f64 * 0.005).x).fold(f64::MAX, f64::min);
+        assert!(low >= 150.0, "shrinking never passes its size: {low}");
+        assert!(!m.is_moving(3.0) && m.state(3.0).x == 150.0);
     }
 }

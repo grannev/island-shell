@@ -8,7 +8,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use cairo::Context;
 
-use crate::anim::{Quintic, Spring, Time, inv_min_jerk, min_jerk};
+use crate::anim::{Feel, Morph, Quintic, Spring, Time, inv_min_jerk, min_jerk};
 use crate::activity;
 use crate::icons;
 use crate::art::Art;
@@ -57,10 +57,20 @@ const EQ_TAU_SINK: f64 = 0.25;
 /// Touch ID pill.
 const PILL_H: f64 = 92.0;
 const PILL_MIN_W: f64 = 212.0;
-const PILL_DUR: f64 = 0.35;
+/// The box changes shape as Vorssaint's island does: growing, it swings a
+/// little past its size (never more than SWING px) and settles back;
+/// shrinking, it settles without a swing. Width and height keep their own
+/// feel, and the opening itself (line → pill) moves with the width's.
+const GROW_W: Feel = Feel { duration: 0.44, bounce: 0.25 };
+const GROW_H: Feel = Feel { duration: 0.38, bounce: 0.22 };
+const SHRINK_W: Feel = Feel { duration: 0.30, bounce: 0.0 };
+const SHRINK_H: Feel = Feel { duration: 0.26, bounce: 0.0 };
+const SWING: f64 = 12.0;
 /// progress at which the line has dissolved and the pill content starts
 const PILL_SWAP: f64 = 0.37;
 const PILL_CLIMB: f64 = 30.0;
+/// the size the pill's content arrives from
+const ARRIVE_SCALE: f64 = 0.86;
 const SHEET_SWAP: f64 = 0.30;
 const PILL_GAP: f64 = 2.0;
 const PULSE_PERIOD: f64 = 0.96;
@@ -89,8 +99,6 @@ const NOTICE_LINE_GAP: f64 = 2.0;
 const NOTICE_BAR: f64 = 14.0;
 /// the roll when one notification replaces another
 const ROLL_DUR: f64 = 0.44;
-const PILL_W_DUR: f64 = 0.35;
-const PILL_H_DUR: f64 = 0.35;
 /// how far the content travels in the roll
 const ROLL_TRAVEL: f64 = 46.0;
 /// the launcher panel unfolding out of the island
@@ -618,7 +626,7 @@ pub struct Island {
     silent_since: Option<Time>,
     pub muted: bool,
     /// Touch ID: 0 = the line, 1 = the 92 px pill.
-    pill: Quintic,
+    pill: Morph,
     auth: Option<Auth>,
     /// when the current verification began (the pulse's time base)
     auth_start: Time,
@@ -650,8 +658,8 @@ pub struct Island {
     roll: Quintic,
     /// the pill's size, eased when a new notification needs another (a
     /// long message wraps to two lines and the pill grows to fit)
-    pill_w: Quintic,
-    pill_h: Quintic,
+    pill_w: Morph,
+    pill_h: Morph,
     /// Short hardware and system activities share the pill but outrank
     /// ordinary notifications.  Repeated slider changes update in place.
     activity: Option<LiveActivity>,
@@ -871,7 +879,7 @@ impl Island {
             eq_t: 0.0,
             silent_since: None,
             muted: false,
-            pill: Quintic::at_rest(0.0, PILL_DUR),
+            pill: Morph::new(0.0, GROW_W, SHRINK_W, 0.03, 1e-3),
             auth: None,
             auth_start: 0.0,
             last_mark: None,
@@ -892,8 +900,8 @@ impl Island {
             dnd,
             dnd_glow: Spring::new(f64::from(dnd), 0.32, 0.9),
             roll: Quintic::at_rest(1.0, ROLL_DUR),
-            pill_w: Quintic::at_rest(PILL_MIN_W, PILL_W_DUR),
-            pill_h: Quintic::at_rest(PILL_H, PILL_H_DUR),
+            pill_w: Morph::new(PILL_MIN_W, GROW_W, SHRINK_W, SWING, 0.25),
+            pill_h: Morph::new(PILL_H, GROW_H, SHRINK_H, SWING, 0.25),
             activity: None,
             activity_retiring: None,
             activity_queued: None,
@@ -2943,6 +2951,17 @@ impl Island {
         }
 
 
+        // arriving, the pill's content grows into place from 0.86 of its
+        // size around the box's top middle as it climbs and fades in
+        // (Vorssaint's arrival); leaving, it shrinks back the same way
+        let arrive = ARRIVE_SCALE + (1.0 - ARRIVE_SCALE) * pill_alpha;
+        let arriving = pill_alpha > 0.0 && arrive < 0.9999;
+        if arriving {
+            cr.save().unwrap();
+            cr.translate(cx, dy);
+            cr.scale(arrive, arrive);
+            cr.translate(-cx, -dy);
+        }
         if pill_alpha > 0.0 {
             if let Some(auth) = self.auth {
                 let (result, caption, since) = match auth {
@@ -3145,6 +3164,9 @@ impl Island {
                     cr.restore().unwrap();
                 }
             }
+        }
+        if arriving {
+            cr.restore().unwrap();
         }
         if sheet_k < 1.0 && pill_alpha > 0.0 {
             let hover = |_: quick::Action| 0.0;

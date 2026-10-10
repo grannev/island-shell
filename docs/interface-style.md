@@ -78,6 +78,11 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
 
 ## Motion
 
+- **The box's shape** moves on Vorssaint's springs (`anim::Morph`):
+  growing swings a little past the size and settles back (width 0.44 s /
+  bounce 0.25, height 0.38 s / 0.22, never more than 12 px past), shrinking
+  settles without a swing (0.30 s / 0.26 s). A pill's content climbs in
+  from 0.86 of its size around the box's top middle and leaves the same way.
 - **Changing text** goes through `motion::text` with a key that includes
   the sheet's instance (its opening time, an OSD's entrance) — a label
   seen for the first time just appears. Digits (and a time's `:`/`.`)
