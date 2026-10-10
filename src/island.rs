@@ -18,6 +18,7 @@ use crate::notice_center;
 use crate::nvim::{self, Editor};
 use crate::player;
 use crate::quick;
+use crate::floating;
 use crate::tasks;
 use crate::calendar::{self, Calendar};
 use crate::touchid;
@@ -113,6 +114,12 @@ const TRACK_HOVER: f64 = 0.45;
 const TOAST_HOLD: f64 = 4.0;
 /// the gap between the clock and the compact bars
 const BARS_GAP: f64 = 12.0;
+/// The floating buttons' spring out (Vorssaint: 0.38 s, bounce 0.12) and
+/// their quick way back in.
+const FLOAT_RESPONSE: f64 = 0.38;
+const FLOAT_DAMPING: f64 = 0.88;
+const FLOAT_RETURN: f64 = 0.2;
+const FLOAT_DELAY: f64 = 0.16;
 /// The narrowest the closed island's content gets (a bare resting capsule
 /// is this plus the padding: 150 px).
 const REST_CONTENT_W: f64 = 118.0;
@@ -731,6 +738,14 @@ pub struct Island {
     nvim_saved: Option<Time>,
     chip: Quintic,
     chip_w: f64,
+    /// Vorssaint's floating buttons beside an open page: how far out they
+    /// are, which is lit, which was pressed, and the page they stand beside
+    /// once they have arrived (for the pointer).
+    floats: Spring,
+    float_lit: HashMap<floating::Button, Spring>,
+    float_hover: Option<floating::Button>,
+    float_pressed: Option<(floating::Button, Time)>,
+    float_body: Option<floating::Body>,
     /// The clock and the bars at rest, as `compact` keeps or removes them.
     clock_chip: Quintic,
     music_chip: Quintic,
@@ -932,6 +947,11 @@ impl Island {
             nvim_saved: None,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
+            floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
+            float_lit: HashMap::new(),
+            float_hover: None,
+            float_pressed: None,
+            float_body: None,
             clock_chip: Quintic::at_rest(if config.compact.clock { 1.0 } else { 0.0 }, CHIP_DUR),
             music_chip: Quintic::at_rest(if config.compact.music { 1.0 } else { 0.0 }, CHIP_DUR),
             line_rect: None,
@@ -1006,6 +1026,10 @@ impl Island {
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
             || self.clock_chip.is_moving(now)
+            || self.floats.is_moving(now)
+            || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
+            || self.float_lit.values().any(|s| s.is_moving(now))
+            || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
             || self.music_chip.is_moving(now)
             || self.clock_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.editor_panel.is_moving(now)
@@ -1117,6 +1141,24 @@ impl Island {
             spring.set(if lit { 1.0 } else { 0.0 }, now);
         }
         // the editor's chip rides beside the clock while Neovim is in front
+        // the floating buttons come out once a page is open, and fall back
+        // in quickly (no bounce) when it closes
+        if self.floats_wanted() {
+            // fresh, they wait for the page to have most of its size, so
+            // they leave its sides rather than the compact line's
+            let wait = if self.floats.value(now) < 0.05 { FLOAT_DELAY } else { 0.0 };
+            self.floats.set_with(1.0, FLOAT_RESPONSE, FLOAT_DAMPING, now + wait);
+        } else {
+            self.floats.set_with(0.0, FLOAT_RETURN, 1.0, now);
+            self.float_hover = None;
+        }
+        for (button, spring) in self.float_lit.iter_mut() {
+            spring.set(if self.float_hover == Some(*button) { 1.0 } else { 0.0 }, now);
+        }
+        if let Some(button) = self.float_hover {
+            self.float_lit.entry(button).or_insert_with(|| Spring::new(0.0, 0.32, 0.75)).set(1.0, now);
+        }
+        self.float_lit.retain(|_, s| s.target() > 0.0 || s.is_moving(now));
         let shown = self.config.compact;
         self.clock_chip.set(if shown.clock { 1.0 } else { 0.0 }, now);
         self.music_chip.set(if shown.music { 1.0 } else { 0.0 }, now);
@@ -2608,6 +2650,24 @@ impl Island {
             cr.set_source_rgba(c.0, c.1, c.2, breathe * pill_alpha_of(q));
             let _ = cr.stroke();
         }
+        // the floating buttons drip out of the sides of an open page
+        let float_k = self.floats.value(now);
+        let float_page = floating::Body { x0, x1, top: dy, bottom: y1 };
+        self.float_body = None;
+        if float_k > 0.001 {
+            for button in floating::ALL {
+                let look = floating::Look {
+                    progress: float_k,
+                    lit: self.float_lit.get(&button).map_or(0.0, |s| s.value(now)),
+                    selected: self.float_selected(button),
+                    pressed: self.float_pressed.filter(|(b, _)| *b == button).map_or(f64::INFINITY, |(_, t)| now - t),
+                };
+                floating::draw(cr, button, float_page, &look, 1.0);
+            }
+            if float_k > 0.95 && self.floats.target() > 0.5 {
+                self.float_body = Some(float_page);
+            }
+        }
         // everything inside stays inside (the pill content climbs in from
         // below the box): a pixel-aligned rectangle, which cairo clips for
         // free, is enough — the content never reaches the corners
@@ -3045,18 +3105,29 @@ impl Island {
         cr.restore().unwrap();
 
         let top = dy.max(0.0);
-        let bounds = Rect { x: x0 - FILLET, y: top, w: x1 - x0 + 2.0 * FILLET, h: y1 - top };
+        let mut bounds = Rect { x: x0 - FILLET, y: top, w: x1 - x0 + 2.0 * FILLET, h: y1 - top };
+        if float_k > 0.001 {
+            bounds.x -= floating::REACH;
+            bounds.w += 2.0 * floating::REACH;
+            bounds.h = bounds.h.max(floating::bottom(float_page) + 2.0 - top);
+        }
         // the input region covers whichever is larger, the box now or the
         // box it is growing into
         let (target_w, target_h) = self.target_size(line_w, line_h, now);
         let input_w = (x1 - x0).max(target_w);
         let input_h = (y1 - dy).max(target_h);
-        let input = Rect {
+        let mut input = Rect {
             x: cx - input_w / 2.0 - FILLET,
             y: top,
             w: input_w + 2.0 * FILLET,
             h: (dy + input_h - top).max(0.0),
         };
+        if self.floats.target() > 0.5 {
+            let page = floating::Body { x0: cx - input_w / 2.0, x1: cx + input_w / 2.0, top: dy, bottom: dy + input_h };
+            input.x -= floating::REACH;
+            input.w += 2.0 * floating::REACH;
+            input.h = input.h.max(floating::bottom(page) + 2.0 - top);
+        }
         // opaque: the box minus its curved corners (a T shape)
         let opaque = [
             (y1 - r > top).then(|| Rect { x: x0, y: top, w: x1 - x0, h: y1 - r - top }),
@@ -3547,6 +3618,80 @@ impl Island {
         if !self.center.open { return false; }
         self.center.scroll(rows, now);
         true
+    }
+
+    /// Is a page open that the floating buttons stand beside?
+    fn floats_wanted(&self) -> bool {
+        self.auth.is_none() && self.launcher.is_none()
+            && (self.quick_open || self.center.open || self.calendar_open() || self.timer_menu_open())
+    }
+
+    fn timer_menu_open(&self) -> bool {
+        self.activity.as_ref().is_some_and(|a| a.event == activity::Event::TimerMenu)
+    }
+
+    /// Is the button's page the one showing?
+    pub fn float_selected(&self, button: floating::Button) -> bool {
+        match button {
+            floating::Button::Search => false,
+            floating::Button::Timer => self.timer_menu_open(),
+            floating::Button::Notifications => self.center.open,
+            floating::Button::Sound => self.quick_open && self.quick_view == quick::View::Sound,
+            floating::Button::Calendar => self.calendar_open(),
+        }
+    }
+
+    /// The floating button under (px, py), once the buttons have arrived.
+    pub fn float_at(&self, px: f64, py: f64) -> Option<floating::Button> {
+        floating::hit(self.float_body?, px, py)
+    }
+
+    pub fn set_float_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let hover = self.float_at(px, py);
+        if hover == self.float_hover { return false; }
+        self.float_hover = hover;
+        self.sync(now);
+        true
+    }
+
+    /// A floating button was pressed: it dips; the page it leads to opens
+    /// in place of the one showing (the island morphs between them).
+    pub fn press_float(&mut self, button: floating::Button, now: Time) {
+        self.float_pressed = Some((button, now));
+        if self.float_selected(button) { return; }
+        self.leave_pages(now);
+        match button {
+            floating::Button::Search => {
+                self.toggle_launcher(now);
+            }
+            floating::Button::Timer => {
+                let _ = self.timer_command("menu", now);
+            }
+            floating::Button::Notifications => {
+                self.open_notification_center(now);
+            }
+            floating::Button::Sound => {
+                self.show_quick_menu(now);
+                self.quick_view = quick::View::Sound;
+            }
+            floating::Button::Calendar => self.open_calendar(now),
+        }
+        self.sync(now);
+    }
+
+    /// Close whichever page is open, for another to take its place.
+    fn leave_pages(&mut self, now: Time) {
+        if self.center.open {
+            self.center.close();
+            self.center_rect = None;
+        }
+        if self.quick_open {
+            // its content fades as the next page's comes in
+            self.close_quick_menu(now);
+        }
+        if self.activity.as_ref().is_some_and(|a| activity::takes_keyboard(&a.event)) {
+            self.activity = None;
+        }
     }
 
     pub fn open_quick_menu(&mut self, now: Time) -> bool {
@@ -4422,7 +4567,7 @@ mod tests {
     }
 
     fn filmstrip_with(name: &str, island: &mut Island, renderer: &Renderer, t: Time, frames: usize, step: f64) {
-        let (cw, ch) = (520.0, 560.0);
+        let (cw, ch) = (760.0, 560.0);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, (cw * frames as f64) as i32, ch as i32).unwrap();
         let cr = Context::new(&surface).unwrap();
         cr.set_source_rgb(0.18, 0.30, 0.36);
@@ -4485,6 +4630,13 @@ mod tests {
         gallery_shot_after("close-quick-open", &mut island, 10.0, 1.0);
         island.close_activity_panel(11.0);
         filmstrip("close-quick", &mut island, 11.0, 12, 2.0 / 60.0);
+
+        // the floating buttons drip out as the menu opens, and back in
+        let mut island = gallery_island();
+        island.open_quick_menu(10.0);
+        filmstrip("floats-open", &mut island, 10.0, 12, 2.5 / 60.0);
+        island.close_quick_menu(12.0);
+        filmstrip("floats-close", &mut island, 12.0, 8, 1.5 / 60.0);
 
         let mut island = gallery_island();
         island.open_notification_center(10.0);
@@ -5596,5 +5748,44 @@ mod command_tests {
         assert!((line.w - (REST_CONTENT_W + 2.0 * PAD)).abs() < 1.0, "resting width {}", line.w);
         assert!(island.clock_rect.is_none());
         assert!(island.clock_at(line.x + line.w / 2.0, line.y + 10.0));
+    }
+
+    #[test]
+    fn floating_buttons_arrive_beside_an_open_page_and_lead_to_other_pages() {
+        let mut island = Island::new(Config::default());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let settle = |island: &mut Island, from: Time| {
+            for n in 0..90 {
+                let now = from + n as f64 / 60.0;
+                island.advance(now);
+                island.draw(&cr, &renderer, 490.0, now);
+            }
+        };
+        settle(&mut island, 1.0);
+        assert!(island.float_body.is_none(), "no buttons beside the compact island");
+        assert!(island.open_quick_menu(3.0));
+        settle(&mut island, 3.0);
+        let body = island.float_body.expect("the buttons arrived");
+        let at = |button: floating::Button| {
+            (0..400).flat_map(|y| (0..980).map(move |x| (x as f64, y as f64)))
+                .find(|(x, y)| floating::hit(body, *x, *y) == Some(button)).unwrap()
+        };
+        let (x, y) = at(floating::Button::Calendar);
+        assert_eq!(island.float_at(x, y), Some(floating::Button::Calendar));
+        island.press_float(floating::Button::Calendar, 5.0);
+        assert!(island.calendar_open() && !island.quick_menu_open());
+        assert!(island.float_selected(floating::Button::Calendar));
+        settle(&mut island, 5.0);
+        island.press_float(floating::Button::Notifications, 7.0);
+        assert!(island.center.open && !island.calendar_open());
+        settle(&mut island, 7.0);
+        island.press_float(floating::Button::Sound, 9.0);
+        assert!(island.quick_menu_open() && island.float_selected(floating::Button::Sound) && !island.center.open);
+        settle(&mut island, 9.0);
+        island.close_quick_menu(11.0);
+        settle(&mut island, 11.0);
+        assert!(island.float_body.is_none() && island.floats.value(12.5) < 0.01, "they fall back in");
     }
 }

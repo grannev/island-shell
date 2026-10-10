@@ -1685,6 +1685,7 @@ impl App {
         self.island.clear_timer_hover();
         self.island.clear_network_hover(now);
         self.island.set_quick_hover(-1.0, -1.0, now);
+        self.island.set_float_hover(-1.0, -1.0, now);
         self.island.clear_center_hover(now);
         self.island.set_notice_hover(-1.0, -1.0, now);
         self.island.set_eq_hover(-1.0, -1.0, now);
@@ -1917,6 +1918,7 @@ impl PointerHandler for App {
                     self.island.set_timer_hover(event.position.0, event.position.1);
                     self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.set_float_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_notice_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false));
@@ -1940,6 +1942,9 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     if self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.set_float_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
                     if self.island.set_center_hover(event.position.0, event.position.1, self.clock.predict(false)) {
@@ -2032,6 +2037,19 @@ impl PointerHandler for App {
                         }
                         changed = true;
                         continue;
+                    }
+                    // the floating buttons beside an open page lead to other pages
+                    if button == BTN_LEFT {
+                        if let Some(target) = self.island.float_at(event.position.0, event.position.1) {
+                            self.island.press_float(target, now);
+                            if target == crate::floating::Button::Sound {
+                                let _ = self.controls.send(crate::control::Request::Refresh);
+                            }
+                            let focus = self.island.keyboard_panel_open() || self.island.launcher.is_some();
+                            self.set_keyboard_focus(focus);
+                            changed = true;
+                            continue;
+                        }
                     }
                     if button == BTN_LEFT && self.island.press_center(event.position.0, event.position.1, now) {
                         changed = true;

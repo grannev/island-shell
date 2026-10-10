@@ -19,6 +19,7 @@ mod icons;
 mod iconload;
 mod background;
 mod files;
+mod floating;
 mod island;
 mod launcher;
 mod menu_style;

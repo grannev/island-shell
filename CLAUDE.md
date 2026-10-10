@@ -97,7 +97,8 @@ launcher directly. A right click on the clock opens the calendar sheet
 (`src/calendar.rs`), with open-meteo weather under the month (`src/weather.rs`,
 place from the time zone, fetched by a background `curl`). The config key
 `compact` (`island-shell compact <item> on|off`, persisted) chooses what the
-closed island shows; without the clock it rests as a short empty capsule. Music controls are scoped to the equaliser on the compact
+closed island shows; without the clock it rests as a short empty capsule. Open
+pages carry Vorssaint's floating drop buttons (`src/floating.rs`) on both sides. Music controls are scoped to the equaliser on the compact
 island or the visible player panel: left play/pause, right next, middle
 previous; scrolling changes tracks only there. Explicit controls, timer,
 authentication and modal panels retain their interactions.

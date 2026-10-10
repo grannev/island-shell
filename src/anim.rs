@@ -187,6 +187,21 @@ impl Spring {
         self.target = to;
         self.start = now;
     }
+
+    /// Retarget with a different feel (a quick, unbouncy way back), from
+    /// wherever the motion is now.
+    pub fn set_with(&mut self, to: f64, response: f64, damping: f64, now: Time) {
+        if self.target == to {
+            return;
+        }
+        let s = self.state(now);
+        self.x0 = s.x;
+        self.v0 = s.v;
+        self.target = to;
+        self.start = now;
+        self.omega = 2.0 * std::f64::consts::PI / response;
+        self.zeta = damping;
+    }
 }
 
 /// A scroll position: an exponential approach to its target, the way a

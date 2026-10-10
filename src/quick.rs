@@ -380,7 +380,7 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
     None
 }
 
-fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
+pub fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
     cr.save().unwrap();
     cr.translate(x, y);
     cr.scale(scale, scale);
@@ -464,7 +464,7 @@ fn stroke_style(cr: &Context, width: f64, alpha: f64) {
 }
 
 /// The small glyphs: speaker, sun, outputs, keyboard and session buttons.
-fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64, f64, f64)) {
+pub fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64, f64, f64)) {
     cr.save().unwrap();
     cr.translate(cx, cy);
     stroke_style(cr, 1.8, 1.0);
@@ -543,6 +543,22 @@ fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64
             cr.move_to(-3.5, 3.4);
             cr.line_to(3.5, 3.4);
             let _ = cr.stroke();
+        }
+        "calendar" => {
+            // a page with a binding: the top band filled, two rings, days
+            menu_style::rounded(cr, -8.5, -7.0, 17.0, 15.5, 3.0);
+            let _ = cr.stroke();
+            cr.rectangle(-8.5, -6.0, 17.0, 3.6);
+            let _ = cr.fill();
+            cr.move_to(-4.0, -9.5);
+            cr.line_to(-4.0, -6.5);
+            cr.move_to(4.0, -9.5);
+            cr.line_to(4.0, -6.5);
+            let _ = cr.stroke();
+            for (dx, dy) in [(-4.0, 0.5), (0.0, 0.5), (4.0, 0.5), (-4.0, 4.2), (0.0, 4.2)] {
+                cr.rectangle(dx - 1.0, dy - 1.0, 2.0, 2.0);
+            }
+            let _ = cr.fill();
         }
         "sunset" => {
             // night mode: half a sun sinking behind the horizon

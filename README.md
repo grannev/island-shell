@@ -142,7 +142,14 @@ application playing with its own level slider (all of an application's
 streams move together; notification chimes are left out), and the default
 microphone with its level and a mute button on its symbol (struck through
 and red while muted); the page re-reads the applications once a second
-while it is open. Under the cards, a rail of twelve round shortcut tiles
+while it is open. Beside every open page — the Control Center, the sound
+page, the notification center, the calendar and the timer — stand
+Vorssaint's **floating buttons**: 44 px black circles that drip out of the
+island's sides once the page has most of its size (a small circle tucked
+under the edge swells as it moves out, its neck thins and lets go) and fall
+back in quickly when the page closes. Left: Search and Timer; right:
+Notifications, Sound and Calendar. The page showing is lit; a click on
+another button morphs the island into that page. Under the cards, a rail of twelve round shortcut tiles
 (a 40 px well over a one-line label, a light wash and a small lift under
 the pointer; a tile that is on takes its colour): Wi-Fi, Bluetooth, Timer
 (its remaining time in orange while it runs), Notifications (the unread
