@@ -141,10 +141,15 @@ Screen recording (`src/recorder.rs`, wf-recorder) counts down 3-2-1, shows a
 red dot with its length beside the clock and flies the first frame in when done.
 Environment readers live in `src/activity.rs`; a grim wrapper is installed
 as `~/.local/bin/island-screenshot`.
-The timer opens from the island's shortcut menu; a running
-countdown appears beside the clock; left click pauses/resumes, right click
-opens controls, and Escape closes the panel. `island-shell timer` opens the
-same panel. The main Waybar has no timer, Wi-Fi or Bluetooth buttons, and its
+The timer opens from the island's shortcut menu as Vorssaint's timer page
+(`src/timer_page.rs`: Timer / Pomodoro / Stopwatch, a minute ruler that drags,
+scrolls and clicks, iOS round Cancel/Pause while running, Pomodoro phases that
+wait for their start); a running session appears beside the clock; left click
+pauses/resumes, right click opens the page, and Escape closes it.
+`island-shell timer` opens the same page. The ruler's ticks and the alarm are
+sounds (`src/sound.rs`, `pw-play` on a worker; config `timer_sound`): the
+X1 Titanium's Sensel touchpad has no HID haptics page, so Vorssaint's haptic
+ticks cannot be reproduced on it. The main Waybar has no timer, Wi-Fi or Bluetooth buttons, and its
 ⋯ drawer contains only disk, CPU and memory. `src/connections.rs` owns native connection sheets and their
 motion; `src/network.rs` owns asynchronous NetworkManager and BlueZ operations.
 Wi-Fi supports scanning, saved/open/personal secured connections, password

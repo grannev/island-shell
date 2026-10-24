@@ -47,7 +47,7 @@ pub enum Command {
     Nvim(String),
     /// A live activity supplied explicitly (also used by screenshot hooks).
     Activity(crate::activity::Event),
-    /// `timer <duration|pause|resume|toggle|cancel|status>`.
+    /// `timer <duration|pomodoro|stopwatch|next|pause|resume|toggle|cancel|status>`.
     Timer(String),
     /// `task …` / `progress …`: a job shown as a live activity
     Task(crate::tasks::Request),
@@ -145,7 +145,7 @@ impl Command {
 
 pub const USAGE: &str = concat!(
     "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|sections|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
-    "timer <duration|pause|resume|toggle|cancel|status>|screenshot <file>|",
+    "timer <duration|pomodoro|stopwatch|next|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",
 );

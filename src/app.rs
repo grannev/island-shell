@@ -315,6 +315,8 @@ pub struct App {
     /// the Control Center's worker (volume, brightness, outputs, layout,
     /// session) and whether the menu was open at the last change
     controls: std::sync::mpsc::Sender<crate::control::Request>,
+    /// the timer's ticks and alarm, played off the UI thread
+    sound: crate::sound::Player,
     /// screen recordings report through here
     recorder_tx: channel::Sender<crate::recorder::Event>,
     /// the notification the server was asked not to expire
@@ -442,6 +444,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         notification_commands,
         notification_dnd,
         controls,
+        sound: crate::sound::Player::new(),
         recorder_tx,
         held_notice: None,
         quick_was_open: false,
@@ -1186,6 +1189,18 @@ impl App {
                     _ => "",
                 };
                 if self.island.calendar_key(key, now) { self.after_change(); }
+            } else if self.island.timer_page_open() {
+                let key = match event.keysym {
+                    Keysym::Left => "Left",
+                    Keysym::Right => "Right",
+                    Keysym::Up => "Up",
+                    Keysym::Down => "Down",
+                    Keysym::Tab => "Tab",
+                    Keysym::Return | Keysym::KP_Enter => "Return",
+                    Keysym::space => "space",
+                    _ => "",
+                };
+                if self.island.timer_key(key, now) { self.after_change(); }
             } else if self.island.quick_menu_open() {
                 let key = match event.keysym {
                     Keysym::Return | Keysym::KP_Enter => "enter",
@@ -1265,6 +1280,7 @@ impl App {
     }
 
     fn after_change(&mut self) {
+        self.play_sounds();
         // the Control Center reads the environment each time it opens
         let quick = self.island.quick_menu_open();
         if quick && !self.quick_was_open {
@@ -1404,6 +1420,13 @@ impl App {
         }
     }
 
+    /// Hand the island's sounds (ruler ticks, the alarm) to the player.
+    fn play_sounds(&mut self) {
+        for sound in self.island.take_sounds() {
+            self.sound.play(sound);
+        }
+    }
+
     /// Is the sink muted or at 0 %? The bar's volume script keeps a state
     /// file; pactl is the fallback.
     fn poll_volume(&mut self) {
@@ -1435,6 +1458,7 @@ impl App {
         if self.island.advance(t) {
             self.arm_deadline();
         }
+        self.play_sounds();
         // a touchpad swipe that ended without a finger-lift event
         if let Some(id) = self.island.take_swiped() {
             self.close_notification(id);
@@ -1691,7 +1715,7 @@ impl App {
     fn pointer_left(&mut self) {
         let now = self.clock.predict(false);
         self.island.hovered = false;
-        self.island.clear_timer_hover();
+        self.island.clear_timer_hover(self.clock.predict(false));
         self.island.clear_network_hover(now);
         self.island.set_quick_hover(-1.0, -1.0, now);
         self.island.set_float_hover(-1.0, -1.0, now);
@@ -1924,7 +1948,7 @@ impl PointerHandler for App {
                 PointerEventKind::Enter { .. } => {
                     self.island.hovered = true;
                     self.pointer_at = event.position;
-                    self.island.set_timer_hover(event.position.0, event.position.1);
+                    self.island.set_timer_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_quick_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_float_hover(event.position.0, event.position.1, self.clock.predict(false));
@@ -1944,7 +1968,7 @@ impl PointerHandler for App {
                         changed = true;
                     }
                     self.island.hold_tasks_hover(event.position.0, event.position.1, self.clock.predict(false));
-                    if self.island.set_timer_hover(event.position.0, event.position.1) {
+                    if self.island.set_timer_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
                     if self.island.set_network_hover(event.position.0, event.position.1, self.clock.predict(false)) {
@@ -1977,6 +2001,11 @@ impl PointerHandler for App {
                         changed = true;
                         continue;
                     }
+                    // the timer's ruler in the hand follows the pointer
+                    if self.island.timer_drag_to(event.position.0, now) {
+                        changed = true;
+                        continue;
+                    }
                     // a Control Center slider in the hand follows the pointer
                     if let Some((kind, value)) = self.island.quick_drag_to(event.position.0, now) {
                         self.set_level(kind, value);
@@ -2004,6 +2033,9 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Release { button, .. } => {
                     if button == BTN_LEFT && self.island.quick_release(self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if button == BTN_LEFT && self.island.timer_release(event.position.0, self.clock.predict(false)) {
                         changed = true;
                     }
                     if button == BTN_LEFT {
@@ -2189,6 +2221,10 @@ impl PointerHandler for App {
                             self.handle_notification_action(action, now);
                             continue;
                         }
+                        // two fingers sideways turn the timer's ruler
+                        if self.island.scroll_timer(x, y, dx, horizontal.discrete != 0, now) {
+                            continue;
+                        }
                         if vertical.absolute == 0.0 && vertical.discrete == 0 { continue; }
                     }
                     // a notch is a push of WHEEL_PX; a touchpad moves 1:1
@@ -2202,6 +2238,9 @@ impl PointerHandler for App {
                         continue;
                     }
                     if self.island.scroll_calendar(px, now) {
+                        continue;
+                    }
+                    if self.island.scroll_timer(event.position.0, event.position.1, px, vertical.discrete != 0, now) {
                         continue;
                     }
                     if self.island.scroll_network(px / crate::connections::ROW_H, now) {

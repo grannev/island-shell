@@ -37,8 +37,7 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   dismisses or returns to the quick menu comes from navigation context.
 - **Buttons** (`button`): capsules, 34 px (`BUTTON_H`) or 30 px
   (`SMALL_BUTTON_H`). `Primary` is filled blue for the main action,
-  `Neutral` grey, `Warm` orange-tinted for the timer's chosen duration /
-  resume, `Destructive` red-tinted for removal and cancelling, `Plain`
+  `Neutral` grey, `Warm` orange-tinted for the timer page's Start, `Destructive` red-tinted for removal and cancelling, `Plain`
   blue text for navigation ("‹ Назад") and inline toggles ("Показать").
   Disabled controls keep their shape at reduced opacity.
 - **Grouped lists** (`group`, `separator`, `highlight`): one rounded

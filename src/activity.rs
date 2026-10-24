@@ -33,7 +33,8 @@ pub enum Event {
     Bluetooth { name: String, battery: Option<u8> },
     Wifi { ssid: String },
     Screenshot { path: PathBuf },
-    TimerDone,
+    /// a countdown or a Pomodoro phase ran out: what ended, what follows
+    TimerDone { title: String, detail: String },
     TimerMenu,
     WifiOpen,
     BluetoothOpen,
@@ -58,6 +59,11 @@ pub enum Event {
 pub const RECORD_COUNTDOWN: f64 = 3.0;
 
 impl Event {
+    /// A countdown ran out.
+    pub fn timer_done() -> Event {
+        Event::TimerDone { title: "Таймер".into(), detail: "Время вышло".into() }
+    }
+
     pub fn size(&self) -> (f64, f64) {
         match self {
             Event::Slider { .. } => (340.0, SLIDER_H),
@@ -66,8 +72,9 @@ impl Event {
             Event::Bluetooth { .. } => (370.0, PILL_H),
             Event::Wifi { .. } => (390.0, PILL_H),
             Event::Screenshot { .. } => (390.0, 106.0),
-            Event::TimerDone => (270.0, PILL_H),
-            Event::TimerMenu => (TIMER_MENU_W, 176.0),
+            Event::TimerDone { .. } => (330.0, PILL_H),
+            // sized by the island from the timer page's state
+            Event::TimerMenu => (crate::timer_page::WIDTH, 158.0),
             // sized by the island from its jobs (tasks::Tasks::pill_size)
             Event::Tasks => (crate::tasks::PILL_W, PILL_H),
             // sized by the island from the month shown
@@ -88,7 +95,7 @@ impl Event {
             Event::BatteryLow { .. } => 5.0,
             Event::Bluetooth { .. } | Event::Wifi { .. } => 3.2,
             Event::Screenshot { .. } => 4.0,
-            Event::TimerDone => 4.0,
+            Event::TimerDone { .. } => 4.0,
             Event::Tasks => 4.5,
             Event::CalendarOpen => f64::INFINITY,
             Event::MicMute { .. } => 1.8,
@@ -415,103 +422,17 @@ pub fn timer_width(cr: &Context, renderer: &Renderer, remaining: f64) -> f64 {
     24.0 + 6.0 + renderer.layout(cr, &text, Font::Small).pixel_extents().1.width() as f64
 }
 
-pub const TIMER_MENU_W: f64 = 390.0;
-
-// The same geometry drives rendering and hit testing.
-pub const TIMER_BUTTONS: [(&str, &str, f64, f64, f64); 7] = [
-    ("5m", "5 мин", 22.0, 76.0, 80.5),
-    ("15m", "15 мин", 110.5, 76.0, 80.5),
-    ("25m", "25 мин", 199.0, 76.0, 80.5),
-    ("50m", "50 мин", 287.5, 76.0, 80.5),
-    ("toggle", "Пауза", 22.0, 120.0, 168.0),
-    ("cancel", "Отменить", 200.0, 120.0, 168.0),
-    ("close", "×", TIMER_MENU_W - 22.0 - 30.0, 25.0, 30.0),
-];
-
-fn timer_button_h(command: &str) -> f64 {
-    if command == "close" { crate::menu_style::CLOSE_SIZE } else { crate::menu_style::BUTTON_H }
-}
-
-pub fn timer_menu_hit(x: f64, y: f64) -> Option<&'static str> {
-    TIMER_BUTTONS.iter().find_map(|(command, _, bx, by, bw)| {
-        (x >= *bx && x <= bx + bw && y >= *by && y <= by + timer_button_h(command)).then_some(*command)
-    })
-}
-
-/// The stopwatch glyph of the timer's tile, centred on cx, cy.
-fn stopwatch(cr: &Context, cx: f64, cy: f64, alpha: f64) {
-    cr.new_path();
-    cr.set_line_width(2.0);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-    cr.arc(cx, cy + 1.5, 9.0, 0.0, std::f64::consts::TAU);
-    let _ = cr.stroke();
-    cr.move_to(cx, cy + 1.5);
-    cr.line_to(cx, cy - 3.5);
-    cr.move_to(cx - 2.5, cy - 10.0);
-    cr.line_to(cx + 2.5, cy - 10.0);
-    let _ = cr.stroke();
-    cr.new_path();
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn draw_timer_menu(
-    cr: &Context,
-    renderer: &Renderer,
-    x: f64,
-    y: f64,
-    timer: Option<(f64, bool)>,
-    hover: &[f64; 7],
-    enabled_alpha: &[f64; 7],
-    alpha: f64,
-    since: f64,
-    now: f64,
-) {
-    use crate::menu_style::{self, ButtonKind};
-    let heading_k = smoothstep((now - since) / 0.24);
-    let heading_y = (1.0 - heading_k) * 5.0;
-    let subtitle = match timer {
-        Some((remaining, running)) => {
-            format!("{} · {}", timer_text(remaining), if running { "идёт отсчёт" } else { "на паузе" })
-        }
-        None => "Выберите время · Помодоро — 25 мин".into(),
-    };
-    let glyph = |cr: &Context, cx: f64, cy: f64| stopwatch(cr, cx, cy, 1.0);
-    menu_style::header_keyed(cr, renderer, x, y + heading_y, TIMER_MENU_W, Some((menu_style::ORANGE, &glyph)),
-        "Таймер", Some(&subtitle), 60.0, alpha * heading_k, &format!("timer-menu{since:.4}"));
-    let paused = timer.is_some_and(|(_, running)| !running);
-    for (index, (command, label, bx, by, bw)) in TIMER_BUTTONS.into_iter().enumerate() {
-        let k = smoothstep((now - since - 0.05 - index as f64 * 0.035) / 0.23);
-        let dy = 5.0 * (1.0 - k);
-        let enabled = !matches!(command, "toggle" | "cancel") || timer.is_some();
-        let opacity = alpha * (0.35 + 0.65 * enabled_alpha[index]);
-        let lit = if enabled { hover[index].clamp(0.0, 1.0) } else { 0.0 };
-        if command == "close" {
-            menu_style::close(cr, x + bx, y + by + dy, bw, lit, opacity * k);
-            continue;
-        }
-        let label = if command == "toggle" && paused { "Продолжить" } else { label };
-        let kind = match command {
-            "25m" => ButtonKind::Warm,
-            "toggle" if paused => ButtonKind::Warm,
-            "cancel" if timer.is_some() => ButtonKind::Destructive,
-            _ => ButtonKind::Neutral,
-        };
-        menu_style::button(cr, renderer, label, (x + bx, y + by + dy, bw, timer_button_h(command)), kind, lit, opacity * k);
-    }
-}
-
-/// The countdown's colour: orange, red in the last minute.
-fn timer_colour(remaining: f64) -> (f64, f64, f64) {
-    if remaining <= 60.0 { (1.0, 0.23, 0.19) } else { (1.0, 0.62, 0.12) }
+/// The countdown's colour: orange, red in its last minute.
+fn timer_colour(urgent: bool) -> (f64, f64, f64) {
+    if urgent { (1.0, 0.23, 0.19) } else { (1.0, 0.62, 0.12) }
 }
 
 /// The timer chip's ring, 20 px wide from `x`: the time left as an arc,
 /// with pause bars inside while it is paused.
-pub fn draw_timer_ring(cr: &Context, x: f64, cy: f64, remaining: f64, fraction: f64, running: bool, alpha: f64) {
+pub fn draw_timer_ring(cr: &Context, x: f64, cy: f64, urgent: bool, fraction: f64, running: bool, alpha: f64) {
     cr.save().unwrap();
     cr.set_line_cap(cairo::LineCap::Round);
-    let colour = timer_colour(remaining);
+    let colour = timer_colour(urgent);
     cr.set_line_width(2.4);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.18 * alpha);
     cr.new_sub_path();
@@ -540,12 +461,12 @@ pub fn draw_timer_ring(cr: &Context, x: f64, cy: f64, remaining: f64, fraction: 
 
 /// The timer chip's reading from `x`; `tint` 0..1 takes it from white to
 /// the countdown's own colour (the wings wear it, as Vorssaint's strip does).
-pub fn draw_timer_reading(cr: &Context, renderer: &Renderer, x: f64, cy: f64, remaining: f64, tint: f64, alpha: f64) {
-    // the seconds roll down as they count down
-    let label = timer_text(remaining);
+pub fn draw_timer_reading(cr: &Context, renderer: &Renderer, x: f64, cy: f64, seconds: f64, urgent: bool, tint: f64, alpha: f64) {
+    // the seconds roll (down as a countdown counts down)
+    let label = timer_text(seconds);
     let text = renderer.layout(cr, &label, Font::Small);
     let (_, ext) = text.pixel_extents();
-    let c = timer_colour(remaining);
+    let c = timer_colour(urgent);
     let t = tint.clamp(0.0, 1.0);
     let colour = (1.0 + (c.0 - 1.0) * t, 1.0 + (c.1 - 1.0) * t, 1.0 + (c.2 - 1.0) * t);
     crate::motion::text(cr, renderer, "timer", &label, x - ext.x() as f64,
@@ -665,9 +586,9 @@ pub fn draw_pill(
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Снимок экрана");
             draw_two_lines(cr, renderer, "Снимок сохранён", name, x0 + 104.0, cy, enter, crate::menu_style::TEAL);
         }
-        Event::TimerDone => {
+        Event::TimerDone { title, detail } => {
             draw_clock(cr, x0 + 50.0, cy, enter);
-            draw_two_lines(cr, renderer, "Таймер", "Время вышло", x0 + 90.0, cy, enter, crate::menu_style::ORANGE);
+            draw_two_lines(cr, renderer, title, detail, x0 + 90.0, cy, enter, crate::menu_style::ORANGE);
         }
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}
@@ -1009,7 +930,7 @@ mod tests {
             Event::Bluetooth { name: "Headphones".into(), battery: Some(84) },
             Event::Wifi { ssid: "Island".into() },
             Event::Screenshot { path: PathBuf::from("/does/not/exist.png") },
-            Event::TimerDone,
+            Event::timer_done(),
         ];
         for (index, event) in events.into_iter().enumerate() {
             let y = index as f64 * 120.0 + 7.0;
@@ -1023,8 +944,8 @@ mod tests {
         round_rect(&cr, 20.0, 980.0, 220.0, 32.0, 14.0);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         cr.fill().unwrap();
-        draw_timer_ring(&cr, 32.0, 996.0, 42.0, 0.7, true, 1.0);
-        draw_timer_reading(&cr, &renderer, 62.0, 996.0, 42.0, 0.0, 1.0);
+        draw_timer_ring(&cr, 32.0, 996.0, true, 0.7, true, 1.0);
+        draw_timer_reading(&cr, &renderer, 62.0, 996.0, 42.0, true, 0.0, 1.0);
         surface.flush();
         if std::env::var_os("ISLAND_ACTIVITY_PREVIEW").is_some() {
             let mut file = std::fs::File::create("target/activity-preview.png").unwrap();

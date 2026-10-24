@@ -176,12 +176,28 @@ and spring back, toggled symbols bounce, the logout button wiggles while
 it waits for confirmation, held sliders swell, and the menu's rows arrive
 in a wave.
 
-The panel has animated 5, 15, 25 and 50 minute presets (25 minutes is the
-Pomodoro shortcut); click a preset to start. While running, a compact ring
-and remaining time sit beside the clock. Click that indicator to pause or
-resume, or right-click to reopen the controls. Escape closes the panel and ×
-returns to the quick menu, neither stopping the countdown. Completion expands into a short “Time is up”
-activity. The timer is kept in memory and resets when the service restarts.
+The timer page is Vorssaint's: three modes in the title row (Timer, Pomodoro,
+Stopwatch — the chosen one underlined in orange, the line sliding between
+them) beside an orange Start button, and under them a ruler of orange ticks,
+one per minute up to three hours, labelled every five. Drag it like a tape
+(left brings later minutes under the pointer), turn it with the wheel (a
+minute a notch) or two fingers, click along it to jump, or use the arrow
+keys; Tab changes the mode and Return starts. Each minute passing under the
+pointer gives a soft click (Vorssaint's haptic tick; this ThinkPad's Sensel
+touchpad exposes no haptics to the system, so the click is a sound) and the
+pointer nods. The Pomodoro adds its plan under the ruler — break, long break,
+long break after, sessions — clicked through presets or turned with the
+wheel. A running session names its phase in the title row and shows iOS's
+round Cancel and Pause buttons beside the large reading (red in a countdown's
+last minute). A Pomodoro phase that ends rings, says what follows and waits:
+its page offers the next phase's start. While running, a compact ring and the
+reading sit beside the clock (the stopwatch's ring sweeps each minute).
+Click that indicator to pause or resume, or right-click to reopen the page.
+Escape closes the page and × returns to the quick menu, neither stopping the
+session. A countdown that ends rings (`alarm-clock-elapsed`) and expands into
+a short “Time is up” activity. `timer_sound = off` silences the ticks and the
+alarm. The session and the page's choices are kept in memory and reset when
+the service restarts.
 
 `island-shell wifi` / `island-shell bluetooth` open the same
 native sheets; ×, Escape or a click outside closes them. The closing click is
@@ -213,12 +229,14 @@ Both sheets show operation progress and errors, scroll through the complete
 list, and refresh state while open. Worker replies are scoped to a panel and
 request so late results cannot reopen a closed sheet. Buttons, tabs, list
 positions, scroll and panel size animate; interactive sheets keep focus and
-queue transient OSDs until they close. Timer hover fades both in and out, and
-Pause / Resume / Cancel leave the controls open.
+queue transient OSDs until they close. The timer page's controls fade in and
+out under the pointer, and Start / Pause / Cancel leave the page open.
 
-`island-shell timer` opens the same panel. CLI controls also remain:
-`island-shell timer 25m` (or `1h30m`), `timer pause`, `timer resume`,
-`timer toggle`, `timer status`, `timer cancel`, and `timer pomodoro`.
+`island-shell timer` opens the same page. CLI controls also remain:
+`island-shell timer 25m` (or `1h30m`), `timer pomodoro` (a cycle with the
+page's plan), `timer stopwatch`, `timer next` (the waiting Pomodoro phase),
+`timer pause`, `timer resume`, `timer toggle`, `timer status` and
+`timer cancel`.
 
 Volume and brightness key repeats extend the OSD's hold without restarting
 its entrance. The slider follows on a spring while the percentage shows the
@@ -527,6 +545,7 @@ at the beginning of a line or as a separate word), read at start;
     weather = auto        # the calendar's weather: auto, a city, lat,lon or off
     compact = all         # what the closed island shows: all, none, or a list of
                           # clock editor timer tasks record music unread dnd mic
+    timer_sound = on      # the timer ruler's ticks and the alarm
 
 Without `clock` the closed island rests as a short black capsule (150 px), and
 a right click on any free part of it opens the calendar. Its activities then

@@ -37,7 +37,9 @@ mod quick;
 mod recorder;
 mod notify_kinds;
 mod sway;
+mod sound;
 mod tasks;
+mod timer_page;
 mod touchid;
 mod weather;
 

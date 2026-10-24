@@ -18,6 +18,7 @@ use crate::notice_center;
 use crate::nvim::{self, Editor};
 use crate::player;
 use crate::quick;
+use crate::timer_page;
 use crate::floating;
 use crate::tasks;
 use crate::calendar::{self, Calendar};
@@ -269,6 +270,8 @@ pub struct Config {
     pub weather: String,
     /// What the closed island shows at rest.
     pub compact: Compact,
+    /// The timer ruler's ticks and the alarm when a countdown ends.
+    pub timer_sound: bool,
 }
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
@@ -289,14 +292,15 @@ impl Default for Config {
             night_temp: 4500,
             weather: "auto".into(),
             compact: Compact::ALL,
+            timer_sound: true,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 13] = [
+    pub const KEYS: [&'static str; 14] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
-        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact",
+        "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact", "timer_sound",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -341,6 +345,7 @@ impl Config {
                 crate::weather::configure(value);
             }
             "compact" => self.compact = Compact::parse(value.trim_matches('"'))?,
+            "timer_sound" => self.timer_sound = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -351,10 +356,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
-            self.compact.describe(),
+            self.compact.describe(), self.timer_sound as u8,
         )
     }
 
@@ -558,26 +563,79 @@ struct LiveActivity {
     updated_at: Time,
 }
 
+/// The running timer: a countdown, a Pomodoro phase or the stopwatch.
 #[derive(Clone, Debug)]
 struct Countdown {
     duration: f64,
+    /// the time left as of `changed_at` (gone, for the stopwatch)
     remaining: f64,
     changed_at: Time,
     running: bool,
+    kind: timer_page::Kind,
 }
 
 impl Countdown {
     fn new(duration: f64, now: Time) -> Self {
-        Countdown { duration, remaining: duration, changed_at: now, running: true }
+        Countdown::of(timer_page::Kind::Timer, duration, now)
     }
 
-    fn remaining(&self, now: Time) -> f64 {
-        if self.running { (self.remaining - (now - self.changed_at)).max(0.0) } else { self.remaining }
+    fn of(kind: timer_page::Kind, duration: f64, now: Time) -> Self {
+        let remaining = if kind == timer_page::Kind::Stopwatch { 0.0 } else { duration };
+        Countdown { duration, remaining, changed_at: now, running: true, kind }
     }
 
+    fn counts_up(&self) -> bool {
+        self.kind == timer_page::Kind::Stopwatch
+    }
+
+    /// What it shows: the time left, or the stopwatch's time gone.
+    fn reading(&self, now: Time) -> f64 {
+        let passed = if self.running { now - self.changed_at } else { 0.0 };
+        if self.counts_up() { self.remaining + passed } else { (self.remaining - passed).max(0.0) }
+    }
+
+    /// The ring: the share left, or the stopwatch's sweep through a minute.
     fn fraction(&self, now: Time) -> f64 {
-        if self.duration <= 0.0 { 0.0 } else { self.remaining(now) / self.duration }
+        if self.counts_up() {
+            (self.reading(now) % 60.0) / 60.0
+        } else if self.duration <= 0.0 {
+            0.0
+        } else {
+            self.reading(now) / self.duration
+        }
     }
+
+    /// A countdown's last minute.
+    fn urgent(&self, now: Time) -> bool {
+        !self.counts_up() && self.reading(now) <= 60.0
+    }
+
+    fn finished(&self, now: Time) -> bool {
+        !self.counts_up() && self.running && self.reading(now) <= 0.0
+    }
+
+    fn pause(&mut self, now: Time) {
+        self.remaining = self.reading(now);
+        self.changed_at = now;
+        self.running = false;
+    }
+
+    fn resume(&mut self, now: Time) {
+        if self.counts_up() || self.remaining > 0.0 {
+            self.changed_at = now;
+            self.running = true;
+        }
+    }
+}
+
+/// A Pomodoro cycle: its plan and where it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cycle {
+    plan: timer_page::Pomodoro,
+    phase: timer_page::Phase,
+    session: u32,
+    /// the phase ran out: what waits to start (None: the cycle is over)
+    waiting: Option<Option<(timer_page::Phase, u32)>>,
 }
 
 /// Touch ID: what the pill shows.
@@ -676,12 +734,15 @@ pub struct Island {
     timer_mark_rect: Option<Rect>,
     timer_hovered: bool,
     timer_menu_rect: Option<Rect>,
-    timer_menu_hover: Option<&'static str>,
+    /// the timer page (Vorssaint's): its choices outlive its openings
+    timer_page: timer_page::Page,
+    /// a Pomodoro cycle in progress
+    cycle: Option<Cycle>,
+    /// sounds for the app to play (ruler ticks, the alarm)
+    sounds: Vec<crate::sound::Sound>,
     network_menu_rect: Option<Rect>,
     network_panel: Option<crate::connections::Panel>,
     network_session: u64,
-    timer_button_hover: [Spring; 7],
-    timer_button_enabled: [Spring; 7],
     timer_last: Option<Countdown>,
     /// jobs from `island-shell task|progress|run`: a ring beside the clock
     pub tasks: tasks::Tasks,
@@ -914,12 +975,12 @@ impl Island {
             timer_mark_rect: None,
             timer_hovered: false,
             timer_menu_rect: None,
-            timer_menu_hover: None,
+            timer_page: timer_page::Page::new(),
+            cycle: None,
+            sounds: Vec::new(),
             network_menu_rect: None,
             network_panel: None,
             network_session: 0,
-            timer_button_hover: std::array::from_fn(|_| Spring::new(0.0, 0.25, 1.0)),
-            timer_button_enabled: std::array::from_fn(|i| Spring::new(if i == 4 || i == 5 { 0.0 } else { 1.0 }, 0.25, 1.0)),
             timer_last: None,
             tasks: tasks::Tasks::default(),
             tasks_chip: Quintic::at_rest(0.0, CHIP_DUR),
@@ -1032,7 +1093,7 @@ impl Island {
             || self.pill_w.is_moving(now)
             || self.pill_h.is_moving(now)
             || self.activity_value.is_moving(now) && self.activity.is_some()
-            || self.timer_button_hover.iter().chain(&self.timer_button_enabled).any(|s| s.is_moving(now))
+            || self.timer_menu_open() && self.timer_page.is_animating(now)
             || self.quick_hover_springs.values().any(|s| s.is_moving(now))
             || self.quick_open && self.slider_shown.values().any(|s| s.is_moving(now))
             || self.quick_open && (now - self.quick_opened_at < 0.6
@@ -1199,11 +1260,6 @@ impl Island {
         let chip = shown.editor && self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
         let timer = shown.timer && self.timer.is_some() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
-        for (i, (command, ..)) in activity::TIMER_BUTTONS.iter().enumerate() {
-            let enabled = !matches!(*command, "toggle" | "cancel") || self.timer.is_some();
-            self.timer_button_hover[i].set(if enabled && self.timer_menu_hover == Some(command) { 1.0 } else { 0.0 }, now);
-            self.timer_button_enabled[i].set(if enabled { 1.0 } else { 0.0 }, now);
-        }
         for (action, spring) in self.quick_hover_springs.iter_mut() {
             if self.quick_hover != Some(*action) { spring.set(0.0, now); }
         }
@@ -1350,9 +1406,8 @@ impl Island {
             if !self.connections_open() { self.network_panel = None; }
             if !self.calendar_open() { self.calendar = None; }
         }
-        if self.timer.as_ref().is_some_and(|timer| timer.running && timer.remaining(now) <= 0.0) {
-            self.timer = None;
-            self.live_activity(activity::Event::TimerDone, now);
+        if self.timer.as_ref().is_some_and(|timer| timer.finished(now)) {
+            self.timer_ran_out(now);
             changed = true;
         }
         // An activity that waited for Touch ID or the launcher gets the
@@ -1430,8 +1485,13 @@ impl Island {
             }
         }
         if let Some(timer) = &self.timer {
-            if timer.running {
-                let remaining = timer.remaining(now);
+            if timer.running && timer.counts_up() {
+                // the stopwatch's next second
+                if !self.hidden.any() {
+                    consider(now + (1.0 - timer.reading(now).fract()).max(0.02));
+                }
+            } else if timer.running {
+                let remaining = timer.reading(now);
                 if remaining <= 0.06 {
                     consider(now + remaining.max(0.005));
                 } else if !self.hidden.any() {
@@ -1526,7 +1586,7 @@ impl Island {
             + &self.launcher.as_ref().map_or_else(String::new, |l| format!(" launcher_rows={} files={}", l.result_count(), l.file_count()))
             + &if self.quick_open { " quick=1" } else { "" }
             + &if self.connections_open() { self.network_panel.as_ref().map_or_else(String::new, |p| p.describe()) } else { String::new() }
-            + &self.timer.as_ref().map_or_else(String::new, |t| format!(" timer={:.0}s{}", t.remaining(now), if t.running { "" } else { "(paused)" }))
+            + &self.timer.as_ref().map_or_else(String::new, |t| format!(" timer={:.0}s{}", t.reading(now), if t.running { "" } else { "(paused)" }))
             + &match &self.nvim {
             Some(e) => format!(
                 " nvim={{{} {} {}:{} chip={:.2} panel={:.2}}}",
@@ -2021,39 +2081,186 @@ impl Island {
             }
             "pause" => {
                 let timer = self.timer.as_mut().ok_or("no active timer")?;
-                if timer.running {
-                    timer.remaining = timer.remaining(now);
-                    timer.changed_at = now;
-                    timer.running = false;
-                }
+                if timer.running { timer.pause(now); }
             }
             "resume" => {
                 let timer = self.timer.as_mut().ok_or("no active timer")?;
-                if !timer.running && timer.remaining > 0.0 {
-                    timer.changed_at = now;
-                    timer.running = true;
-                }
+                if !timer.running { timer.resume(now); }
             }
             "toggle" => {
                 if !self.toggle_timer(now) {
                     return Err("no active timer".into());
                 }
             }
-            "cancel" | "stop" => self.timer = None,
+            "cancel" | "stop" => {
+                self.timer = None;
+                self.cycle = None;
+            }
             "status" => {
                 return Ok(self.timer.as_ref().map_or_else(
-                    || "stopped".to_string(),
-                    |timer| format!("{:.0} {}", timer.remaining(now).ceil(), if timer.running { "running" } else { "paused" }),
+                    || if self.cycle.is_some() { "waiting".to_string() } else { "stopped".to_string() },
+                    |timer| format!("{:.0} {}{}", timer.reading(now).ceil(), if timer.running { "running" } else { "paused" },
+                        match timer.kind {
+                            timer_page::Kind::Timer => String::new(),
+                            timer_page::Kind::Stopwatch => " stopwatch".into(),
+                            timer_page::Kind::Pomodoro { phase, session, total } =>
+                                format!(" pomodoro {} {session}/{total}", phase.title().to_lowercase()),
+                        }),
                 ));
             }
-            "pomodoro" => self.timer = Some(Countdown::new(25.0 * 60.0, now)),
+            "pomodoro" => {
+                let plan = self.timer_page.pomodoro;
+                self.start_phase(plan, timer_page::Phase::Focus, 1, now);
+            }
+            "stopwatch" => {
+                self.cycle = None;
+                self.timer = Some(Countdown::of(timer_page::Kind::Stopwatch, 0.0, now));
+            }
+            "next" => {
+                let Some(Cycle { plan, waiting: Some(Some((phase, session))), .. }) = self.cycle else {
+                    return Err("no Pomodoro phase waiting".into());
+                };
+                self.start_phase(plan, phase, session, now);
+            }
             duration => {
                 let seconds = activity::parse_duration(duration).ok_or_else(|| format!("bad duration {duration:?}"))?;
+                self.cycle = None;
                 self.timer = Some(Countdown::new(seconds, now));
             }
         }
         self.sync(now);
         Ok("ok".into())
+    }
+
+    /// Start a Pomodoro phase (the cycle's first, or the one waiting).
+    fn start_phase(&mut self, plan: timer_page::Pomodoro, phase: timer_page::Phase, session: u32, now: Time) {
+        self.cycle = Some(Cycle { plan, phase, session, waiting: None });
+        let kind = timer_page::Kind::Pomodoro { phase, session, total: plan.sessions };
+        self.timer = Some(Countdown::of(kind, plan.minutes(phase) as f64 * 60.0, now));
+    }
+
+    /// A countdown or a Pomodoro phase ran out: the alarm, a pill saying
+    /// so, and a Pomodoro's next phase waiting to be started.
+    fn timer_ran_out(&mut self, now: Time) {
+        let Some(timer) = self.timer.take() else { return };
+        let event = match (timer.kind, self.cycle.as_mut()) {
+            (timer_page::Kind::Pomodoro { phase, session, total }, Some(cycle)) => {
+                let next = cycle.plan.after(phase, session);
+                cycle.waiting = Some(next);
+                let title = format!("{} окончен", phase.title());
+                let detail = match next {
+                    Some((next, n)) => format!("Далее: {} · {} мин · {n} из {total}", next.title().to_lowercase(), cycle.plan.minutes(next)),
+                    None => format!("Помодоро завершён · {total} из {total}"),
+                };
+                activity::Event::TimerDone { title, detail }
+            }
+            _ => activity::Event::timer_done(),
+        };
+        if self.config.timer_sound {
+            self.sounds.push(crate::sound::Sound::Alarm);
+        }
+        // an open timer page shows what follows instead of a pill
+        if !self.timer_menu_open() {
+            self.live_activity(event, now);
+        }
+    }
+
+    /// The session as the timer page shows it.
+    fn timer_session(&self, now: Time) -> timer_page::Session {
+        match (&self.timer, &self.cycle) {
+            (Some(t), _) => timer_page::Session::Active {
+                kind: t.kind, reading: t.reading(now), running: t.running, urgent: t.urgent(now),
+            },
+            (None, Some(Cycle { plan, phase, waiting: Some(Some((next, n))), .. })) => timer_page::Session::Next {
+                done: *phase, next: *next, session: *n, total: plan.sessions, minutes: plan.minutes(*next),
+            },
+            (None, Some(Cycle { plan, waiting: Some(None), .. })) => timer_page::Session::Finished { total: plan.sessions },
+            _ => timer_page::Session::Setup,
+        }
+    }
+
+    /// Sounds for the app to play since it last asked.
+    pub fn take_sounds(&mut self) -> Vec<crate::sound::Sound> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    /// The ruler moved under the person's hand: a tick, if sounds are on.
+    fn timer_ticks(&mut self) {
+        if self.timer_page.take_ticks() && self.config.timer_sound {
+            self.sounds.push(crate::sound::Sound::Tick);
+        }
+    }
+
+    pub fn timer_page_open(&self) -> bool {
+        self.auth.is_none() && self.timer_menu_open()
+    }
+
+    /// Carry out what the timer page asked for.
+    fn run_timer_page(&mut self, command: timer_page::Command, now: Time) {
+        use timer_page::Command;
+        match command {
+            Command::Timer(minutes) => {
+                self.cycle = None;
+                self.timer = Some(Countdown::new(minutes as f64 * 60.0, now));
+            }
+            Command::Pomodoro(plan) => self.start_phase(plan, timer_page::Phase::Focus, 1, now),
+            Command::Stopwatch => {
+                self.cycle = None;
+                self.timer = Some(Countdown::of(timer_page::Kind::Stopwatch, 0.0, now));
+            }
+            Command::Toggle => { self.toggle_timer(now); }
+            Command::Next => { let _ = self.timer_command("next", now); }
+            Command::Cancel => {
+                self.timer = None;
+                self.cycle = None;
+            }
+            Command::Close => {
+                self.close_activity_panel(now);
+                self.return_to_quick_menu(now);
+            }
+        }
+        self.sync(now);
+    }
+
+    fn timer_page_origin(&self) -> Option<(f64, f64)> {
+        self.timer_menu_rect.map(|r| (r.x, r.y))
+    }
+
+    /// The held ruler follows the pointer, even outside the page.
+    pub fn timer_drag_to(&mut self, px: f64, now: Time) -> bool {
+        let Some((x, _)) = self.timer_page_origin() else { return false };
+        if !self.timer_page.dragging() { return false; }
+        let moved = self.timer_page.drag_to(px - x, now);
+        self.timer_ticks();
+        moved
+    }
+
+    pub fn timer_release(&mut self, px: f64, now: Time) -> bool {
+        let Some((x, _)) = self.timer_page_origin() else { return false };
+        let released = self.timer_page.release(px - x, now);
+        self.timer_ticks();
+        released
+    }
+
+    pub fn scroll_timer(&mut self, px: f64, py: f64, delta: f64, discrete: bool, now: Time) -> bool {
+        if !self.timer_page_open() { return false; }
+        let Some((x, y)) = self.timer_page_origin() else { return false };
+        let session = self.timer_session(now);
+        let taken = self.timer_page.scroll(&session, px - x, py - y, delta, discrete, now);
+        self.timer_ticks();
+        if taken { self.sync(now); }
+        taken
+    }
+
+    pub fn timer_key(&mut self, key: &str, now: Time) -> bool {
+        if !self.timer_page_open() { return false; }
+        let session = self.timer_session(now);
+        if let Some(command) = self.timer_page.key(&session, key, now) {
+            self.run_timer_page(command, now);
+        }
+        self.timer_ticks();
+        self.sync(now);
+        true
     }
 
     /// Start a recording (after 3-2-1) or stop the one running.
@@ -2286,13 +2493,7 @@ impl Island {
     /// A left click on the compact timer pauses or resumes it.
     pub fn toggle_timer(&mut self, now: Time) -> bool {
         let Some(timer) = self.timer.as_mut() else { return false };
-        if timer.running {
-            timer.remaining = timer.remaining(now);
-            timer.running = false;
-        } else if timer.remaining > 0.0 {
-            timer.running = true;
-        }
-        timer.changed_at = now;
+        if timer.running { timer.pause(now); } else { timer.resume(now); }
         self.sync(now);
         true
     }
@@ -2327,23 +2528,22 @@ impl Island {
             return false;
         }
         if let Some(r) = self.timer_menu_rect {
-            if let Some(command) = activity::timer_menu_hit(px - r.x, py - r.y) {
-                if command == "close" {
-                    self.close_activity_panel(now);
-                    self.return_to_quick_menu(now);
-                } else if self.timer_command(command, now).is_ok() && !matches!(command, "toggle" | "cancel") {
-                    self.activity_retiring = self.activity.take();
-                }
-                self.sync(now);
+            let session = self.timer_session(now);
+            if let Some(command) = self.timer_page.press(&session, px - r.x, py - r.y, now) {
+                self.run_timer_page(command, now);
             }
+            self.sync(now);
         }
         true
     }
 
-    pub fn set_timer_hover(&mut self, px: f64, py: f64) -> bool {
-        let menu_hover = self.timer_menu_rect.and_then(|r| activity::timer_menu_hit(px - r.x, py - r.y));
-        let changed = self.timer_menu_hover != menu_hover;
-        self.timer_menu_hover = menu_hover;
+    pub fn set_timer_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let session = self.timer_session(now);
+        let changed = match self.timer_menu_rect.filter(|_| self.timer_page_open()) {
+            Some(r) => self.timer_page.pointer(&session, px - r.x, py - r.y, now),
+            None => self.timer_page.leave(now),
+        };
+        self.timer_ticks();
         let hovered = self.on_timer(px, py);
         if hovered == self.timer_hovered {
             return changed;
@@ -2352,9 +2552,8 @@ impl Island {
         true
     }
 
-    pub fn clear_timer_hover(&mut self) -> bool {
-        let changed = self.timer_hovered || self.timer_menu_hover.is_some();
-        self.timer_menu_hover = None;
+    pub fn clear_timer_hover(&mut self, now: Time) -> bool {
+        let changed = self.timer_page.leave(now) || self.timer_hovered;
         self.timer_hovered = false;
         changed
     }
@@ -2572,7 +2771,7 @@ impl Island {
         let timer_k = self.timer_chip.state(now).x;
         if self.timer.is_some() { self.timer_last = self.timer.clone(); }
         if let Some(timer) = self.timer.as_ref().or(self.timer_last.as_ref()) {
-            self.timer_w = activity::timer_width(cr, renderer, timer.remaining(now));
+            self.timer_w = activity::timer_width(cr, renderer, timer.reading(now));
         }
         let timer_len = timer_k * (self.timer_w + 10.0);
         let tasks_k = self.tasks_chip.state(now).x;
@@ -2659,6 +2858,8 @@ impl Island {
                 self.tasks.pill_size()
             } else if a.event == activity::Event::CalendarOpen {
                 self.calendar.as_ref().map_or(a.event.size(), |c| (calendar::WIDTH, c.height()))
+            } else if a.event == activity::Event::TimerMenu {
+                (timer_page::WIDTH, self.timer_page.height(&self.timer_session(now)))
             } else { a.event.size() }
         }));
         let notice_size = self.notice.as_ref().map(|n| {
@@ -2871,14 +3072,14 @@ impl Island {
                     cr.clip();
                     // crossing over the leaving clock it dims, so the two never tangle
                     let crossing = 1.0 - 0.85 * (std::f64::consts::PI * wing).sin();
-                    activity::draw_timer_ring(cr, ring_at, cy, timer.remaining(now), timer.fraction(now), timer.running,
+                    activity::draw_timer_ring(cr, ring_at, cy, timer.urgent(now), timer.fraction(now), timer.running,
                         line_alpha * timer_k * crossing);
                     cr.restore().unwrap();
                     cr.save().unwrap();
                     cr.rectangle(after_clock, dy, timer_len, line_h);
                     cr.clip();
                     let reading_x = after_clock + 10.0 + 30.0 * (1.0 - wing);
-                    activity::draw_timer_reading(cr, renderer, reading_x, cy, timer.remaining(now), wing,
+                    activity::draw_timer_reading(cr, renderer, reading_x, cy, timer.reading(now), timer.urgent(now), wing,
                         line_alpha * timer_k);
                     cr.restore().unwrap();
                 }
@@ -3090,13 +3291,16 @@ impl Island {
                 let enter = 8.0 * (1.0 - sheet_k);
                 let content_alpha = pill_alpha * sheet_k;
                 if activity.event == activity::Event::TimerMenu {
-                    let mx = cx - 195.0;
-                    if content_alpha > 0.9 {
-                        self.timer_menu_rect = Some(Rect { x: mx, y: dy + climb + enter, w: 390.0, h: 184.0 });
+                    if self.timer_page.opened != activity.since {
+                        self.timer_page.open(activity.since);
                     }
-                    activity::draw_timer_menu(cr, renderer, mx, dy + climb + enter,
-                        self.timer.as_ref().map(|t| (t.remaining(now), t.running)), &std::array::from_fn(|i| self.timer_button_hover[i].value(now).clamp(0.0, 1.0)),
-                        &std::array::from_fn(|i| self.timer_button_enabled[i].value(now).clamp(0.0, 1.0)), content_alpha, activity.since, now);
+                    let session = self.timer_session(now);
+                    let mx = cx - timer_page::WIDTH / 2.0;
+                    if content_alpha > 0.9 {
+                        let h = self.timer_page.height(&session);
+                        self.timer_menu_rect = Some(Rect { x: mx, y: dy + climb + enter, w: timer_page::WIDTH, h });
+                    }
+                    self.timer_page.draw(cr, renderer, mx, dy + climb + enter, &session, content_alpha, now);
                 }
                 if activity.event == activity::Event::CalendarOpen {
                     let (w, x) = (calendar::WIDTH, cx - calendar::WIDTH / 2.0);
@@ -3504,7 +3708,7 @@ impl Island {
         quick::Status {
             unread: self.center.unread(),
             dnd: self.dnd_glow.value(now),
-            timer: self.timer.as_ref().map(|t| (t.remaining(now), t.running)),
+            timer: self.timer.as_ref().map(|t| (t.reading(now), t.running)),
             recording: self.recorder.then_some(self.recording.is_some()),
             night: self.night_glow.value(now),
         }
@@ -4468,14 +4672,19 @@ pub enum Font {
     Label,
     /// fine print, Regular 12
     Footnote,
+    /// the timer page's big reading, Regular 50, tabular digits
+    Clock,
+    /// the timer ruler's chosen time, Regular 28, tabular digits
+    ClockSmall,
 }
 
 const FONT_MEDIUM: &str = "SF Pro Text Medium";
 
 impl Font {
-    const ALL: [Font; 11] = [
+    const ALL: [Font; 13] = [
         Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query,
         Font::Title, Font::Headline, Font::Body, Font::Subhead, Font::Label, Font::Footnote,
+        Font::Clock, Font::ClockSmall,
     ];
 
     fn face(self) -> (&'static str, f64) {
@@ -4491,6 +4700,8 @@ impl Font {
             Font::Subhead => (FONT_REGULAR, 13.0),
             Font::Label => (FONT_MEDIUM, 14.0),
             Font::Footnote => (FONT_REGULAR, 12.0),
+            Font::Clock => (FONT_REGULAR, 50.0),
+            Font::ClockSmall => (FONT_REGULAR, 28.0),
         }
     }
 }
@@ -4659,6 +4870,12 @@ impl Renderer {
         }
         let layout = pango::Layout::new(&self.ctx);
         layout.set_font_description(Some(&self.fonts[font as usize]));
+        if matches!(font, Font::Clock | Font::ClockSmall) {
+            // digits of one width, so a running clock never shifts
+            let attrs = pango::AttrList::new();
+            attrs.insert(pango::AttrFontFeatures::new("tnum"));
+            layout.set_attributes(Some(&attrs));
+        }
         layout.set_text(text);
         cache.insert(key, layout.clone());
         layout
@@ -4936,6 +5153,19 @@ mod tests {
         let mut island = gallery_island();
         island.timer_command("menu", 10.0).unwrap();
         gallery_shot("03-timer-menu", &mut island, 10.0);
+        island.timer_page.mode = timer_page::Mode::Pomodoro;
+        gallery_shot("03b-timer-pomodoro", &mut island, 12.0);
+        island.timer_page.mode = timer_page::Mode::Stopwatch;
+        gallery_shot("03c-timer-stopwatch", &mut island, 14.0);
+        let mut island = gallery_island();
+        island.timer_page.pomodoro.focus = 1;
+        island.timer_command("pomodoro", 0.0).unwrap();
+        island.timer_command("menu", 0.0).unwrap();
+        gallery_shot("03d-timer-pomodoro-next", &mut island, 61.0);
+        let mut island = gallery_island();
+        island.timer_page.pomodoro.focus = 1;
+        island.timer_command("pomodoro", 0.0).unwrap();
+        gallery_shot_after("03e-timer-pomodoro-done", &mut island, 60.5, 1.0);
 
         let mut island = gallery_island();
         island.timer_command("25m", 10.0).unwrap();
@@ -5486,7 +5716,8 @@ mod tests {
         island.live_activity(activity::Event::TimerMenu, 10.0);
         island.draw(&cr, &renderer, 490.0, 10.8);
         let rect = island.timer_menu_rect.expect("timer controls should be interactive");
-        assert!(island.click_timer_menu(rect.x + 352.0, rect.y + 34.0, 10.9));
+        let (x, y) = island.timer_page.centre(timer_page::Part::Close);
+        assert!(island.click_timer_menu(rect.x + x, rect.y + y, 10.9));
         assert!(island.quick_menu_open());
         assert!(island.quick_returned_at.is_some());
         assert!(island.close_activity_panel(11.2));
@@ -5639,10 +5870,10 @@ mod tests {
         assert!(island.is_hidden());
         assert_eq!(island.hide.target(), 1.0);
 
-        island.live_activity(activity::Event::TimerDone, 20.0);
+        island.live_activity(activity::Event::timer_done(), 20.0);
         assert!(island.activity.is_some());
         assert_eq!(island.hide.target(), 0.0);
-        island.advance(20.0 + activity::Event::TimerDone.hold() + 0.01);
+        island.advance(20.0 + activity::Event::timer_done().hold() + 0.01);
         assert!(island.activity.is_none());
         assert_eq!(island.hide.target(), 1.0);
 
@@ -5710,7 +5941,7 @@ mod tests {
         island.auth_started(10.1);
         island.advance(11.1);
         assert!(island.activity.is_none());
-        assert_eq!(island.activity_queued, Some(activity::Event::TimerDone));
+        assert_eq!(island.activity_queued, Some(activity::Event::timer_done()));
     }
 
     #[test]
@@ -5722,17 +5953,21 @@ mod tests {
         island.timer_command("menu", 10.0).unwrap();
         for i in 0..60 { island.draw(&cr, &renderer, 490.0, 10.0 + i as f64 / 60.0); }
         let rect = island.timer_menu_rect.unwrap();
-        assert!(island.click_timer_menu(rect.x + 235.0, rect.y + 88.0, 11.0));
-        assert_eq!(island.timer_command("status", 11.0).unwrap(), "1500 running");
-        assert!(!island.pill_open());
-        island.draw(&cr, &renderer, 490.0, 11.5);
+        let (x, y) = island.timer_page.centre(timer_page::Part::Start);
+        assert!(island.click_timer_menu(rect.x + x, rect.y + y, 11.0));
+        assert_eq!(island.timer_command("status", 11.0).unwrap(), "900 running");
+        // the page stays, now showing the running timer
+        assert!(matches!(island.timer_session(11.0), timer_page::Session::Active { .. }));
+        assert!(island.close_activity_panel(11.1));
+        for i in 0..60 { island.draw(&cr, &renderer, 490.0, 11.1 + i as f64 / 60.0); }
         let rect = island.timer_rect.unwrap();
-        assert!(island.click_timer_at(rect.x + 5.0, rect.y + 16.0, 11.5));
+        assert!(island.click_timer_at(rect.x + 5.0, rect.y + 16.0, 12.5));
         assert!(!island.timer.as_ref().unwrap().running);
-        island.timer_command("menu", 12.0).unwrap();
-        island.draw(&cr, &renderer, 490.0, 13.0);
+        island.timer_command("menu", 13.0).unwrap();
+        for i in 0..60 { island.draw(&cr, &renderer, 490.0, 13.0 + i as f64 / 60.0); }
         let rect = island.timer_menu_rect.unwrap();
-        island.click_timer_menu(rect.x + 245.0, rect.y + 138.0, 13.0);
+        let (x, y) = island.timer_page.centre(timer_page::Part::Cancel);
+        island.click_timer_menu(rect.x + x, rect.y + y, 14.0);
         assert!(island.timer.is_none());
     }
 
@@ -5804,21 +6039,65 @@ mod tests {
         assert_eq!(island.timer_command("status", 101.0).unwrap(), "599 running");
     }
 
+    /// Draw the island for `frames` frames from `from` (rects and the page
+    /// are laid out by drawing).
+    fn settle(island: &mut Island, from: Time, frames: usize) {
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for n in 0..frames {
+            let now = from + n as f64 / 60.0;
+            island.advance(now);
+            island.draw(&cr, &renderer, 490.0, now);
+        }
+    }
+
     #[test]
-    fn timer_hover_eases_in_and_out_without_restarting_the_panel() {
+    fn the_timer_page_starts_from_its_ruler_and_ticks_as_the_ruler_turns() {
         let mut island = Island::new(Config::default());
         island.timer_command("menu", 10.0).unwrap();
-        island.timer_menu_rect = Some(Rect { x: 0.0, y: 0.0, w: 390.0, h: 184.0 });
-        island.set_timer_hover(50.0, 80.0);
-        island.sync(11.0);
-        assert_eq!(island.timer_button_hover[0].value(11.0), 0.0);
-        let value = island.timer_button_hover[0].value(11.05);
-        assert!(value > 0.0 && value < 1.0);
-        island.clear_timer_hover();
-        island.sync(11.05);
-        assert!((island.timer_button_hover[0].value(11.05) - value).abs() < 1e-9);
-        assert!(island.timer_button_hover[0].value(12.0) < 0.001);
-        assert_eq!(island.activity.as_ref().unwrap().since, 10.0);
+        settle(&mut island, 10.0, 60);
+        assert!(island.timer_page_open());
+        let r = island.timer_menu_rect.expect("the page");
+        // two fingers turn the ruler a few minutes; each change ticks once
+        let (px, py) = (r.x + 120.0, r.y + 100.0);
+        assert!(island.scroll_timer(px, py, 3.0 * timer_page::SPACING, false, 11.0));
+        assert_eq!(island.take_sounds(), vec![crate::sound::Sound::Tick]);
+        assert!(island.timer_key("Return", 11.1));
+        assert_eq!(island.timer_command("status", 11.1).unwrap(), "1080 running");
+        // the page now offers Cancel and Pause; Return pauses
+        assert!(matches!(island.timer_session(11.2), timer_page::Session::Active { running: true, .. }));
+        island.timer_key("Return", 11.2);
+        assert!(!island.timer.as_ref().unwrap().running);
+        island.config.timer_sound = false;
+        island.timer_key("Escape", 11.3);
+        island.timer_command("cancel", 11.3).unwrap();
+        island.scroll_timer(px, py, 40.0, true, 11.4);
+        assert!(island.take_sounds().is_empty(), "sounds can be switched off");
+    }
+
+    #[test]
+    fn a_pomodoro_phase_ends_with_the_alarm_and_waits_for_the_next() {
+        let mut island = Island::new(Config::default());
+        island.timer_page.pomodoro = timer_page::Pomodoro { focus: 1, short: 1, long: 2, interval: 2, sessions: 2 };
+        island.timer_command("pomodoro", 0.0).unwrap();
+        island.advance(61.0);
+        assert!(island.timer.is_none());
+        assert_eq!(island.take_sounds(), vec![crate::sound::Sound::Alarm]);
+        assert!(matches!(&island.activity.as_ref().unwrap().event,
+            activity::Event::TimerDone { title, .. } if title == "Фокус окончен"));
+        assert!(matches!(island.timer_session(61.0), timer_page::Session::Next { next: timer_page::Phase::ShortBreak, .. }));
+        island.timer_command("next", 62.0).unwrap();
+        assert!(island.timer_command("status", 62.0).unwrap().ends_with("pomodoro перерыв 1/2"));
+        island.advance(123.0);
+        island.timer_command("next", 124.0).unwrap();
+        island.advance(185.0);
+        // the last focus ends the cycle
+        assert_eq!(island.timer_session(185.0), timer_page::Session::Finished { total: 2 });
+        // the stopwatch counts up and never runs out
+        island.timer_command("stopwatch", 200.0).unwrap();
+        island.advance(500.0);
+        assert_eq!(island.timer_command("status", 500.0).unwrap(), "300 running stopwatch");
     }
 }
 
