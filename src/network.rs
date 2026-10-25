@@ -47,6 +47,8 @@ pub enum Action {
     Power(bool),
     Connect(Device, Option<String>),
     Disconnect(Device),
+    /// remove a saved network's profiles, or unpair a device
+    Forget(Device),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -221,7 +223,65 @@ fn wifi_snapshot(rescan: bool) -> Result<Snapshot, String> {
         "--rescan",
         if rescan { "yes" } else { "no" },
     ])?;
-    Ok(Snapshot { powered, devices: parse_wifi(&output, &profiles) })
+    let mut devices = parse_wifi(&output, &profiles);
+    devices.extend(saved_out_of_range(&devices, &profiles));
+    Ok(Snapshot { powered, devices })
+}
+
+/// Saved networks the scan did not find: they stay listed among the saved
+/// ones (and can be forgotten) with no interface and no signal.
+fn saved_out_of_range(found: &[Device], profiles: &HashMap<String, String>) -> Vec<Device> {
+    let mut saved: Vec<Device> = profiles
+        .iter()
+        .filter(|(ssid, _)| !found.iter().any(|d| &d.name == *ssid))
+        .map(|(ssid, uuid)| Device {
+            id: format!("saved:{ssid}"),
+            name: ssid.clone(),
+            interface: String::new(),
+            profile: Some(uuid.clone()),
+            connected: false,
+            paired: true,
+            security: String::new(),
+            signal: 0,
+            battery: None,
+            icon: "wifi".into(),
+        })
+        .collect();
+    saved.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    saved
+}
+
+/// Delete every saved profile of the network `ssid` (NetworkManager may
+/// hold several for one name).
+fn wifi_forget(ssid: &str) -> Result<(), String> {
+    let conn = system_bus()?;
+    let settings = Proxy::new(
+        &conn,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager/Settings",
+        "org.freedesktop.NetworkManager.Settings",
+    )
+    .map_err(|e| e.to_string())?;
+    let paths: Vec<OwnedObjectPath> = settings.call("ListConnections", &()).map_err(|e| e.to_string())?;
+    let mut removed = 0;
+    for path in paths {
+        let proxy = Proxy::new(
+            &conn,
+            "org.freedesktop.NetworkManager",
+            path,
+            "org.freedesktop.NetworkManager.Settings.Connection",
+        )
+        .map_err(|e| e.to_string())?;
+        let Ok(data): Result<Settings, _> = proxy.call("GetSettings", &()) else { continue };
+        let Some(value) = data.get("802-11-wireless").and_then(|w| w.get("ssid")).and_then(|v| v.try_clone().ok()) else {
+            continue;
+        };
+        if Vec::<u8>::try_from(value).is_ok_and(|bytes| bytes == ssid.as_bytes()) {
+            proxy.call::<_, _, ()>("Delete", &()).map_err(|e| e.to_string())?;
+            removed += 1;
+        }
+    }
+    if removed == 0 { Err(format!("Сеть «{ssid}» не сохранена")) } else { Ok(()) }
 }
 
 fn parse_wifi(output: &str, profiles: &HashMap<String, String>) -> Vec<Device> {
@@ -268,6 +328,7 @@ fn wifi_action(action: Action, job: &Job) -> Result<Snapshot, String> {
         Action::Disconnect(device) => {
             nmcli(&["device", "disconnect", &device.interface])?;
         }
+        Action::Forget(device) => wifi_forget(&device.name)?,
         Action::Connect(device, password) => {
             if let Some(uuid) = device.profile.as_ref().filter(|_| password.is_none()) {
                 nmcli(&["connection", "up", "uuid", uuid, "ifname", &device.interface])?;
@@ -519,6 +580,19 @@ fn bluetooth_action(action: Action, job: &Job) -> Result<Snapshot, String> {
         Action::Connect(device, _) => {
             connect_bluetooth(&device, job)?;
         }
+        Action::Forget(device) => {
+            // the adapter that knows the device removes it (and its pairing
+            // keys); a connected device is disconnected on the way
+            let adapter = Proxy::new(&conn, "org.bluez", device.id.as_str(), "org.bluez.Device1")
+                .map_err(|e| e.to_string())?
+                .get_property::<OwnedObjectPath>("Adapter")
+                .map_err(|e| e.to_string())?;
+            let path = ObjectPath::try_from(device.id.as_str()).map_err(|e| e.to_string())?;
+            Proxy::new(&conn, "org.bluez", adapter, "org.bluez.Adapter1")
+                .map_err(|e| e.to_string())?
+                .call::<_, _, ()>("RemoveDevice", &(path,))
+                .map_err(|e| e.to_string())?;
+        }
     }
     bluetooth_snapshot(&conn)
 }
@@ -748,5 +822,10 @@ mod tests {
         assert_eq!(rows[0].signal, 30);
         assert_eq!(rows[0].profile.as_deref(), Some("uuid"));
         assert!(rows.iter().find(|d| d.name == "Guest").unwrap().security.is_empty());
+        // a saved network out of range is still listed, to be forgotten
+        let profiles = HashMap::from([("Cafe: North".into(), "uuid".into()), ("Home".into(), "home".into())]);
+        let away = saved_out_of_range(&rows, &profiles);
+        assert_eq!(away.len(), 1);
+        assert!(away[0].paired && away[0].interface.is_empty() && away[0].profile.as_deref() == Some("home"));
     }
 }

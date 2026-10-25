@@ -212,14 +212,20 @@ Saved profiles connect directly, and a failed attempt can retry with a new
 password. WPA/WPA2/WPA3 personal and open networks are supported; enterprise
 networks requiring an identity or certificate need an existing NetworkManager
 profile. Secrets go directly to NetworkManager over D-Bus, never in argv or
-temporary files.
+temporary files. The Saved tab also lists saved networks that are out of
+range. Under the pointer a saved network shows a red bin beside its action:
+the first press arms it (it fills red, shakes its head and the status line
+asks again), a second press within four seconds deletes every
+NetworkManager profile of that network, password included.
 
 Bluetooth has My devices / Discover tabs. Click a paired device to connect
 or disconnect; discovery finds new devices and offers pairing. PIN entry,
 passkey display and confirmation are handled in the island by an app-scoped
 [BlueZ agent](https://bluez.readthedocs.io/en/latest/agent-api/). Discovery runs
 for 30 seconds and can be stopped; closing the panel releases its scan session
-and cancels pending pairing. Battery levels appear when supported.
+and cancels pending pairing. Battery levels appear when supported. A paired
+device's red bin unpairs it the same way (BlueZ `RemoveDevice`, which also
+drops its keys and disconnects it).
 Friendly aliases and remote names are preferred over address placeholders;
 named devices sort first. Names update during discovery. Devices that do not
 advertise a name are explicitly labelled as unnamed with their address below,

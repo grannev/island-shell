@@ -5055,8 +5055,8 @@ mod tests {
         if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
         use crate::network::{Device, Kind};
         let device = |id: &str, name: &str, paired: bool, security: &str, signal: u8, icon: &str| Device {
-            id: id.into(), name: name.into(), interface: "wlan0".into(), profile: None, connected: false,
-            paired, security: security.into(), signal, battery: None, icon: icon.into(),
+            id: id.into(), name: name.into(), interface: "wlan0".into(), profile: paired.then(|| format!("uuid-{id}")),
+            connected: false, paired, security: security.into(), signal, battery: None, icon: icon.into(),
         };
 
         let mut island = gallery_island();
@@ -5250,6 +5250,16 @@ mod tests {
         gallery_shot("06-wifi", &mut island, 10.0);
         if let Some(panel) = island.network_panel.as_mut() { panel.pointer(200.0, 120.0 + 52.0 + 20.0, 12.0); }
         gallery_shot("06b-wifi-hover", &mut island, 12.0);
+        // a saved network: its bin beside Connect, then armed by a first press
+        if let Some(panel) = island.network_panel.as_mut() { panel.pointer(200.0, 120.0 + 52.0 * 1.5 + 0.0, 14.0); }
+        gallery_shot("06c-wifi-forget", &mut island, 14.0);
+        if let Some(panel) = island.network_panel.as_mut() {
+            if let Some((x, y)) = panel.forget_centre("studio", 16.0) {
+                panel.pointer(x, y, 16.0);
+                panel.click(x, y, 16.0);
+            }
+        }
+        gallery_shot_after("06d-wifi-forget-armed", &mut island, 16.0, 1.0);
 
         let mut island = gallery_island();
         island.network_panel = Some(crate::connections::Panel::preview(Kind::Wifi, wifi(), Some(1), 10.0));

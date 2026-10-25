@@ -153,8 +153,11 @@ ticks cannot be reproduced on it. The main Waybar has no timer, Wi-Fi or Bluetoo
 ⋯ drawer contains only disk, CPU and memory. `src/connections.rs` owns native connection sheets and their
 motion; `src/network.rs` owns asynchronous NetworkManager and BlueZ operations.
 Wi-Fi supports scanning, saved/open/personal secured connections, password
-entry and disconnect. Bluetooth has paired/discovery tabs, connection,
-disconnect and pairing with a scoped BlueZ agent for PIN/code confirmation.
+entry, disconnect and forgetting saved networks (out-of-range ones too).
+Bluetooth has paired/discovery tabs, connection, disconnect, unpairing and
+pairing with a scoped BlueZ agent for PIN/code confirmation. Forgetting takes
+a confirming second press on the row's red bin. Connection panels in tests
+and the gallery are `offline` and never reach NetworkManager or BlueZ.
 Search is cancellable; replies carry session/request IDs and cannot reopen
 a dismissed sheet. Escape or an outside click closes modal sheets and releases
 keyboard focus. A temporary transparent layer surface catches outside clicks,

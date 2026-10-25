@@ -28,6 +28,10 @@ const PROMPT_BUTTONS_Y: f64 = PROMPT_FIELD_Y + 40.0 + 22.0;
 const PROMPT_H: f64 = PROMPT_BUTTONS_Y + menu_style::BUTTON_H + 18.0 - PROMPT_Y;
 const TOGGLE_X: f64 = WIDTH - RAIL - menu_style::CLOSE_SIZE - 12.0 - 46.0;
 const INNER: f64 = WIDTH - 2.0 * RAIL;
+/// the round "forget" button beside a row's action, and how long its first
+/// press waits for the confirming second one
+const FORGET: f64 = 26.0;
+const FORGET_ARM: f64 = 4.0;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Hit {
@@ -80,6 +84,15 @@ pub struct Panel {
     refreshing: bool,
     next_refresh: Time,
     frame_height: f64,
+    /// the pointer, sheet-relative (a row's forget button lights under it)
+    pointer: (f64, f64),
+    /// where each row's forget button was last drawn: its x span
+    forget_spans: std::cell::RefCell<HashMap<String, (f64, f64)>>,
+    /// a forget button pressed once: the row and when
+    armed: Option<(String, Time)>,
+    /// tests and the gallery: actions only set the status, nothing reaches
+    /// NetworkManager or BlueZ
+    offline: bool,
 }
 
 impl Drop for Panel {
@@ -100,6 +113,7 @@ impl Panel {
     pub(crate) fn preview(kind: Kind, devices: Vec<Device>, prompt: Option<usize>, now: Time) -> Self {
         let (tx, _) = smithay_client_toolkit::reexports::calloop::channel::channel();
         let mut panel = Self::idle(kind, 1, tx, now);
+        panel.offline = true;
         panel.set_snapshot(Snapshot { powered: true, devices }, now);
         panel.power.set(1.0, now);
         if let Some(index) = prompt {
@@ -147,6 +161,10 @@ impl Panel {
             refreshing: false,
             next_refresh: now + 4.0,
             frame_height: 378.0,
+            pointer: (-1.0, -1.0),
+            forget_spans: Default::default(),
+            armed: None,
+            offline: false,
         }
     }
 
@@ -165,7 +183,8 @@ impl Panel {
             .devices
             .iter()
             .filter(|d| match self.kind {
-                Kind::Wifi => self.tab == 0 || d.paired,
+                // a saved network out of range is listed only among the saved
+                Kind::Wifi => (self.tab == 0 && !d.interface.is_empty()) || (self.tab == 1 && d.paired),
                 Kind::Bluetooth => {
                     if self.tab == 0 {
                         d.paired
@@ -233,8 +252,12 @@ impl Panel {
                 }
             }
             Action::Disconnect(d) => format!("Отключаем {}…", d.name),
+            Action::Forget(d) => format!("Забываем {}…", d.name),
         };
         self.hover_at(None, now);
+        if self.offline {
+            return;
+        }
         network::spawn(
             self.kind,
             action,
@@ -310,14 +333,25 @@ impl Panel {
                 || self.born.values().any(|t| now - t < 0.3)
                 || self.tab_slide.is_moving(now)
                 || self.scroll.is_moving(now)
-                || self.power.is_moving(now))
+                || self.power.is_moving(now)
+                || self.armed.as_ref().is_some_and(|(_, t)| now - t < 0.6))
     }
 
     pub fn deadline(&self) -> Option<Time> {
-        (!self.closed && !self.busy && !self.refreshing && self.prompt.is_none()).then_some(self.next_refresh)
+        let refresh = (!self.closed && !self.busy && !self.refreshing && self.prompt.is_none()).then_some(self.next_refresh);
+        let disarm = self.armed.as_ref().map(|(_, t)| t + FORGET_ARM);
+        match (refresh, disarm) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn advance(&mut self, now: Time) -> bool {
+        // an unconfirmed forget lapses
+        if self.armed.as_ref().is_some_and(|(_, t)| now >= t + FORGET_ARM) {
+            self.armed = None;
+            return true;
+        }
         if !self.deadline().is_some_and(|deadline| now >= deadline) {
             return false;
         }
@@ -397,7 +431,32 @@ impl Panel {
     }
 
     pub fn pointer(&mut self, x: f64, y: f64, now: Time) -> bool {
-        self.hover_at(self.hit(x, y, now), now)
+        let over_forget = |p: &Self| p.hovered.as_ref().is_some_and(|h| matches!(h, Hit::Row(id) if p.on_forget(id)));
+        let was = over_forget(self);
+        self.pointer = (x, y);
+        let changed = self.hover_at(self.hit(x, y, now), now);
+        changed || was != over_forget(self)
+    }
+
+    /// The centre of row `id`'s forget button as last drawn (gallery).
+    #[cfg(test)]
+    pub(crate) fn forget_centre(&self, id: &str, now: Time) -> Option<(f64, f64)> {
+        let (x0, x1) = *self.forget_spans.borrow().get(id)?;
+        let slot = self.slots.get(id).map_or(0.0, |s| s.value(now)) - self.scroll.value(now);
+        Some(((x0 + x1) / 2.0, LIST_Y + slot * ROW_H + ROW_H / 2.0))
+    }
+
+    /// Can this row be forgotten: a saved network, a paired device?
+    fn forgettable(&self, d: &Device) -> bool {
+        match self.kind {
+            Kind::Wifi => d.profile.is_some(),
+            Kind::Bluetooth => d.paired,
+        }
+    }
+
+    /// Is the pointer on row `id`'s forget button?
+    fn on_forget(&self, id: &str) -> bool {
+        self.forget_spans.borrow().get(id).is_some_and(|(x0, x1)| self.pointer.0 >= x0 - 3.0 && self.pointer.0 <= x1 + 3.0)
     }
     pub fn leave(&mut self, now: Time) -> bool {
         self.hover_at(None, now)
@@ -448,7 +507,22 @@ impl Panel {
             }
             Hit::Row(id) => {
                 if let Some(device) = self.snapshot.devices.iter().find(|d| d.id == id).cloned() {
-                    if device.connected {
+                    self.pointer = (x, y);
+                    if self.forgettable(&device) && self.on_forget(&id) {
+                        // forgetting loses a password or a pairing: the
+                        // first press arms, a second within a few seconds confirms
+                        if self.armed.as_ref().is_some_and(|(armed, t)| *armed == id && now - t < FORGET_ARM) {
+                            self.armed = None;
+                            self.start(Action::Forget(device), now);
+                        } else {
+                            self.armed = Some((id, now));
+                        }
+                        return false;
+                    }
+                    self.armed = None;
+                    if self.kind == Kind::Wifi && device.interface.is_empty() {
+                        // saved, but out of range: nothing to connect to
+                    } else if device.connected {
                         self.start(Action::Disconnect(device), now);
                     } else if self.kind == Kind::Wifi
                         && !device.security.is_empty()
@@ -655,8 +729,15 @@ impl Panel {
             }
             // a status line only when there is something to say
             let status_y = LIST_Y + list_h + 5.0;
+            let armed = self.armed.as_ref().and_then(|(id, _)| self.snapshot.devices.iter().find(|d| &d.id == id));
             if let Some(error) = &self.error {
                 menu_style::text(cr, renderer, error, RAIL + 2.0, status_y, INNER - 4.0, Font::Footnote, menu_style::RED, 1.0);
+            } else if let Some(d) = armed {
+                let ask = match self.kind {
+                    Kind::Wifi => format!("Нажмите ещё раз, чтобы забыть сеть «{}» и её пароль", d.name),
+                    Kind::Bluetooth => format!("Нажмите ещё раз, чтобы разорвать пару с «{}»", d.name),
+                };
+                menu_style::text(cr, renderer, &ask, RAIL + 2.0, status_y, INNER - 4.0, Font::Footnote, menu_style::RED, 1.0);
             } else if self.busy && !self.status.is_empty() {
                 menu_style::label(cr, renderer, &self.status, RAIL + 2.0, status_y, INNER - 4.0, Font::Footnote, menu_style::SECONDARY);
             }
@@ -704,8 +785,12 @@ impl Panel {
         } else {
             device_symbol(cr, &d.icon, well_x, mid, alpha);
         }
+        let away = self.kind == Kind::Wifi && d.interface.is_empty();
+        let forgettable = self.forgettable(d);
         let detail = if self.kind == Kind::Wifi {
-            if d.connected {
+            if away {
+                "Сохранённая · не в зоне действия".to_string()
+            } else if d.connected {
                 "Подключено".to_string()
             } else if d.paired {
                 "Сохранённая сеть".to_string()
@@ -730,8 +815,9 @@ impl Panel {
         } else {
             "Подключить"
         };
-        let action_w = renderer.layout(cr, action, Font::Label).pixel_extents().1.width() as f64 + 24.0;
-        let trailing_w = action_w.max(64.0);
+        let action_w = if away { 0.0 } else { renderer.layout(cr, action, Font::Label).pixel_extents().1.width() as f64 + 24.0 };
+        let forget_w = if forgettable { FORGET + 8.0 } else { 0.0 };
+        let trailing_w = (action_w + forget_w).max(64.0);
         let text_w = WIDTH - RAIL - 14.0 - trailing_w - 8.0 - text_x;
         let title_h = menu_style::line_height(cr, renderer, Font::Body);
         let sub_h = menu_style::line_height(cr, renderer, Font::Subhead);
@@ -743,7 +829,7 @@ impl Panel {
         // at rest the row shows its state; under the pointer, what a click does
         let right = WIDTH - RAIL - 14.0;
         let rest = alpha * (1.0 - hover);
-        if rest > 0.01 {
+        if rest > 0.01 && !away {
             if self.kind == Kind::Wifi {
                 strength(cr, right - 10.0, mid, d.signal, rest);
                 if !d.security.is_empty() {
@@ -755,10 +841,20 @@ impl Panel {
                 menu_style::label(cr, renderer, &s, right - w, mid - sub_h / 2.0, w + 2.0, Font::Subhead, menu_style::SECONDARY * rest);
             }
         }
-        if hover > 0.01 {
+        if hover > 0.01 && !away {
             let h = 26.0;
             let kind = if d.connected { ButtonKind::Neutral } else { ButtonKind::Primary };
             menu_style::button(cr, renderer, action, (right - action_w, mid - h / 2.0, action_w, h), kind, 0.0, alpha * hover);
+        }
+        let armed = self.armed.as_ref().filter(|(id, _)| *id == d.id).map(|(_, t)| now - t);
+        if forgettable {
+            let x1 = right - action_w - if away { 0.0 } else { 8.0 };
+            self.forget_spans.borrow_mut().insert(d.id.clone(), (x1 - FORGET, x1));
+            let shown = hover.max(if armed.is_some() { 1.0 } else { 0.0 });
+            if shown > 0.01 {
+                let lit = if self.on_forget(&d.id) { hover } else { 0.0 };
+                forget_button(cr, x1 - FORGET / 2.0, mid, lit, armed, alpha * shown);
+            }
         }
     }
 
@@ -833,6 +929,42 @@ impl Panel {
         }
         cr.restore().unwrap();
     }
+}
+
+/// The round forget button: a red-tinted well with a bin; armed (waiting
+/// for the confirming press) it fills red and shakes its head.
+fn forget_button(cr: &Context, cx: f64, cy: f64, lit: f64, armed: Option<f64>, alpha: f64) {
+    let red = menu_style::RED;
+    let angle = armed.map_or(0.0, menu_style::wiggle_angle);
+    menu_style::transformed(cr, cx, cy, 1.0 + 0.06 * lit, angle, || {
+        cr.new_path();
+        cr.arc(cx, cy, FORGET / 2.0, 0.0, std::f64::consts::TAU);
+        let fill = if armed.is_some() { 0.9 } else { 0.18 + 0.1 * lit };
+        cr.set_source_rgba(red.0, red.1, red.2, fill * alpha);
+        let _ = cr.fill();
+        let ink = if armed.is_some() { (1.0, 1.0, 1.0) } else { (1.0, 0.55, 0.52) };
+        cr.set_source_rgba(ink.0, ink.1, ink.2, alpha);
+        cr.set_line_width(1.6);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        // the lid and its handle, then the can with two ribs
+        cr.move_to(cx - 6.0, cy - 4.5);
+        cr.line_to(cx + 6.0, cy - 4.5);
+        cr.move_to(cx - 2.0, cy - 4.5);
+        cr.line_to(cx - 1.5, cy - 6.5);
+        cr.line_to(cx + 1.5, cy - 6.5);
+        cr.line_to(cx + 2.0, cy - 4.5);
+        cr.move_to(cx - 4.5, cy - 3.0);
+        cr.line_to(cx - 3.8, cy + 6.0);
+        cr.line_to(cx + 3.8, cy + 6.0);
+        cr.line_to(cx + 4.5, cy - 3.0);
+        cr.move_to(cx - 1.4, cy - 1.0);
+        cr.line_to(cx - 1.2, cy + 3.8);
+        cr.move_to(cx + 1.4, cy - 1.0);
+        cr.line_to(cx + 1.2, cy + 3.8);
+        let _ = cr.stroke();
+    });
+    cr.new_path();
 }
 
 fn contains(x: f64, y: f64, bx: f64, by: f64, w: f64, h: f64) -> bool {
@@ -957,6 +1089,7 @@ mod tests {
     fn panel(kind: Kind) -> Panel {
         let (tx, _) = smithay_client_toolkit::reexports::calloop::channel::channel();
         let mut p = Panel::idle(kind, 42, tx, 10.0);
+        p.offline = true;
         p.set_snapshot(
             Snapshot {
                 powered: true,
@@ -1018,6 +1151,42 @@ mod tests {
         }));
         p.close();
         assert_eq!(rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn saved_networks_and_paired_devices_are_forgotten_on_a_confirmed_second_press() {
+        for kind in [Kind::Wifi, Kind::Bluetooth] {
+            let mut p = panel(kind);
+            p.snapshot.devices[0].profile = Some("uuid-home".into());
+            p.tab = if kind == Kind::Wifi { 1 } else { 0 };
+            let row = |p: &Panel| (LIST_Y + ROW_H / 2.0, p.rows()[0].id.clone());
+            let (y, id) = row(&p);
+            // the button is laid out by drawing; stand in for it here
+            p.forget_spans.borrow_mut().insert(id.clone(), (300.0, 300.0 + FORGET));
+            let x = 300.0 + FORGET / 2.0;
+            p.pointer(x, y, 11.0);
+            assert!(!p.click(x, y, 11.0));
+            assert_eq!(p.armed.as_ref().map(|(a, _)| a.as_str()), Some(id.as_str()), "{kind:?}: the first press arms");
+            assert!(!p.busy);
+            // the confirmation lapses on its own
+            assert!(p.advance(11.0 + FORGET_ARM + 0.1));
+            assert!(p.armed.is_none());
+            p.click(x, y, 16.0);
+            p.click(x, y, 17.0);
+            assert!(p.busy && p.status.starts_with("Забываем"), "{kind:?}: the second press forgets");
+            // a row that is not saved has no forget button
+            let mut q = panel(kind);
+            q.tab = if kind == Kind::Wifi { 0 } else { 1 };
+            let fresh = q.rows().into_iter().find(|d| !d.paired).unwrap();
+            assert!(!q.forgettable(&fresh));
+        }
+        // a saved network out of range is listed among the saved only
+        let mut p = panel(Kind::Wifi);
+        p.snapshot.devices.push(Device { id: "saved:Dacha".into(), interface: String::new(), signal: 0,
+            profile: Some("d".into()), ..device("x", "Dacha", true) });
+        assert!(!p.rows().iter().any(|d| d.name == "Dacha"));
+        p.tab = 1;
+        assert!(p.rows().iter().any(|d| d.name == "Dacha"));
     }
 
     #[test]
