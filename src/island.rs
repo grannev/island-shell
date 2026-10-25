@@ -2265,8 +2265,16 @@ impl Island {
 
     /// Start a recording (after 3-2-1) or stop the one running.
     pub fn toggle_recording(&mut self, now: Time) -> Result<&'static str, &'static str> {
+        if self.recording.is_none() && !self.recorder {
+            // installed since the island started? (a few stats along PATH)
+            self.recorder = crate::recorder::available();
+        }
         match self.recording {
-            None if !self.recorder => Err("wf-recorder is not installed (sudo sh scripts/03-install-screen-recorder.sh)"),
+            None if !self.recorder => {
+                // say so instead of doing nothing
+                self.show_activity(activity::Event::RecorderMissing, now);
+                Err("wf-recorder is not installed (sudo sh scripts/03-install-screen-recorder.sh)")
+            }
             None => {
                 self.recording = Some(Recording::Countdown(now));
                 self.show_activity(activity::Event::RecordCountdown, now);
@@ -5181,6 +5189,9 @@ mod tests {
             island.recorder = true;
             island.toggle_recording(10.0).unwrap();
             gallery_shot_after("05l-record-countdown", &mut island, 10.0, 1.2);
+            let mut missing = gallery_island();
+            missing.show_activity(activity::Event::RecorderMissing, 10.0);
+            gallery_shot_after("05k-record-missing", &mut missing, 10.0, 1.0);
             let mut island = gallery_island();
             island.recorder_event(crate::recorder::Event::Started { pid: 1 }, 8.0);
             gallery_shot("05m-recording", &mut island, 10.0);

@@ -31,14 +31,15 @@ const ART: f64 = CARD_H - 24.0;
 const MEDIA_BUTTON: f64 = 36.0;
 /// the shortcut rail: round wells over a one-line label
 const RAIL_Y: f64 = CARD_Y + CARD_H + ROW_GAP;
-const PER_ROW: usize = 6;
+const PER_ROW: usize = 5;
 const SHORTCUT_GAP: f64 = 4.0;
 const SHORTCUT_W: f64 = (INNER - (PER_ROW - 1) as f64 * SHORTCUT_GAP) / PER_ROW as f64;
 const SHORTCUT_H: f64 = 74.0;
 const SHORTCUT_R: f64 = 14.0;
 const WELL_R: f64 = 20.0;
 /// the main page
-pub const HEIGHT: f64 = RAIL_Y + 2.0 * SHORTCUT_H + SHORTCUT_GAP + BOTTOM;
+const RAIL_ROWS: usize = SHORTCUTS.len().div_ceil(PER_ROW);
+pub const HEIGHT: f64 = RAIL_Y + RAIL_ROWS as f64 * SHORTCUT_H + (RAIL_ROWS - 1) as f64 * SHORTCUT_GAP + BOTTOM;
 /// the title row's trailing button (collapse / close)
 const CLOSE: f64 = 28.0;
 /// the sound page: section captions, rows and their compact sliders
@@ -246,6 +247,8 @@ pub enum Action {
     Outputs,
     MicMute,
     Layout,
+    /// a screenshot of the whole screen (once the menu has folded)
+    Screenshot,
     /// start / stop a screen recording
     Record,
     /// night mode on the display module
@@ -273,15 +276,15 @@ pub enum Hit {
 }
 
 /// The shortcut rail, in reading (and keyboard) order.
-const SHORTCUTS: [Action; 12] = [
-    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night,
-    Action::Launcher, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+const SHORTCUTS: [Action; 13] = [
+    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night, Action::Launcher,
+    Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
 ];
 /// Keyboard order of the main page (the transport buttons come first
 /// while something plays, see the island's `quick_keys`).
-pub const ACTIONS: [Action; 13] = [
+pub const ACTIONS: [Action; 14] = [
     Action::Outputs, Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night,
-    Action::Launcher, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+    Action::Launcher, Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
 ];
 
 pub fn height(view: View, controls: &Controls) -> f64 {
@@ -700,6 +703,17 @@ pub fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64,
             cr.line_to(1.5, 4.0);
             let _ = cr.stroke();
         }
+        "screenshot" => {
+            // a viewfinder: four corners around the screen, a dot in it
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                cr.move_to(sx * 9.0, sy * 3.5);
+                cr.line_to(sx * 9.0, sy * 7.0);
+                cr.line_to(sx * 5.0, sy * 7.0);
+            }
+            let _ = cr.stroke();
+            cr.arc(0.0, 0.0, 2.2, 0.0, tau);
+            let _ = cr.fill();
+        }
         "record" => {
             // a ring around a dot (screen recording)
             cr.arc(0.0, 0.0, 7.5, 0.0, tau);
@@ -1041,6 +1055,7 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
                 }
                 Action::Night => glyph(cr, "sunset", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Record => glyph(cr, "record", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Screenshot => glyph(cr, "screenshot", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Layout => glyph(cr, "keyboard", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Lock => glyph(cr, "lock", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Sleep => glyph(cr, "sleep", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
@@ -1063,6 +1078,7 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
             Action::Night => "Ночь".to_string(),
             Action::Launcher => "Поиск".to_string(),
             Action::Record => if recording { "Стоп".to_string() } else { "Запись".to_string() },
+            Action::Screenshot => "Скриншот".to_string(),
             Action::Layout => controls.layout.as_deref().map(crate::control::layout_label).unwrap_or_else(|| "Раскладка".into()),
             Action::Lock => "Блокировка".to_string(),
             Action::Sleep => "Сон".to_string(),

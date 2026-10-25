@@ -62,6 +62,9 @@ properly. The video goes to `~/Videos/Screencasts/<date>.mp4`; its first
 frame (made with `ffmpeg`) flies into the island with the length and the file
 name. `wf-recorder` needs `sudo sh scripts/03-install-screen-recorder.sh`;
 until then the button is dimmed.
+Without `wf-recorder` the tile says so in a pill with the command that
+installs it (`sudo sh scripts/03-install-screen-recorder.sh`); each press looks
+again, so a freshly installed recorder works without restarting the island.
 
 **Microphone.** While any application records from a microphone, an orange
 privacy dot sits at the right end of the compact island. It swells in and
@@ -155,12 +158,16 @@ ten tiles (Control Center, Sound, Calendar, Notifications, Timer, Wi-Fi,
 Bluetooth, Search, Files and Clipboard — the last two open the launcher with
 `file:` / `clip:` typed), the calendar's symbol red and the timer's orange,
 the timer and notifications with their state under the name; the arrow keys
-walk them and Enter opens one. Under the cards, a rail of twelve round shortcut tiles
+walk them and Enter opens one. Under the cards, a rail of thirteen round shortcut tiles, five to a
+row with the short last row centred
 (a 40 px well over a one-line label, a light wash and a small lift under
 the pointer; a tile that is on takes its colour): Wi-Fi, Bluetooth, Timer
 (its remaining time in orange while it runs), Notifications (the unread
 count, red), Do Not Disturb (purple), Night mode (orange), Search (the
-launcher), Record, the keyboard layout (click for the next one), Lock (`loginctl
+launcher), Screenshot (the menu folds away first, then
+`~/.config/sway/scripts/screenshot.sh` — or the island's `island-screenshot` —
+saves the whole screen, copies it and flies the thumbnail in), Record, the
+keyboard layout (click for the next one), Lock (`loginctl
 lock-session`), Sleep (`systemctl suspend`) and Log out (sway `exit`,
 only on a second press within three seconds — the button turns red and
 asks «Точно?»). While the menu is open, volume and brightness keys move its

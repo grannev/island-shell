@@ -138,7 +138,10 @@ owner process exits (checked once a second, outside painting).
 An orange dot shows while an application records from a microphone (sink
 monitors such as cava excluded), and mic mute changes get a short pill.
 Screen recording (`src/recorder.rs`, wf-recorder) counts down 3-2-1, shows a
-red dot with its length beside the clock and flies the first frame in when done.
+red dot with its length beside the clock and flies the first frame in when done;
+without wf-recorder a press shows a pill with the install command (each press
+re-checks PATH). The Control Center's Screenshot tile folds the menu, then runs
+`~/.config/sway/scripts/screenshot.sh` (else `island-screenshot`) in a scope.
 Environment readers live in `src/activity.rs`; a grim wrapper is installed
 as `~/.local/bin/island-screenshot`.
 The timer opens from the island's shortcut menu as Vorssaint's timer page

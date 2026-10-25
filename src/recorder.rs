@@ -6,10 +6,13 @@
 //!
 //! The recorder is the island's own helper (not a user application): it is
 //! stopped with SIGINT so the file is finished properly, and a restart of
-//! the island ends it the same way.
+//! the island ends it the same way. Screenshots from the Control Center
+//! start here too.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
@@ -20,6 +23,26 @@ pub enum Event {
     Started { pid: u32 },
     /// it ended: the file (when there is one) and a frame of it
     Finished { path: Option<PathBuf>, thumb: Option<PathBuf> },
+}
+
+/// Take a screenshot of the whole screen once the island's menu has folded
+/// out of the picture: the person's own screenshot script when there is one
+/// (it saves, copies and chimes), else the island's grim wrapper. Both hand
+/// the file back to the island for the thumbnail. Runs in a user scope, off
+/// the UI thread.
+pub fn screenshot(after: Duration) {
+    thread::spawn(move || {
+        thread::sleep(after);
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let own = home.join(".config/sway/scripts/screenshot.sh");
+        let program = if own.is_file() { own } else { home.join(".local/bin/island-screenshot") };
+        let mut command = Command::new("sh");
+        command.arg(&program);
+        match crate::launch::spawn(&command) {
+            Ok(mut child) => { let _ = child.wait(); }
+            Err(e) => eprintln!("island-shell: screenshot: {e}"),
+        }
+    });
 }
 
 /// Is wf-recorder installed?

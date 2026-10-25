@@ -49,6 +49,8 @@ pub enum Event {
     MicInUse { apps: Vec<String> },
     /// 3-2-1 before a screen recording starts
     RecordCountdown,
+    /// the record button was pressed without wf-recorder installed
+    RecorderMissing,
     /// night mode was switched (from the keyboard or a script)
     NightMode { on: bool },
     /// a screen recording was saved (its first frame, its length)
@@ -82,6 +84,7 @@ impl Event {
             Event::MicMute { .. } => (300.0, PILL_H),
             Event::MicInUse { .. } => (0.0, 0.0),
             Event::RecordCountdown => (300.0, PILL_H),
+            Event::RecorderMissing => (470.0, PILL_H),
             Event::NightMode { .. } => (300.0, PILL_H),
             Event::Recording { .. } => (400.0, 96.0),
             Event::WifiOpen | Event::BluetoothOpen => (crate::connections::WIDTH, crate::connections::HEIGHT),
@@ -101,6 +104,7 @@ impl Event {
             Event::MicMute { .. } => 1.8,
             Event::MicInUse { .. } => 0.0,
             Event::RecordCountdown => RECORD_COUNTDOWN,
+            Event::RecorderMissing => 6.0,
             Event::NightMode { .. } => 1.8,
             Event::Recording { .. } => 4.5,
             Event::TimerMenu => f64::INFINITY,
@@ -635,6 +639,14 @@ pub fn draw_pill(
                 Font::Title, (1.0, 1.0, 1.0), enter);
             draw_two_lines(cr, renderer, "Запись экрана", "Весь экран", x0 + 88.0, cy, enter, red);
         }
+        Event::RecorderMissing => {
+            // the record ring, dim, and what to run
+            let (rx, red) = (x0 + 49.0, crate::menu_style::RED);
+            crate::menu_style::well(cr, rx, cy, 22.0, Some(red), enter * 0.18);
+            crate::quick::glyph(cr, "record", rx, cy, 1.0, (red.0, red.1, red.2, enter));
+            draw_two_lines_in(cr, renderer, "Запись экрана: нужен wf-recorder",
+                "sudo sh scripts/03-install-screen-recorder.sh", x0 + 88.0, cy, w - 112.0, enter, red);
+        }
         Event::Recording { thumb, seconds, path } => {
             // the first frame, 16:9, pops in like a screenshot's
             let (w, h) = (112.0, 63.0);
@@ -691,8 +703,24 @@ fn draw_two_lines(
     alpha: f64,
     accent: (f64, f64, f64),
 ) {
-    let title = renderer.layout_ellipsized(cr, title, Font::Caption, 255.0, 1);
-    let detail = renderer.layout_ellipsized(cr, detail, Font::Small, 255.0, 1);
+    draw_two_lines_in(cr, renderer, title, detail, x, cy, 255.0, alpha, accent);
+}
+
+/// Two lines as above, `width` wide.
+#[allow(clippy::too_many_arguments)]
+fn draw_two_lines_in(
+    cr: &Context,
+    renderer: &Renderer,
+    title: &str,
+    detail: &str,
+    x: f64,
+    cy: f64,
+    width: f64,
+    alpha: f64,
+    accent: (f64, f64, f64),
+) {
+    let title = renderer.layout_ellipsized(cr, title, Font::Caption, width, 1);
+    let detail = renderer.layout_ellipsized(cr, detail, Font::Small, width, 1);
     cr.set_source_rgba(accent.0, accent.1, accent.2, alpha);
     cr.move_to(x, cy - 23.0);
     pangocairo::functions::show_layout(cr, &title);

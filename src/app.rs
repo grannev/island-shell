@@ -2313,6 +2313,11 @@ impl App {
                 self.island.close_quick_menu(now);
                 let _ = self.island.toggle_recording(now);
             }
+            Action::Screenshot => {
+                // the menu folds out of the picture before the capture
+                self.island.close_quick_menu(now);
+                crate::recorder::screenshot(std::time::Duration::from_millis(550));
+            }
             Action::MediaPrevious | Action::MediaPlayPause | Action::MediaNext => {
                 let control = match action {
                     Action::MediaPrevious => crate::player::Control::Previous,
