@@ -13,6 +13,7 @@ const MAGIC: &[u8; 6] = b"i3-ipc";
 const RUN_COMMAND: u32 = 0;
 const GET_INPUTS: u32 = 100;
 const GET_WORKSPACES: u32 = 1;
+const GET_OUTPUTS: u32 = 3;
 const SUBSCRIBE: u32 = 2;
 const GET_TREE: u32 = 4;
 const EVENT_FLAG: u32 = 0x8000_0000;
@@ -114,6 +115,43 @@ impl Query {
     }
 }
 
+/// The part of an output that other layer surfaces' exclusive zones leave
+/// free (the bar above, an on-screen keyboard below), relative to the
+/// output, and the output's own logical width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Usable {
+    pub x: i32,
+    pub y: i32,
+    pub output_w: i32,
+}
+
+impl Query {
+    /// Where the free area of `output` (None: the focused one) starts:
+    /// sway sizes its visible workspace to exactly that area.
+    pub fn usable(&mut self, output: Option<&str>) -> io::Result<Option<Usable>> {
+        let outputs = self.request(GET_OUTPUTS, "")?;
+        let outputs = outputs.as_array().map(Vec::as_slice).unwrap_or_default();
+        let out = match output {
+            Some(name) => outputs.iter().find(|o| o["name"] == name),
+            None => outputs.iter().find(|o| o["focused"] == Value::Bool(true)),
+        };
+        let Some(out) = out else { return Ok(None) };
+        let workspaces = self.request(GET_WORKSPACES, "")?;
+        let ws = workspaces.as_array().and_then(|all| all.iter().find(|w| w["name"] == out["current_workspace"]));
+        let Some(ws) = ws else { return Ok(None) };
+        Ok(usable_from(&out["rect"], &ws["rect"]))
+    }
+}
+
+fn usable_from(output: &Value, workspace: &Value) -> Option<Usable> {
+    let int = |v: &Value, k: &str| v[k].as_i64().map(|n| n as i32);
+    Some(Usable {
+        x: int(workspace, "x")? - int(output, "x")?,
+        y: int(workspace, "y")? - int(output, "y")?,
+        output_w: int(output, "width")?,
+    })
+}
+
 fn find_workspace<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
     if node["type"] == "workspace" && node["name"] == name {
         return Some(node);
@@ -184,5 +222,17 @@ impl Events {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usable_area_is_relative_to_its_output() {
+        let output = serde_json::json!({"x": 1504, "y": 0, "width": 1504, "height": 1002});
+        let workspace = serde_json::json!({"x": 1504, "y": 26, "width": 1504, "height": 676});
+        assert_eq!(usable_from(&output, &workspace), Some(Usable { x: 0, y: 26, output_w: 1504 }));
     }
 }

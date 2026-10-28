@@ -43,6 +43,8 @@ pub enum Command {
     /// `scrub <0..1|end>`: drag the playhead from a script, exactly as the
     /// pointer does — repeated calls move it, "end" lands it
     Scrub(String),
+    /// pause the player and take it off the island until it plays again
+    PlayerClear,
     /// `nvim <json>`: a message from the companion Neovim plugin
     Nvim(String),
     /// A live activity supplied explicitly (also used by screenshot hooks).
@@ -102,6 +104,7 @@ impl Command {
             ["type", rest @ ..] => Command::Type(rest.join(" ")),
             ["key", name] => Command::Key(name.to_string()),
             ["scrub", value] => Command::Scrub(value.to_string()),
+            ["player-clear"] => Command::PlayerClear,
             ["volume", value, tail @ ..] => Command::Activity(crate::activity::Event::Slider {
                 kind: crate::activity::SliderKind::Volume,
                 value: value.parse::<f64>().ok()?.clamp(0.0, 1.0),

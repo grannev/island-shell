@@ -40,6 +40,7 @@ mod sway;
 mod sound;
 mod tasks;
 mod timer_page;
+mod touch;
 mod touchid;
 mod weather;
 

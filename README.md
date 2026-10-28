@@ -442,7 +442,10 @@ beating beside the clock; hovering those bars opens it into
 a player with the art, the title and artist, a live equaliser, a progress
 line you can click or drag to scrub — it swells under the pointer and
 again in the hand, on springs — and vector transport controls that light
-up as the pointer reaches them. Silent playback
+up as the pointer reaches them. A quiet × beside them (and on the Control
+Center's "Now playing" card) clears the player: it pauses and folds off the
+island, the app keeps running, and the same player comes back as soon as it
+plays again. Silent playback
 (paused / muted) folds the bars away after 15 s. Touch ID (fprintd on the system bus) — the box morphs into the
 92 px pill with a vector fingerprint whose ridges breathe in a ripple; on
 a result the ridges converge into a ring that fills green or red and the
@@ -526,6 +529,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell dnd on|off|toggle|status       # quiet ordinary notifications
     island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
+    island-shell player-clear                   # pause and hide the player until it plays again
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)

@@ -26,7 +26,7 @@ use smithay_client_toolkit::{
             Connection, Dispatch, Proxy, QueueHandle, WEnum,
             backend::ObjectId,
             globals::{GlobalList, registry_queue_init},
-            protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+            protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_touch},
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -42,7 +42,8 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{AxisScroll, PointerEvent, PointerEventKind, PointerHandler},
+        touch::TouchHandler,
     },
     shell::{
         WaylandSurface,
@@ -209,6 +210,9 @@ struct DismissSurface {
     viewport: WpViewport,
     buffer: Buffer,
     size: (u32, u32),
+    /// where the free area it fills starts on the output, and the
+    /// output's width (the island is centred on the whole output)
+    usable: Option<sway::Usable>,
     input_hole: std::cell::Cell<Option<Option<(i32, i32, i32, i32)>>>,
 }
 
@@ -239,9 +243,9 @@ impl Drop for DismissSurface {
     }
 }
 
-fn dismiss_hole(input: Rect, output_width: u32, surface_width: u32) -> (i32, i32, i32, i32) {
+fn dismiss_hole(input: Rect, output_width: u32, surface_width: u32, origin: (i32, i32)) -> (i32, i32, i32, i32) {
     let x = (output_width as f64 - surface_width as f64) / 2.0 + input.x;
-    (x.floor() as i32, input.y.floor() as i32, input.w.ceil() as i32 + 1, input.h.ceil() as i32 + 1)
+    (x.floor() as i32 - origin.0, input.y.floor() as i32 - origin.1, input.w.ceil() as i32 + 1, input.h.ceil() as i32 + 1)
 }
 
 pub struct App {
@@ -276,6 +280,16 @@ pub struct App {
     frame_pending: bool,
     frame_stats: FrameStats,
     pointer: Option<wl_pointer::WlPointer>,
+    touch: Option<wl_touch::WlTouch>,
+    /// the finger on the island, as pointer events
+    gesture: crate::touch::Touch,
+    /// the long press waiting for a resting finger
+    touch_hold: Option<RegistrationToken>,
+    /// a finger opened a panel the pointer would by resting on it; it
+    /// stays open until a touch lands outside (or the mouse comes back)
+    touch_sticky: bool,
+    /// the finger landed on the music: sideways it changes tracks
+    touch_tracks: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     kbd_interactivity: KeyboardInteractivity,
@@ -417,6 +431,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         frame_pending: false,
         frame_stats: FrameStats::default(),
         pointer: None,
+        touch: None,
+        gesture: crate::touch::Touch::default(),
+        touch_hold: None,
+        touch_sticky: false,
+        touch_tracks: false,
         keyboard: None,
         modifiers: Modifiers::default(),
         kbd_interactivity: KeyboardInteractivity::None,
@@ -835,7 +854,7 @@ impl App {
                     self.clock.refresh * 1e3,
                     self.clock.pipeline,
                     self.buffers.len(),
-                    self.dismiss.as_ref().map(|d| d.size),
+                    self.dismiss.as_ref().map(|d| (d.size, d.usable.map(|u| (u.x, u.y)))),
                     self.island.config.describe(),
                     self.island.describe(now) + &self.frame_stats.describe()
                 );
@@ -1053,6 +1072,12 @@ impl App {
                 };
                 self.after_change();
                 return reply;
+            }
+            Command::PlayerClear => {
+                if self.island.song().is_none() {
+                    return "no player".into();
+                }
+                self.clear_player(now);
             }
             Command::Scrub(value) => {
                 let sent = if value == "end" {
@@ -1337,7 +1362,12 @@ impl App {
         let wants_keyboard = self.island.launcher.is_some() || self.island.replying()
             || (!self.island.is_hidden() && self.island.keyboard_panel_open());
         self.set_keyboard_focus(wants_keyboard);
-        self.sync_dismiss_surface(wants_keyboard);
+        // the panel a finger opened has closed by itself
+        if self.touch_sticky && !self.gesture.active() && !self.island.touch_revealed(self.clock.predict(false)) {
+            self.touch_sticky = false;
+            self.pointer_left();
+        }
+        self.sync_dismiss_surface(wants_keyboard || self.touch_sticky);
         let has_song = self.island.song().is_some();
         if has_song && self.cava.is_none() && !self.cava_pending && std::time::Instant::now() >= self.cava_retry {
             self.cava_pending = self.cava_start.request(());
@@ -1596,7 +1626,7 @@ impl App {
 
         self.viewport.set_source(0.0, 0.0, bw as f64, bh as f64);
         self.viewport.set_destination(self.width as i32, self.height as i32);
-        if self.island.is_animating(t) || self.renderer.motion.moving(t) {
+        if self.island.is_animating(t) || self.renderer.motion.moving(t) || self.gesture.flinging() {
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             self.frame_pending = true;
         }
@@ -1756,7 +1786,10 @@ impl App {
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_size(0, 0);
-        layer.set_exclusive_zone(-1);
+        // only the free area: an on-screen keyboard (wvkbd) and the bar
+        // keep their exclusive zones, so typing on it, or toggling it from
+        // the bar, reaches them instead of closing the island's sheet
+        layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let viewport = self.viewporter.get_viewport(layer.wl_surface(), &self.qh, ());
         let (buffer, pixels) = match self.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) {
@@ -1765,14 +1798,18 @@ impl App {
         };
         pixels.fill(0);
         layer.commit(); // Wait for the initial configure before attaching.
-        self.dismiss = Some(DismissSurface { layer, viewport, buffer, size: (0, 0), input_hole: std::cell::Cell::new(None) });
+        self.dismiss = Some(DismissSurface { layer, viewport, buffer, size: (0, 0), usable: None, input_hole: std::cell::Cell::new(None) });
     }
 
     fn update_dismiss_region(&self) {
         let Some(dismiss) = &self.dismiss else { return };
         let (w, h) = dismiss.size;
         if w == 0 || h == 0 { return; }
-        let hole = self.last_frame.and_then(|frame| frame.input).map(|rect| dismiss_hole(rect, w, self.width));
+        let (output_w, origin) = match dismiss.usable {
+            Some(u) => (u.output_w.max(0) as u32, (u.x, u.y)),
+            None => (w, (0, 0)),
+        };
+        let hole = self.last_frame.and_then(|frame| frame.input).map(|rect| dismiss_hole(rect, output_w, self.width, origin));
         if dismiss.input_hole.get() == Some(hole) { return; }
         dismiss.input_hole.set(Some(hole));
         let region = Region::new(&self.compositor).expect("wl_region");
@@ -1798,6 +1835,11 @@ impl CompositorHandler for App {
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _time: u32) {
+        // a flicked list glides on, a step per frame (still frame_pending,
+        // so the scroll does not draw a frame of its own)
+        if let Some(out) = self.gesture.step(self.clock.predict(false)) {
+            self.apply_touch(&[out]);
+        }
         self.frame_pending = false;
         self.draw(true);
     }
@@ -1867,9 +1909,15 @@ impl LayerShellHandler for App {
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         if layer.wl_surface() != self.layer.wl_surface() {
-            if let Some(dismiss) = self.dismiss.as_mut().filter(|d| d.layer.wl_surface() == layer.wl_surface()) {
+            if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
+                // the free area moved (a keyboard slid in or out): where
+                // does it start now? sway has arranged it before configuring
+                let output = self.bound_output_name();
+                let usable = self.sway_query.as_mut().and_then(|q| q.usable(output.as_deref()).ok().flatten());
+                let dismiss = self.dismiss.as_mut().expect("dismiss surface");
                 let (w, h) = configure.new_size;
                 if w == 0 || h == 0 { return; }
+                dismiss.usable = usable;
                 let first = dismiss.size == (0, 0);
                 dismiss.size = (w, h);
                 dismiss.input_hole.set(None);
@@ -1906,6 +1954,11 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
         }
+        // with a wl_touch of its own the island hears fingers as fingers
+        // (otherwise sway turns them into clicks, and nothing scrolls)
+        if capability == Capability::Touch && self.touch.is_none() {
+            self.touch = self.seat_state.get_touch(qh, &seat).ok();
+        }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             let handle = self.loop_handle.clone();
             self.keyboard = self
@@ -1921,6 +1974,13 @@ impl SeatHandler for App {
                 p.release();
             }
         }
+        if capability == Capability::Touch {
+            if let Some(t) = self.touch.take() {
+                t.release();
+            }
+            let out = self.gesture.cancel();
+            self.apply_touch(&out);
+        }
         if capability == Capability::Keyboard {
             if let Some(k) = self.keyboard.take() {
                 k.release();
@@ -1932,6 +1992,18 @@ impl SeatHandler for App {
 
 impl PointerHandler for App {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+        // the mouse is back: what a finger left open answers to it now
+        if self.touch_sticky {
+            self.touch_sticky = false;
+            self.pointer_left();
+        }
+        self.pointer_events(events);
+    }
+}
+
+impl App {
+    /// Pointer events: the mouse's, or made from a finger's.
+    fn pointer_events(&mut self, events: &[PointerEvent]) {
         let mut changed = false;
         for event in events {
             if self.dismiss.as_ref().is_some_and(|d| &event.surface == d.layer.wl_surface()) {
@@ -2163,6 +2235,11 @@ impl PointerHandler for App {
                     // line take the click
                     if button == BTN_LEFT {
                         if let Some(control) = self.island.control_at(self.width as f64 / 2.0, event.position.0, event.position.1, now) {
+                            if control == crate::player::Control::Clear {
+                                self.clear_player(now);
+                                changed = true;
+                                continue;
+                            }
                             if let Some((bus, track, command)) = self.island.press_control(control, now) {
                                 dbus::control(&bus, &track, command);
                             }
@@ -2318,6 +2395,7 @@ impl App {
                 self.island.close_quick_menu(now);
                 crate::recorder::screenshot(std::time::Duration::from_millis(550));
             }
+            Action::MediaClear => self.clear_player(now),
             Action::MediaPrevious | Action::MediaPlayPause | Action::MediaNext => {
                 let control = match action {
                     Action::MediaPrevious => crate::player::Control::Previous,
@@ -2472,11 +2550,157 @@ impl App {
         }
     }
 
+    /// Pause the player and take it off the island until it plays again.
+    fn clear_player(&mut self, now: Time) {
+        if let Some((bus, playing)) = self.island.clear_song(now) {
+            dbus::clear_player(&bus, playing);
+        }
+    }
+
     fn player_control(&self, cmd: PlayerCommand) {
         if self.island.accepts_player_clicks() {
             if let Some(song) = self.island.song() {
                 dbus::control(&song.now.bus_name, &song.now.track_id, cmd);
             }
+        }
+    }
+}
+
+impl TouchHandler for App {
+    fn down(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, _: u32,
+        surface: wl_surface::WlSurface, id: i32, position: (f64, f64))
+    {
+        if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == &surface) {
+            // a touch outside folds whatever was open, as a click would
+            self.gesture.stop();
+            if self.touch_sticky {
+                self.touch_sticky = false;
+                self.pointer_left();
+            }
+            self.dismiss_menus();
+            return;
+        }
+        if &surface != self.layer.wl_surface() || self.gesture.active() {
+            return;
+        }
+        let now = self.clock.predict(false);
+        let (x, y) = position;
+        let grab = self.island.touch_grabs(self.width as f64 / 2.0, x, y, now);
+        let reveal = !grab && self.island.touch_reveals(x, y, now);
+        self.touch_tracks = !grab && self.island.touch_swipes_tracks(x, y);
+        let out = self.gesture.down(id, x, y, grab, reveal, now);
+        self.apply_touch(&out);
+        if !grab && !reveal {
+            self.arm_long_press(id);
+        }
+    }
+
+    fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, _: u32, id: i32) {
+        if !self.gesture.holds(id) {
+            return;
+        }
+        self.disarm_long_press();
+        let out = self.gesture.up(id, self.clock.predict(false));
+        self.apply_touch(&out);
+        self.touch_lifted();
+    }
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, id: i32, position: (f64, f64)) {
+        let out = self.gesture.motion(id, position.0, position.1, self.clock.predict(false));
+        if !self.gesture.pending(id) {
+            self.disarm_long_press();
+        }
+        self.apply_touch(&out);
+    }
+
+    fn shape(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: i32, _: f64, _: f64) {}
+
+    fn orientation(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: i32, _: f64) {}
+
+    fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch) {
+        self.disarm_long_press();
+        let held = self.gesture.active();
+        let out = self.gesture.cancel();
+        self.apply_touch(&out);
+        if held {
+            self.touch_lifted();
+        }
+    }
+}
+
+impl App {
+    /// Feed what the finger did to the island as pointer events.
+    fn apply_touch(&mut self, out: &[crate::touch::Out]) {
+        use crate::touch::Out;
+        let surface = self.layer.wl_surface().clone();
+        let event = |kind, position| PointerEvent { surface: surface.clone(), position, kind };
+        let axis = |absolute, stop| AxisScroll { absolute, discrete: 0, value120: 0, relative_direction: None, stop };
+        let mut events = Vec::new();
+        for o in out {
+            match *o {
+                Out::Hover(x, y) => {
+                    if !self.island.hovered {
+                        events.push(event(PointerEventKind::Enter { serial: 0 }, (x, y)));
+                    }
+                    events.push(event(PointerEventKind::Motion { time: 0 }, (x, y)));
+                }
+                Out::Press(button, x, y) => events.push(event(PointerEventKind::Press { time: 0, button, serial: 0 }, (x, y))),
+                Out::Motion(x, y) => events.push(event(PointerEventKind::Motion { time: 0 }, (x, y))),
+                Out::Release(button, x, y) => events.push(event(PointerEventKind::Release { time: 0, button, serial: 0 }, (x, y))),
+                // over the music the swipe as a whole decides, on lift
+                Out::Scroll { .. } if self.touch_tracks => {}
+                Out::Scroll { x, y, dx, dy, stop } => events.push(event(PointerEventKind::Axis {
+                    time: 0,
+                    horizontal: axis(dx, stop),
+                    vertical: axis(dy, false),
+                    source: Some(wl_pointer::AxisSource::Finger),
+                }, (x, y))),
+                // sideways over the music: the next track to the left, the
+                // previous one to the right
+                Out::Swiped { dx, dy } if self.touch_tracks && dx.abs() > 40.0 && dx.abs() > dy.abs() => {
+                    if !events.is_empty() {
+                        self.pointer_events(&std::mem::take(&mut events));
+                    }
+                    self.player_control(if dx < 0.0 { PlayerCommand::Next } else { PlayerCommand::Previous });
+                }
+                Out::Swiped { .. } => {}
+            }
+        }
+        if !events.is_empty() {
+            self.pointer_events(&events);
+        }
+    }
+
+    /// The finger came up: a panel it revealed stays (with the outside
+    /// catcher to close it); otherwise the pointer it stood for leaves.
+    fn touch_lifted(&mut self) {
+        let now = self.clock.predict(false);
+        if self.island.touch_revealed(now) {
+            self.touch_sticky = true;
+        } else {
+            self.touch_sticky = false;
+            if self.island.hovered {
+                self.pointer_left();
+            }
+        }
+        self.island.sync(now);
+        self.after_change();
+    }
+
+    fn arm_long_press(&mut self, id: i32) {
+        self.disarm_long_press();
+        let delay = Duration::from_secs_f64(crate::touch::LONG_PRESS);
+        self.touch_hold = self.loop_handle.insert_source(Timer::from_duration(delay), move |_, _, app: &mut App| {
+            app.touch_hold = None;
+            let out = app.gesture.long_press(id, app.clock.predict(false));
+            app.apply_touch(&out);
+            TimeoutAction::Drop
+        }).ok();
+    }
+
+    fn disarm_long_press(&mut self) {
+        if let Some(token) = self.touch_hold.take() {
+            self.loop_handle.remove(token);
         }
     }
 }
@@ -2620,9 +2844,12 @@ mod tests {
     fn outside_click_region_keeps_animated_island_interactive() {
         // Match the island's input rounding, translated from its centred
         // 980px surface to the full 1504px logical output, not pixel scale.
-        let hole = dismiss_hole(Rect { x: 249.4, y: 0.0, w: 480.2, h: 377.1 }, 1504, 980);
+        let hole = dismiss_hole(Rect { x: 249.4, y: 0.0, w: 480.2, h: 377.1 }, 1504, 980, (0, 0));
         assert_eq!(hole, (511, 0, 482, 379));
-        let compact = dismiss_hole(Rect { x: 390.0, y: 0.0, w: 200.0, h: 32.0 }, 1504, 980);
+        let compact = dismiss_hole(Rect { x: 390.0, y: 0.0, w: 200.0, h: 32.0 }, 1504, 980, (0, 0));
         assert_eq!(compact, (652, 0, 201, 33));
+        // below a 26 px bar the catcher starts lower; the hole moves up
+        let below_bar = dismiss_hole(Rect { x: 390.0, y: 0.0, w: 200.0, h: 32.0 }, 1504, 980, (0, 26));
+        assert_eq!(below_bar, (652, -26, 201, 33));
     }
 }

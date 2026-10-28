@@ -42,7 +42,15 @@ pub enum Control {
     Next,
     /// a click on the progress line, as a fraction of the track
     Seek(f64),
+    /// pause and take the player off the island until it plays again
+    Clear,
 }
+
+/// The clear button's centre, bottom right on the transport row.
+fn clear_centre(w: f64) -> (f64, f64) {
+    (w - PAD - 10.0, CONTROLS_Y)
+}
+const CLEAR_R: f64 = 12.0;
 
 /// Where the controls are, relative to the player's top-left corner.
 fn control_centres(w: f64) -> [(Control, f64, f64); 3] {
@@ -60,6 +68,10 @@ pub fn hit(w: f64, x: f64, y: f64) -> Option<Control> {
         if (x - cx).hypot(y - cy) <= 22.0 {
             return Some(control);
         }
+    }
+    let (clx, cly) = clear_centre(w);
+    if (x - clx).hypot(y - cly) <= CLEAR_R + 6.0 {
+        return Some(Control::Clear);
     }
     let (start, end) = track_range(w);
     if x >= start - 8.0 && x <= end + 8.0 && (y - PROGRESS_Y).abs() <= 13.0 {
@@ -97,8 +109,8 @@ pub struct View<'a> {
     /// how far the progress line has swollen: 0 at rest, ~0.45 under the
     /// pointer, 1 while the playhead is held (eased, not switched)
     pub track_grow: f64,
-    /// how lit each transport control is, previous / play / next
-    pub control_hover: [f64; 3],
+    /// how lit each control is, previous / play / next / clear
+    pub control_hover: [f64; 4],
 }
 
 /// Draw the open player inside the box at (`x`, `y`, `w`, `h`).
@@ -202,6 +214,20 @@ pub fn draw(cr: &Context, renderer: &Renderer, art: &Art, view: &View, x: f64, y
         let lit = 0.85 + 0.15 * hover.min(1.0);
         control_glyph(cr, control, view.playing, x + cx, y + cy + co, squish * (1.0 + 0.04 * hover), ca * lit);
     }
+
+    // the clear button: a quiet plate with a cross, off to the side
+    let (clx, cly) = clear_centre(w);
+    let (la, lo) = stage(0.2);
+    let hover = view.control_hover[3].clamp(0.0, 1.4);
+    let squish = match view.pressed {
+        Some((Control::Clear, since)) => 1.0 - 0.2 * (-(now - since) / 0.12).exp(),
+        _ => 1.0,
+    };
+    cr.new_path();
+    cr.arc(x + clx, y + cly + lo, (CLEAR_R + 2.0 * hover) * squish, 0.0, 2.0 * PI);
+    cr.set_source_rgba(1.0, 1.0, 1.0, (0.08 + 0.08 * hover.min(1.0)) * la);
+    let _ = cr.fill();
+    control_glyph(cr, Control::Clear, view.playing, x + clx, y + cly + lo, squish, la * (0.55 + 0.4 * hover.min(1.0)));
 }
 
 /// The album art, or the app's initial when the player publishes none.
@@ -325,6 +351,16 @@ pub fn control_glyph(cr: &Context, control: Control, playing: bool, cx: f64, cy:
             }
             rounded(cr, dir * 9.0 - 1.6, -8.0, 3.2, 16.0, 1.4);
             let _ = cr.fill();
+        }
+        Control::Clear => {
+            cr.set_line_width(1.8);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.new_path();
+            for (a, b) in [((-4.0, -4.0), (4.0, 4.0)), ((4.0, -4.0), (-4.0, 4.0))] {
+                cr.move_to(a.0, a.1);
+                cr.line_to(b.0, b.1);
+            }
+            let _ = cr.stroke();
         }
         Control::Seek(_) => {}
     }

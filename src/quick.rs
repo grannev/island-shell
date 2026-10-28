@@ -261,6 +261,8 @@ pub enum Action {
     MediaPrevious,
     MediaPlayPause,
     MediaNext,
+    /// pause and take the player off the island until it plays again
+    MediaClear,
     /// a destination in the sections gallery
     Section(Section),
     Back,
@@ -377,12 +379,17 @@ fn back_button() -> Rect {
 }
 
 /// The transport buttons' centres in the music card.
-const MEDIA_ACTIONS: [Action; 3] = [Action::MediaPrevious, Action::MediaPlayPause, Action::MediaNext];
+/// (The clear button sits apart, at the card's right edge.)
+const MEDIA_ACTIONS: [Action; 4] = [Action::MediaPrevious, Action::MediaPlayPause, Action::MediaNext, Action::MediaClear];
 
 fn media_button(i: usize) -> (f64, f64) {
-    let (x, y, _, h) = music_card();
+    let (x, y, w, h) = music_card();
+    let row = y + h - 12.0 - MEDIA_BUTTON / 2.0;
+    if i == 3 {
+        return (x + w - 12.0 - MEDIA_BUTTON / 2.0 + 4.0, row);
+    }
     let text_x = x + 12.0 + ART + 14.0;
-    (text_x + MEDIA_BUTTON / 2.0 - 8.0 + i as f64 * (MEDIA_BUTTON + 4.0), y + h - 12.0 - MEDIA_BUTTON / 2.0)
+    (text_x + MEDIA_BUTTON / 2.0 - 8.0 + i as f64 * (MEDIA_BUTTON + 4.0), row)
 }
 
 fn inside(x: f64, y: f64, rect: Rect) -> bool {
@@ -1120,6 +1127,14 @@ fn draw_media(cr: &Context, renderer: &Renderer, x: f64, y: f64, alpha: f64, fra
         let (cx, cy) = media_button(i);
         let (cx, cy) = (x + cx, y + cy);
         let lit = (frame.hover)(*action).clamp(0.0, 1.0);
+        if *action == Action::MediaClear {
+            // quieter than the transport: a small plate that is always there
+            let press = menu_style::press_scale((frame.pressed)(*action));
+            menu_style::well(cr, cx, cy, (11.0 + 3.0 * lit) * press, None, (0.35 + 0.45 * lit) * alpha);
+            crate::player::control_glyph(cr, crate::player::Control::Clear, media.playing, cx, cy, 0.9 * press,
+                alpha * (0.55 + 0.4 * lit));
+            continue;
+        }
         if lit > 0.0 {
             menu_style::well(cr, cx, cy, MEDIA_BUTTON / 2.0, None, 0.8 * lit * alpha);
         }

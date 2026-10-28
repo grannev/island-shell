@@ -449,7 +449,7 @@ impl Song {
             length: self.now.length,
             pressed,
             track_grow: 0.0,
-            control_hover: [0.0; 3],
+            control_hover: [0.0; 4],
         }
     }
 }
@@ -674,7 +674,7 @@ pub struct Island {
     /// the progress line swelling under the pointer / in the hand, and the
     /// three transport controls lighting up — all on springs
     track_grow: Spring,
-    control_hover: [Spring; 3],
+    control_hover: [Spring; 4],
     art: Art,
     /// equaliser bands: the latest levels from cava and the eased heights
     eq_target: [f64; EQ_BANDS],
@@ -1230,7 +1230,8 @@ impl Island {
             let control = match i {
                 0 => player::Control::Previous,
                 1 => player::Control::PlayPause,
-                _ => player::Control::Next,
+                2 => player::Control::Next,
+                _ => player::Control::Clear,
             };
             let lit = self.hovered_control == Some(control) && self.scrub.is_none();
             spring.set(if lit { 1.0 } else { 0.0 }, now);
@@ -1629,6 +1630,18 @@ impl Island {
         }
         self.update_silence(now);
         self.sync(now);
+    }
+
+    /// The user cleared the player: it folds away now (the watcher keeps it
+    /// hidden until it plays again). Returns its bus name and whether it
+    /// was playing, for the pause.
+    pub fn clear_song(&mut self, now: Time) -> Option<(String, bool)> {
+        let song = self.song.as_ref()?;
+        let cleared = (song.now.bus_name.clone(), song.now.playing);
+        self.scrub = None;
+        self.eq_hovered = false;
+        self.set_player(None, now);
+        Some(cleared)
     }
 
     /// Show the "now playing" toast, unless the island has something more
@@ -4308,7 +4321,8 @@ impl Island {
             quick::View::Main => {
                 // the music card's buttons come first, as the card does
                 let media = self.controls.media.is_some().then_some([
-                    quick::Action::MediaPrevious, quick::Action::MediaPlayPause, quick::Action::MediaNext]);
+                    quick::Action::MediaPrevious, quick::Action::MediaPlayPause, quick::Action::MediaNext,
+                    quick::Action::MediaClear]);
                 media.into_iter().flatten()
                     .chain(quick::ACTIONS.iter().copied()
                         .filter(|a| *a != quick::Action::Outputs || !self.controls.sinks.is_empty()))
@@ -4349,6 +4363,48 @@ impl Island {
         }
         self.sync(now);
         true
+    }
+
+    /// Does a finger landing here hold something to drag at once (a
+    /// slider, the playhead, the timer's ruler, a notification to swipe),
+    /// rather than wait to see whether it taps or scrolls?
+    pub fn touch_grabs(&self, cx: f64, px: f64, py: f64, now: Time) -> bool {
+        if self.quick_open && matches!(self.quick_hit(px, py), Some(quick::Hit::Slider(..))) {
+            return true;
+        }
+        if matches!(self.control_at(cx, px, py, now), Some(player::Control::Seek(_))) {
+            return true;
+        }
+        if self.timer_menu_open() {
+            if let Some(r) = self.timer_menu_rect {
+                let session = self.timer_session(now);
+                if self.timer_page.hit(&session, px - r.x, py - r.y) == Some(timer_page::Part::Ruler) {
+                    return true;
+                }
+            }
+        }
+        self.notice.is_some() && self.notice_reply.is_none()
+            && self.notice_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+            && self.notice_action_index_at(px, py).is_none()
+    }
+
+    /// A finger cannot hover: a tap on the bars (or the editor's chip)
+    /// does what resting the pointer there would, and opens its panel.
+    pub fn touch_reveals(&self, px: f64, py: f64, now: Time) -> bool {
+        let chip = self.editor_chip_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
+        (self.accepts_player_clicks() && self.on_music(px, py) && !self.player_open(now))
+            || (chip && !self.editor_panel_open(now))
+    }
+
+    /// Is a panel open that a finger revealed (the player, the editor's)?
+    /// It stays until a touch lands outside the island.
+    pub fn touch_revealed(&self, now: Time) -> bool {
+        self.hovered && (self.want_player() || self.want_editor_panel(now))
+    }
+
+    /// Sideways over the bars or the open player, a finger changes tracks.
+    pub fn touch_swipes_tracks(&self, px: f64, py: f64) -> bool {
+        self.music_area_at(px, py)
     }
 
     pub fn set_eq_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
@@ -4491,6 +4547,8 @@ impl Island {
             player::Control::Previous => crate::dbus::PlayerCommand::Previous,
             player::Control::PlayPause => crate::dbus::PlayerCommand::PlayPause,
             player::Control::Next => crate::dbus::PlayerCommand::Next,
+            // the island's own business, see `clear_song`
+            player::Control::Clear => return None,
             player::Control::Seek(fraction) => {
                 if song.now.length <= 0.0 || song.now.track_id.is_empty() {
                     return None;

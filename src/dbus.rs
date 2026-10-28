@@ -4,8 +4,9 @@
 //! channel.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use zbus::blocking::{Connection, MessageIterator, Proxy, fdo::DBusProxy};
@@ -47,6 +48,7 @@ pub enum Event {
 #[derive(Clone, Copy, Debug)]
 pub enum PlayerCommand {
     PlayPause,
+    Pause,
     Next,
     Previous,
     /// jump to this position, in seconds
@@ -64,6 +66,7 @@ pub fn control(bus_name: &str, track_id: &str, cmd: PlayerCommand) {
             let proxy = Proxy::new(&conn, name.as_str(), MPRIS_PATH, PLAYER_IFACE)?;
             match cmd {
                 PlayerCommand::PlayPause => proxy.call_noreply("PlayPause", &()),
+                PlayerCommand::Pause => proxy.call_noreply("Pause", &()),
                 PlayerCommand::Next => proxy.call_noreply("Next", &()),
                 PlayerCommand::Previous => proxy.call_noreply("Previous", &()),
                 PlayerCommand::Seek(secs) => {
@@ -77,6 +80,57 @@ pub fn control(bus_name: &str, track_id: &str, cmd: PlayerCommand) {
             eprintln!("island-shell: player control: {e}");
         }
     });
+}
+
+/// A player the user cleared off the island: it stays hidden until it
+/// plays again after the pause has taken.
+struct Cleared {
+    name: String,
+    /// seen paused (or stopped) since it was cleared
+    paused: bool,
+    at: Instant,
+}
+
+static CLEARED: Mutex<Vec<Cleared>> = Mutex::new(Vec::new());
+/// the next look at the players also clears every one that is not playing
+static SWEEP: Mutex<bool> = Mutex::new(false);
+/// a player that ignores Pause is let back after this long
+const PAUSE_GRACE: Duration = Duration::from_secs(3);
+
+/// Pause the player and take it (and any other paused one) off the
+/// island, without quitting it; it comes back when it plays again.
+pub fn clear_player(bus_name: &str, playing: bool) {
+    if let Ok(mut cleared) = CLEARED.lock() {
+        cleared.retain(|c| c.name != bus_name);
+        cleared.push(Cleared { name: bus_name.to_string(), paused: !playing, at: Instant::now() });
+    }
+    if let Ok(mut sweep) = SWEEP.lock() {
+        *sweep = true;
+    }
+    if playing {
+        control(bus_name, "", PlayerCommand::Pause);
+    }
+}
+
+/// Is this player cleared off the island right now?
+fn cleared_hides(cleared: &mut Vec<Cleared>, name: &str, playing: bool, sweep: bool) -> bool {
+    let Some(i) = cleared.iter().position(|c| c.name == name) else {
+        if sweep && !playing {
+            cleared.push(Cleared { name: name.to_string(), paused: true, at: Instant::now() });
+            return true;
+        }
+        return false;
+    };
+    if !playing {
+        cleared[i].paused = true;
+        return true;
+    }
+    // playing again once the pause had taken (or Pause was ignored)
+    if cleared[i].paused || cleared[i].at.elapsed() > PAUSE_GRACE {
+        cleared.remove(i);
+        return false;
+    }
+    true
 }
 
 /// Ask the player where it is, on a thread — the island never blocks on a
@@ -219,8 +273,13 @@ impl Players {
     /// changed most recently.
     fn active(&mut self) -> Option<NowPlaying> {
         let mut best: Option<(bool, u64, NowPlaying)> = None;
+        let sweep = SWEEP.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or(false);
         for name in self.names() {
             let Some(mut np) = read_player(&self.conn, &name) else { continue };
+            let hidden = CLEARED.lock().map(|mut c| cleared_hides(&mut c, &name, np.playing, sweep)).unwrap_or(false);
+            if hidden {
+                continue;
+            }
             if np.title.is_empty() && np.artist.is_empty() {
                 // metadata not published yet: give the player a moment
                 for _ in 0..6 {
@@ -303,7 +362,12 @@ fn player_loop(tx: &Sender<Event>) -> zbus::Result<()> {
             }
             Some("NameOwnerChanged") => {
                 if let Ok((name, _old, new)) = msg.body().deserialize::<(String, String, String)>() {
-                    if !new.is_empty() {
+                    if new.is_empty() {
+                        // gone: a new one under that name starts afresh
+                        if let Ok(mut cleared) = CLEARED.lock() {
+                            cleared.retain(|c| c.name != name);
+                        }
+                    } else {
                         players.owners.insert(new, name.clone());
                         players.stamp += 1;
                         players.recent.insert(name, players.stamp);
@@ -348,4 +412,32 @@ fn auth_loop(tx: &Sender<Event>) -> zbus::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cleared_player_returns_when_it_plays_again() {
+        let mut cleared = vec![Cleared { name: "a".into(), paused: false, at: Instant::now() }];
+        // the pause has not taken yet: still hidden
+        assert!(cleared_hides(&mut cleared, "a", true, false));
+        assert!(cleared_hides(&mut cleared, "a", false, false));
+        assert!(cleared_hides(&mut cleared, "a", false, false));
+        // played again: back, and no longer cleared
+        assert!(!cleared_hides(&mut cleared, "a", true, false));
+        assert!(cleared.is_empty());
+        // others are left alone, unless a sweep takes the paused ones
+        assert!(!cleared_hides(&mut cleared, "b", false, false));
+        assert!(!cleared_hides(&mut cleared, "c", true, true));
+        assert!(cleared_hides(&mut cleared, "b", false, true));
+        assert!(cleared_hides(&mut cleared, "b", false, false));
+    }
+
+    #[test]
+    fn a_player_that_ignores_pause_comes_back() {
+        let mut cleared = vec![Cleared { name: "a".into(), paused: false, at: Instant::now() - PAUSE_GRACE * 2 }];
+        assert!(!cleared_hides(&mut cleared, "a", true, false));
+    }
 }

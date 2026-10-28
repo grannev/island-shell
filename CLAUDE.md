@@ -165,7 +165,20 @@ Search is cancellable; replies carry session/request IDs and cannot reopen
 a dismissed sheet. Escape or an outside click closes modal sheets and releases
 keyboard focus. A temporary transparent layer surface catches outside clicks,
 with an input-region hole that follows the island's animated geometry; the
-closing click is consumed. Timer and Bluetooth icons are matched SVG assets
+closing click is consumed. It has exclusive zone 0, so it covers only the free
+area: wvkbd (on-screen keyboard, `~/.config/sway/scripts/osk.sh`) and the bar
+stay usable while a sheet is open; its offset comes from sway IPC
+(`sway::Query::usable`).
+Touchscreen: the island binds wl_touch (`src/touch.rs`), so sway no longer
+emulates clicks; one finger becomes pointer events. Sliders, the playhead,
+the timer ruler and notifications are grabbed at once; elsewhere a tap clicks,
+a 450 ms hold is the right button, a drag scrolls (axis-locked) with an iOS-like
+glide stepped from the frame callback, and a sideways swipe over the music
+changes tracks. A tap on the bars / editor chip reveals their panel; it stays
+(with the outside catcher) until a touch lands outside or the mouse returns.
+The player's × (also on the Control Center's music card, `island-shell
+player-clear`) pauses the player and hides it; the MPRIS watcher keeps it
+hidden until it plays again (`dbus::clear_player`). Timer and Bluetooth icons are matched SVG assets
 in `assets/waybar`, installed under `~/.local/share/island-shell/icons`.
 The compact equaliser on the right (and the wings' cover) is the only hover trigger for music;
 Neovim's chip on the left is the hover trigger for editor details. An already
