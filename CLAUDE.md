@@ -236,7 +236,11 @@ entrance timestamps are separate from last-update timestamps: key repeat only
 extends the hold. Cairo icon helpers start fresh paths so text positions never
 become stray stroked lines.
 
-Performance: vector symbols (`quick::icon`, `quick::glyph`) and discs
+Performance: the surface is the whole screen, so a full repaint and copy is
+a 10–17 ms frame: only a new size (or the first configure) resets the canvas
+(a configure that merely acknowledges a keyboard-focus change must not), and
+`WARM_BUFFERS` spare shm buffers are filled while idle so a buffer first used
+mid-animation never needs a whole-screen copy. Vector symbols (`quick::icon`, `quick::glyph`) and discs
 (`menu_style::well`/`disc`) are stamped from cached A8 masks
 (`menu_style::stamp`) at whole device pixels — an unfiltered mask composite;
 a fractional offset makes cairo filter and costs ~10x. Rotated or freely

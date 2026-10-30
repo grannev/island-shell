@@ -101,6 +101,8 @@ const VOLUME_POLL: Duration = Duration::from_secs(2);
 const POSITION_POLL: Duration = Duration::from_secs(1);
 /// shm buffers kept in flight (the compositor releases them a frame later)
 const MAX_BUFFERS: usize = 4;
+/// Buffers kept ready (filled while idle) for the compositor's pipelining.
+const WARM_BUFFERS: usize = 3;
 
 /// Animation time base: the compositor's presentation clock and, from its
 /// feedback, a prediction of when the frame being drawn will be shown.
@@ -1721,7 +1723,8 @@ impl App {
 
         self.viewport.set_source(0.0, 0.0, bw as f64, bh as f64);
         self.viewport.set_destination(self.width as i32, self.height as i32);
-        if self.island.is_animating(t) || self.renderer.motion.moving(t) || self.gesture.flinging() {
+        let animating = self.island.is_animating(t) || self.renderer.motion.moving(t) || self.gesture.flinging();
+        if animating {
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
             self.frame_pending = true;
         }
@@ -1730,6 +1733,23 @@ impl App {
         }
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
+        // a spare buffer, filled now while nothing moves: one first used in
+        // the middle of an animation (the compositor still holding the
+        // others) needs the whole screen copied into it, a 10–17 ms frame
+        if !animating && self.buffers.len() < WARM_BUFFERS {
+            if let Ok((spare, _)) = self.pool.create_buffer(bw, bh, stride, wl_shm::Format::Argb8888) {
+                if let Some(pixels) = self.pool.canvas(&spare) {
+                    let _ = canvas.with_data(|src| {
+                        let row = (bw * 4) as usize;
+                        let cairo_stride = canvas.stride() as usize;
+                        for y in 0..bh as usize {
+                            pixels[y * stride as usize..y * stride as usize + row].copy_from_slice(&src[y * cairo_stride..y * cairo_stride + row]);
+                        }
+                    });
+                    self.buffers.push((spare, Damage::default()));
+                }
+            }
+        }
         self.frame_stats.record(started.elapsed().as_secs_f64(), self.clock.refresh);
         // the screen is off: now lock (or sleep), and let it out once the
         // lock screen has gone
@@ -2038,14 +2058,21 @@ impl LayerShellHandler for App {
             return;
         }
         let (w, h) = configure.new_size;
+        let before = (self.width, self.height);
         if w != 0 {
             self.width = w;
         }
         if h != 0 {
             self.height = h;
         }
+        // a fresh surface or a new size starts from a clean canvas; the
+        // configures that only acknowledge a change (keyboard focus taken
+        // and given back by the launcher, say) keep what is drawn: a
+        // whole-screen repaint and copy costs a 10–17 ms frame
+        if !self.configured || (self.width, self.height) != before {
+            self.last_frame = None;
+        }
         self.configured = true;
-        self.last_frame = None;
         // draw straight away (the first frame, or a new size); a pending
         // frame callback will draw again, which is harmless
         self.draw(false);

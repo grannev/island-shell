@@ -139,12 +139,9 @@ impl Way {
     fn along(&self, side: Side, t: f64, w: f64, h: f64) -> Option<f64> {
         let (left, right) = ((self.cx - self.attach).max(0.0), (w - self.cx - self.attach).max(0.0));
         Some(self.lead + match side {
-            Side::Top => {
-                let dx = (t - self.cx).abs();
-                // under the island: it is the island's own outline there
-                if dx < self.attach { return None; }
-                dx - self.attach
-            }
+            // under the island the light is the island's own (the band is
+            // cut out there); it carries on to the fillets at full strength
+            Side::Top => ((t - self.cx).abs() - self.attach).max(0.0),
             Side::Left => left + t,
             Side::Right => right + t,
             Side::Bottom => (left + h + t).min(right + h + (w - t)),
@@ -496,9 +493,10 @@ fn paint(cr: &Context, w: f64, h: f64, r: f64, way: &Way, colour: Rgb, stops: &[
     if stops.iter().all(|s| s.1 <= 0.003) {
         return (false, false);
     }
-    let screen = paint_by(cr, w, h, r, colour, &|side, t| {
+    let hole = way.island.map(|_| (way.cx - way.attach, way.cx + way.attach));
+    let screen = paint_by_with(cr, w, h, r, colour, &|side, t| {
         way.along(side, t, w, h).map_or(0.0, |d| strength_at(stops, d))
-    });
+    }, hole);
     let island = way.island.is_some_and(|(b, br)| paint_island(cr, b, br, colour, &|d| strength_at(stops, d)));
     (screen, island)
 }
@@ -546,13 +544,38 @@ fn paint_island(cr: &Context, b: Rect, r: f64, colour: Rgb, strength: &dyn Fn(f6
     // the bottom, out from the middle both ways
     band(x0 + r, bottom, 1.0, 0.0, b.w - 2.0 * r, &|t| (x0 + r + t - cx).abs(),
         Rect { x: x0 + r, y: bottom, w: b.w - 2.0 * r, h: DEPTH }, cairo::Matrix::new(1.0, 0.0, 0.0, k, 0.0, -k * bottom));
-    // the sides, up from the lower corners to the edge
+    // the sides, up from the lower corners to the fillets where the island
+    // hangs from the edge (when it does)
     let side_len = bottom - r - top;
+    let fillet = if b.y <= 1.0 { ISLAND_FILLET.min(side_len) } else { 0.0 };
     let up = move |t: f64| straight + arc + (side_len - t);
-    band(x0, top, 0.0, 1.0, side_len, &up, Rect { x: x0 - DEPTH, y: top, w: DEPTH, h: side_len },
+    band(x0, top, 0.0, 1.0, side_len, &up, Rect { x: x0 - DEPTH, y: top + fillet, w: DEPTH, h: side_len - fillet },
         cairo::Matrix::new(0.0, -k, 1.0, 0.0, 0.0, k * x0));
-    band(x1, top, 0.0, 1.0, side_len, &up, Rect { x: x1, y: top, w: DEPTH, h: side_len },
+    band(x1, top, 0.0, 1.0, side_len, &up, Rect { x: x1, y: top + fillet, w: DEPTH, h: side_len - fillet },
         cairo::Matrix::new(0.0, k, 1.0, 0.0, 0.0, -k * x1));
+    // the fillets: the light follows their concave curve onto the edge,
+    // dying away from the arc towards its centre (as in the screen's
+    // corners)
+    // as bright as the edge's band where they meet (the band runs on at the
+    // strength it has there)
+    let s = strength(straight + arc + side_len + std::f64::consts::FRAC_PI_2 * fillet);
+    if fillet > 0.5 && s > 0.003 {
+        for (fcx, clip_x) in [(x0 - fillet, x0 - fillet), (x1 + fillet, x1)] {
+            let gradient = cairo::RadialGradient::new(fcx, top + fillet, 0.0, fcx, top + fillet, fillet);
+            let steps = 8;
+            for i in (0..=steps).rev() {
+                let d = fillet * i as f64 / steps as f64;
+                gradient.add_color_stop_rgba((fillet - d) / fillet, colour.0, colour.1, colour.2, (s * falloff(d)).clamp(0.0, 1.0));
+            }
+            cr.save().unwrap();
+            cr.rectangle(clip_x, top, fillet, fillet);
+            cr.clip();
+            let _ = cr.set_source(&gradient);
+            let _ = cr.paint();
+            cr.restore().unwrap();
+            lit = true;
+        }
+    }
     // the lower corners: dying away outwards from the arc
     let s = strength(straight + arc / 2.0);
     if r > 0.5 && s > 0.003 {
@@ -582,6 +605,12 @@ fn paint_island(cr: &Context, b: Rect, r: f64, colour: Rgb, strength: &dyn Fn(f6
 /// edge is one composite: a gradient along it for the strength, through a
 /// precomputed falloff into the screen. Returns whether anything was lit.
 fn paint_by(cr: &Context, w: f64, h: f64, r: f64, colour: Rgb, strength: &dyn Fn(Side, f64) -> f64) -> bool {
+    paint_by_with(cr, w, h, r, colour, strength, None)
+}
+
+/// `paint_by`, with the top edge's band cut out between `hole` (the island
+/// and its fillets light their own outline there).
+fn paint_by_with(cr: &Context, w: f64, h: f64, r: f64, colour: Rgb, strength: &dyn Fn(Side, f64) -> f64, hole: Option<(f64, f64)>) -> bool {
     let falloff_mask = FALLOFF.with(|f| f.clone());
     let k = FALLOFF_N as f64 / DEPTH;
     // each edge: where it runs (start, direction, length), and how its
@@ -621,6 +650,10 @@ fn paint_by(cr: &Context, w: f64, h: f64, r: f64, colour: Rgb, strength: &dyn Fn
         let (bx, by) = (x0 + dx * c0 - dy * if x0 > 0.0 { DEPTH } else { 0.0 }, y0 + dy * c0 - dx * if y0 > 0.0 { DEPTH } else { 0.0 });
         let (bw, bh) = if dx > 0.0 { (c1 - c0, DEPTH) } else { (DEPTH, c1 - c0) };
         cr.rectangle(bx, by, bw, bh);
+        if let (Side::Top, Some((a, b))) = (side, hole) {
+            cr.set_fill_rule(cairo::FillRule::EvenOdd);
+            cr.rectangle(a, 0.0, b - a, DEPTH);
+        }
         cr.clip();
         let _ = cr.set_source(&gradient);
         let _ = cr.mask(&mask);
@@ -1226,7 +1259,7 @@ mod island_light_gallery {
     #[test]
     #[ignore = "writes target/gallery/edge-from-island.png"]
     fn from_island() {
-        let (w, h, scale) = (1504.0, 1002.0, 0.6);
+        let (w, h, scale) = (1504.0, 1002.0, std::env::var("EDGE_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6));
         let island = Rect { x: 542.0, y: 0.0, w: 420.0, h: 92.0 };
         let (fw, fh) = (w * scale, 200.0 * scale);
         let times = [0.05, 0.12, 0.2, 0.32, 0.5, 0.75];
