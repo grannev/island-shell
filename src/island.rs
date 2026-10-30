@@ -883,11 +883,8 @@ pub struct Island {
     edge: crate::edge::Edge,
     /// the screen switching off into the island (see `curtain`)
     curtain: crate::curtain::Curtain,
-    /// a volume / brightness level up the screen's side: how far shown,
-    /// its value, and which (true: volume, on the right)
-    level_shown: Spring,
-    level_value: Spring,
-    level_right: bool,
+    /// the volume / brightness level sliding out of the left edge
+    side_hud: crate::side_hud::SideHud,
     /// the battery is low and not charging: the bottom corners smoulder
     low_battery: bool,
     /// the top edge as a membrane (pulled by a tug, rippling)
@@ -1159,9 +1156,7 @@ impl Island {
             tug: None,
             edge: crate::edge::Edge::default(),
             curtain: crate::curtain::Curtain::default(),
-            level_shown: Spring::new(0.0, 0.35, 1.0),
-            level_value: Spring::new(0.0, 0.25, 1.0),
-            level_right: true,
+            side_hud: crate::side_hud::SideHud::default(),
             low_battery: false,
             membrane: crate::edge::Membrane::default(),
             focus_frame: Spring::new(0.0, 0.45, 0.8),
@@ -1257,7 +1252,7 @@ impl Island {
             || self.curtain.is_animating(now)
             || self.membrane.is_animating(now)
             || self.focus_frame.is_moving(now)
-            || self.level_shown.is_moving(now) || self.level_shown.value(now) > 0.005 && self.level_value.is_moving(now)
+            || self.side_hud.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -1490,6 +1485,7 @@ impl Island {
             changed = true;
         }
         if let Some(launcher) = &mut self.launcher { changed |= launcher.advance(now); }
+        changed |= self.side_hud.advance(now);
         if self.connections_open() {
             if let Some(panel) = &mut self.network_panel { changed |= panel.advance(now); }
         }
@@ -1647,6 +1643,9 @@ impl Island {
             if a.event.hold().is_finite() {
                 consider(a.updated_at + a.event.hold());
             }
+        }
+        if let Some(t) = self.side_hud.deadline() {
+            consider(t);
         }
         if let Some(timer) = &self.timer {
             if timer.running && timer.counts_up() {
@@ -2186,6 +2185,10 @@ impl Island {
                 self.sync(now);
                 return;
             }
+            // otherwise the level slides out of the screen's left edge, as
+            // on an iPhone; the island stays as it is
+            self.side_hud.show(*kind, *value, *muted, now);
+            return;
         }
         if self.auth.is_some() || self.launcher.is_some() || self.center.open {
             self.activity_queued = Some(event);
@@ -4947,29 +4950,6 @@ impl Island {
             comet: t.counts_up(),
         });
         self.edge.set_gauge(gauge);
-        // volume and brightness stand up the screen's sides as they change
-        let level = match self.visible_activity().map(|a| &a.event) {
-            Some(activity::Event::Slider { kind, value, muted }) if self.config.edge_light => {
-                Some((*kind == activity::SliderKind::Volume, if *muted { 0.0 } else { *value }))
-            }
-            _ => None,
-        };
-        if let Some((right, value)) = level {
-            if self.level_shown.value(now) < 0.01 || right != self.level_right {
-                // fresh (or the other side): it grows from nothing there
-                self.level_right = right;
-                self.level_value = Spring::new(0.0, 0.25, 1.0);
-            }
-            self.level_value.set(value, now);
-        }
-        self.level_shown.set(if level.is_some() { 1.0 } else { 0.0 }, now);
-        let warm = (1.0, 0.84, 0.42);
-        self.edge.set_level(Some(crate::edge::Level {
-            right: self.level_right,
-            value: self.level_value.value(now),
-            shown: self.level_shown.value(now).clamp(0.0, 1.0),
-            colour: if self.level_right { (0.95, 0.97, 1.0) } else { warm },
-        }));
         self.edge.set_ember(if self.low_battery && self.config.edge_light { 0.55 } else { 0.0 });
         // music: the bottom edge in the cover's colour, breathing with the bass
         let ambient = self.song.as_ref().filter(|s| s.playing() && self.config.ambilight).map(|song| {
@@ -4995,11 +4975,12 @@ impl Island {
 
     /// Marks in the frame beyond the screen, drawn over its corners: the
     /// microphone's orange light. Returns what they cover.
-    pub fn draw_frame_marks(&mut self, cr: &Context, w: f64, now: Time) -> Vec<Rect> {
+    pub fn draw_frame_marks(&mut self, cr: &Context, renderer: &Renderer, w: f64, h: f64, now: Time) -> Vec<Rect> {
         // the top edge: pulled down round a tugged island, rippling
         let (cx, attach, sag) = self.tug_top.unwrap_or((self.island_cx(now), 0.0, 0.0));
         let mut marks = self.membrane.draw(cr, w, self.config.screen_corners, cx, attach, sag, now);
         marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
+        marks.extend(self.side_hud.draw(cr, renderer, h, now));
         marks
     }
 
@@ -6387,7 +6368,7 @@ mod tests {
     }
 
     #[test]
-    fn rapid_osd_updates_keep_the_entrance_and_extend_the_hold() {
+    fn level_changes_slide_out_at_the_side_and_leave_the_island_alone() {
         let mut island = Island::new(Config::default());
         for i in 0..60 {
             let time = 10.0 + i as f64 * 0.05;
@@ -6397,16 +6378,14 @@ mod tests {
                 muted: false,
             }, time);
             island.advance(time);
-            let current = island.activity.as_ref().unwrap();
-            assert_eq!(current.since, 10.0, "key repeat restarted the entrance");
-            assert_eq!(current.updated_at, time);
-            assert_eq!(island.pill.target(), 1.0);
+            assert!(island.activity.is_none(), "no pill in the island");
+            assert_eq!(island.pill.target(), 0.0);
+            assert_eq!(island.deadline(time), Some(time + crate::side_hud::HOLD), "each change extends the stay");
         }
-        island.advance(14.0);
-        assert!(island.activity.is_some());
+        assert!(island.is_animating(13.0));
         island.advance(14.5);
-        assert!(island.activity.is_none());
-        assert!(island.activity_retiring.is_some(), "keep content during the closing animation");
+        assert!(island.deadline(14.5).is_none());
+        assert!(!island.is_animating(17.0));
     }
 
     #[test]
@@ -6967,7 +6946,7 @@ mod tug_membrane_look {
             cr.set_source_rgb(0.15, 0.32, 0.38);
             cr.paint().unwrap();
             island.draw(&cr, &renderer, 200.0, t + 0.1);
-            island.draw_frame_marks(&cr, 400.0, t + 0.1);
+            island.draw_frame_marks(&cr, &renderer, 400.0, 200.0, t + 0.1);
             cr.restore().unwrap();
             island.tug_release(t + 0.1);
             for _ in 0..120 { t += 1.0 / 60.0; island.advance(t); }

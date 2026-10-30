@@ -93,17 +93,6 @@ const GAUGE_HEAD_LEN: f64 = 48.0;
 /// A comet's tail, as a share of the way round.
 const COMET_TAIL: f64 = 0.22;
 
-/// A volume or brightness level standing up one side of the screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Level {
-    /// the right edge (volume), else the left (brightness)
-    pub right: bool,
-    pub value: f64,
-    /// how far it is shown, 0..1
-    pub shown: f64,
-    pub colour: Rgb,
-}
-
 /// The island's fillets where it hangs from the screen's edge.
 const ISLAND_FILLET: f64 = 14.0;
 
@@ -155,7 +144,6 @@ pub struct Edge {
     /// the island as last drawn: the light comes out of it
     island: Option<(Rect, f64)>,
     gauge: Option<Gauge>,
-    level: Option<Level>,
     /// the bottom corners smouldering red (low battery), how strongly
     ember: f64,
     /// the frame grown this much thicker (Focus / Do Not Disturb), and the
@@ -211,11 +199,6 @@ impl Edge {
         self.gauge = gauge;
     }
 
-    /// A level up one side (still unless the island's springs move it).
-    pub fn set_level(&mut self, level: Option<Level>) {
-        self.level = level.filter(|l| l.shown > 0.005);
-    }
-
     /// Light the bottom edge in the cover's colour (None: dark).
     pub fn set_ambient(&mut self, ambient: Option<(Rgb, f64)>) {
         self.ambient = ambient.filter(|a| a.1 > 0.005);
@@ -245,7 +228,7 @@ impl Edge {
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
         }
-        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() && self.level.is_none()
+        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none()
             && self.ember <= 0.0 && self.border.0 <= 0.05 && self.ambient.is_none() {
             return Vec::new();
         }
@@ -278,17 +261,6 @@ impl Edge {
         }
         if let Some(g) = self.gauge {
             lit |= paint_gauge(cr, w, h, r, cx, &g);
-        }
-        if let Some(l) = self.level {
-            let top = h * (1.0 - l.value.clamp(0.0, 1.0));
-            lit |= paint_by(cr, w, h, r, l.colour, &|side, t| {
-                if side != if l.right { Side::Right } else { Side::Left } || t < top - STEP {
-                    return 0.0;
-                }
-                // a line up from the bottom, brightest at its top
-                let tip = (1.0 - (t - top).max(0.0) / GAUGE_HEAD_LEN).max(0.0);
-                l.shown * (GAUGE_LINE + GAUGE_HEAD * tip)
-            });
         }
         for p in &self.pulses {
             if p.wave == Wave::Rise {
@@ -877,14 +849,8 @@ mod tests {
     }
 
     #[test]
-    fn levels_stand_up_their_side_and_embers_stay_in_the_bottom_corners() {
+    fn embers_stay_in_the_bottom_corners() {
         let mut edge = Edge::default();
-        edge.set_level(Some(Level { right: true, value: 0.5, shown: 1.0, colour: (1.0, 1.0, 1.0) }));
-        let (mut s, _) = render(&mut edge, 0.0);
-        assert!(alpha(&mut s, 599, 350) > 20, "the lower half of the right edge");
-        assert_eq!(alpha(&mut s, 599, 100), 0);
-        assert_eq!(alpha(&mut s, 0, 350), 0, "nothing on the left");
-        edge.set_level(None);
         edge.set_ember(0.6);
         let (mut s, _) = render(&mut edge, 0.0);
         assert!(alpha(&mut s, 2, 398) > 20 && alpha(&mut s, 598, 398) > 20);

@@ -39,6 +39,7 @@ mod player;
 mod quick;
 mod recorder;
 mod notify_kinds;
+mod side_hud;
 mod sway;
 mod sound;
 mod tasks;

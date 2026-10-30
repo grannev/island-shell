@@ -729,7 +729,7 @@ fn draw_two_lines_in(
     pangocairo::functions::show_layout(cr, &detail);
 }
 
-fn draw_osd_symbol(
+pub fn draw_osd_symbol(
     cr: &Context,
     renderer: &Renderer,
     kind: &SliderKind,

@@ -47,8 +47,9 @@ Status: [ ] to do, [x] done.
       open /dev/video* means scanning /proc and costs idle CPU.
 
 ## Stage 5 — levels and power (done)
-- [x] Volume / brightness: a thin level stands up the screen's side while
-      the level pill shows (volume right, brightness left, warm).
+- [x] Volume / brightness: replaced (2026-10-31) by `src/side_hud.rs`: the
+      island's level pill turned on its side, a black drop of the frame
+      hanging from the left edge half way up the upper half; no edge light.
 - [x] Charging: green "liquid" rises from the bottom corners and drains.
 - [x] Low battery: the bottom corners smoulder red until the charger is
       plugged in (a still glow: no frames of its own).

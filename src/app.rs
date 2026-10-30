@@ -1627,7 +1627,7 @@ impl App {
             self.bezel_drawn = Some(corners);
             // marks in the frame (the microphone's light) go over its
             // corners; wiped with the edges next frame, so they never stack
-            let marks = self.island.draw_frame_marks(&cr, w, t);
+            let marks = self.island.draw_frame_marks(&cr, &self.renderer, w, h, t);
             for m in &marks {
                 changed.add(*m);
             }

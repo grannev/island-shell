@@ -190,8 +190,11 @@ frame flashes when it runs out. Recording's 3-2-1 flashes the frame red
 (scheduled waves, cancelled with the countdown; nothing stays lit while
 wf-recorder films the overlay); the microphone in use is an orange LED in
 the frame's top-right corner (`edge::mic_led`, drawn after the bezel).
-Volume / brightness levels stand up the right / left edge while their pill
-shows; plugging in rises green from the bottom corners; a low battery (until
+Volume / brightness changes no longer open the island: `src/side_hud.rs`
+draws the old level pill turned on its side, a black drop of the frame
+hanging from the left edge (concave fillets) half way up the upper half,
+symbol / vertical slider / percentage, held 1.45 s after the last change
+(with the Control Center open its own sliders show it); plugging in rises green from the bottom corners; a low battery (until
 the next Charging event) leaves the bottom corners glowing red. The top edge
 is a membrane (`edge::Membrane`, drawn with the frame marks, over the
 island): a tug pulls it down round the island, letting go or hiding the
