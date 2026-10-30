@@ -294,6 +294,8 @@ pub struct Config {
     /// island's black runs on past the screen's edges and rounds them off
     /// like the lid around them.
     pub screen_corners: f64,
+    /// Light along the screen's edges for notifications and Touch ID.
+    pub edge_light: bool,
 }
 
 /// The X1 Titanium's lid corners, measured off a photo: ~55 photo px where
@@ -320,15 +322,16 @@ impl Default for Config {
             compact: Compact::ALL,
             timer_sound: true,
             screen_corners: SCREEN_CORNERS,
+            edge_light: true,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 15] = [
+    pub const KEYS: [&'static str; 16] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
         "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact", "timer_sound",
-        "screen_corners",
+        "screen_corners", "edge_light",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -375,6 +378,7 @@ impl Config {
             "compact" => self.compact = Compact::parse(value.trim_matches('"'))?,
             "timer_sound" => self.timer_sound = number()? != 0.0,
             "screen_corners" => self.screen_corners = number()?.clamp(0.0, 80.0),
+            "edge_light" => self.edge_light = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -385,10 +389,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={} edge_light={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
-            self.compact.describe(), self.timer_sound as u8, self.screen_corners,
+            self.compact.describe(), self.timer_sound as u8, self.screen_corners, self.edge_light as u8,
         )
     }
 
@@ -861,6 +865,8 @@ pub struct Island {
     /// The closed island in the hand (see `tug_press`), and the springs
     /// that bring it back once let go.
     tug: Option<Tug>,
+    /// light along the screen's edges (see `edge`)
+    edge: crate::edge::Edge,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1109,6 +1115,7 @@ impl Island {
             chip_w: 0.0,
             floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
             tug: None,
+            edge: crate::edge::Edge::default(),
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -1194,6 +1201,7 @@ impl Island {
             || self.clock_chip.is_moving(now)
             || self.floats.is_moving(now)
             || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
+            || self.edge.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -2038,6 +2046,16 @@ impl Island {
             self.roll.set(1.0, now);
         }
         self.notice_progress = Spring::new(note.progress.unwrap_or(0.0), 0.35, 1.0);
+        // its colour runs out of the island along the edge; a critical
+        // one goes round the whole screen
+        if self.config.edge_light {
+            let (wave, kind) = if note.critical {
+                (crate::edge::Wave::Around, crate::notify::AppKind::Critical)
+            } else {
+                (crate::edge::Wave::Top, note.kind)
+            };
+            self.edge.pulse(wave, icons::accent(kind), now);
+        }
         self.notice = Some(Notice { note, since: now });
         self.notice_hovered = None;
         for spring in &mut self.notice_action_hover { spring.set(0.0, now); }
@@ -2772,6 +2790,11 @@ impl Island {
             Some(true) => self.auth = Some(Auth::Ok(now)),
             Some(false) => self.auth = Some(Auth::Fail(now)),
             None => return,
+        }
+        if self.config.edge_light {
+            use crate::edge::{Wave, FAILURE_RED, SUCCESS_GREEN};
+            let (wave, colour) = if result == Some(true) { (Wave::Flash, SUCCESS_GREEN) } else { (Wave::Shudder, FAILURE_RED) };
+            self.edge.pulse(wave, colour, now);
         }
         self.sync(now);
     }
@@ -4786,6 +4809,17 @@ impl Island {
         take(self.editor_panel.target(), editor::PANEL_W, self.editor_height());
         take(self.panel.target(), launcher::PANEL_W, launcher::PANEL_H);
         size
+    }
+
+    /// Light along the screen's edges, on an output `w`×`h` with the
+    /// island's surface centred on `cx`; painted under the island. Returns
+    /// the strips it painted.
+    pub fn draw_edges(&mut self, cr: &Context, w: f64, h: f64, cx: f64, now: Time) -> Vec<Rect> {
+        // Touch ID breathes round the screen while it waits for a finger
+        let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
+        self.edge.breathe(waiting.then_some(crate::edge::TOUCH_ID_BLUE), now);
+        let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
+        self.edge.draw(cr, w, h, cx, now)
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at

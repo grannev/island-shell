@@ -12,6 +12,7 @@ mod activity;
 mod art;
 mod ctl;
 mod dbus;
+mod edge;
 mod editor;
 mod editor_output;
 mod eq;

@@ -173,7 +173,14 @@ The island's surface covers the whole output (input only over the box): the
 island is one drop of a black frame beyond the screen's edges, of which only
 the corners show (`src/bezel.rs`, config `screen_corners`, 16 px measured off
 the lid), painted once and repainted only when a wipe touches them. Future
-whole-screen effects belong on this surface.
+whole-screen effects belong on this surface; their staged plan is
+`docs/frame-effects.md`. Light along the edges (`src/edge.rs`, config
+`edge_light`): a notification's colour runs from the island along the top, a
+critical one goes round, Touch ID breathes blue / flashes green / shudders
+red. Each edge is one composite (a gradient along it through a precomputed
+falloff mask, only the lit stretch): ~2 ms a frame, never full outline strokes
+(those cost 40–80 ms). Damage is a few rectangles (`app::Damage`), so edge
+strips never turn into a whole-screen copy.
 Touchscreen: the island binds wl_touch (`src/touch.rs`), so sway no longer
 emulates clicks; one finger becomes pointer events. Sliders, the playhead,
 the timer ruler and notifications are grabbed at once; elsewhere a tap clicks,

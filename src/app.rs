@@ -202,6 +202,45 @@ impl FrameClock {
 
 /// A single transparent pixel stretched over the output. Its input region
 /// excludes the island; it exists only while a modal menu is open.
+/// Where a frame changed: a few rectangles (the island, thin strips along
+/// the screen's edges) rather than their bounding box, which would be the
+/// whole screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Damage(Vec<Rect>);
+
+impl Damage {
+    fn add(&mut self, r: Rect) {
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        // merge with a neighbour when that costs little extra area
+        let area = |r: &Rect| r.w * r.h;
+        if let Some(i) = self.0.iter().position(|o| area(&o.union(r)) <= 1.25 * (area(o) + area(&r))) {
+            let merged = self.0.remove(i).union(r);
+            return self.add(merged);
+        }
+        self.0.push(r);
+        if self.0.len() > 8 {
+            let all = self.0.drain(..).reduce(Rect::union).expect("rects");
+            self.0.push(all);
+        }
+    }
+
+    fn extend(&mut self, other: &Damage) {
+        for r in &other.0 {
+            self.add(*r);
+        }
+    }
+
+    fn of(rects: impl IntoIterator<Item = Rect>) -> Damage {
+        let mut d = Damage::default();
+        for r in rects {
+            d.add(r);
+        }
+        d
+    }
+}
+
 struct DismissSurface {
     layer: LayerSurface,
     viewport: WpViewport,
@@ -299,11 +338,13 @@ pub struct App {
     last_frame: Option<Frame>,
     /// the screen-corner radius the canvas holds (None: not painted yet)
     bezel_drawn: Option<f64>,
+    /// where the last frame's light along the edges was painted
+    last_edges: Vec<Rect>,
     /// the whole picture, always up to date
     canvas: Option<cairo::ImageSurface>,
     /// shm buffers, reused once the compositor releases them; each remembers
     /// where its content lags behind the canvas
-    buffers: Vec<(Buffer, Option<Rect>)>,
+    buffers: Vec<(Buffer, Damage)>,
     clock: FrameClock,
     /// the presentation time of the last frame we drew
     drawn_for: Option<Time>,
@@ -447,6 +488,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         pointer_at: (0.0, 0.0),
         last_frame: None,
         bezel_drawn: None,
+        last_edges: Vec::new(),
         canvas: None,
         buffers: Vec::new(),
         clock: FrameClock::new(),
@@ -1524,37 +1566,39 @@ impl App {
             let cr = cairo::Context::new(&canvas).expect("cairo context");
             cr.scale(self.scale, self.scale);
             // wipe where the previous frame painted (the rest is still clear)
+            let full = self.last_frame.is_none();
             let stale = match self.last_frame {
-                None => Some(whole),
-                Some(prev) => prev.bounds,
+                None => Damage::of([whole]),
+                Some(prev) => Damage::of(prev.bounds.into_iter().chain(self.last_edges.iter().copied())),
             };
-            if let Some(r) = stale {
-                cr.set_operator(cairo::Operator::Clear);
+            cr.set_operator(cairo::Operator::Clear);
+            for r in &stale.0 {
                 cr.rectangle(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0);
-                let _ = cr.fill();
-                cr.set_operator(cairo::Operator::Over);
             }
+            let _ = cr.fill();
+            cr.set_operator(cairo::Operator::Over);
             let t_paint = std::time::Instant::now();
-            let frame = self.island.draw(&cr, &self.renderer, self.width as f64 / 2.0, t);
+            let (w, h) = (self.width as f64, self.height as f64);
+            // light along the edges runs under the island
+            let edges = self.island.draw_edges(&cr, w, h, w / 2.0, t);
+            let frame = self.island.draw(&cr, &self.renderer, w / 2.0, t);
             if self.clock.debug {
                 eprintln!("paint: {:.0} us", t_paint.elapsed().as_secs_f64() * 1e6);
             }
-            let mut changed = match (stale, frame.bounds) {
-                (Some(a), Some(b)) => Some(a.union(b)),
-                (a, b) => a.or(b),
-            };
+            let mut changed = stale;
+            changed.extend(&Damage::of(frame.bounds.into_iter().chain(edges.iter().copied())));
+            self.last_edges = edges;
             // the frame beyond the screen: painted once, and again only if
             // something was wiped or drawn where it stands
-            let (w, h) = (self.width as f64, self.height as f64);
             let squares = crate::bezel::corners(w, h, corners);
             let touched = |c: &Rect| squares.iter().any(|s| {
                 c.x - 1.0 < s.x + s.w && s.x < c.x + c.w + 1.0 && c.y - 1.0 < s.y + s.h && s.y < c.y + c.h + 1.0
             });
-            if stale == Some(whole) || self.bezel_drawn != Some(corners) || changed.as_ref().is_some_and(touched) {
+            if full || self.bezel_drawn != Some(corners) || changed.0.iter().any(touched) {
                 crate::bezel::paint(&cr, w, h, corners);
                 self.bezel_drawn = Some(corners);
                 for s in squares {
-                    changed = Some(changed.map_or(s, |c| c.union(s)));
+                    changed.add(s);
                 }
             }
             (frame, changed)
@@ -1564,10 +1608,7 @@ impl App {
 
         // every buffer now lags behind the canvas in `changed` too
         for (_, lag) in &mut self.buffers {
-            *lag = match (*lag, changed) {
-                (Some(a), Some(b)) => Some(a.union(b)),
-                (a, b) => a.or(b),
-            };
+            lag.extend(&changed);
         }
         // a free buffer (released by the compositor), or a new one — but
         // never more than a small pool: if the compositor is holding them
@@ -1576,7 +1617,7 @@ impl App {
             Some(i) => i,
             None if self.buffers.len() < MAX_BUFFERS => {
                 let (buffer, _) = self.pool.create_buffer(bw, bh, stride, wl_shm::Format::Argb8888).expect("shm buffer");
-                self.buffers.push((buffer, Some(whole)));
+                self.buffers.push((buffer, Damage::of([whole])));
                 self.buffers.len() - 1
             }
             None => {
@@ -1591,34 +1632,33 @@ impl App {
                 return;
             }
         };
-        let lag = self.buffers[idx].1.take();
-        let damage = lag.map(|d| {
+        let lag = std::mem::take(&mut self.buffers[idx].1);
+        let damage: Vec<(usize, usize, usize, usize)> = lag.0.iter().map(|d| {
             let s = self.scale;
             let x0 = ((d.x - 1.0) * s).floor().max(0.0) as usize;
             let y0 = ((d.y - 1.0) * s).floor().max(0.0) as usize;
-            let x1 = (((d.x + d.w + 1.0) * s).ceil() as usize).min(bw as usize);
-            let y1 = (((d.y + d.h + 1.0) * s).ceil() as usize).min(bh as usize);
+            let x1 = (((d.x + d.w + 1.0) * s).ceil().max(0.0) as usize).min(bw as usize);
+            let y1 = (((d.y + d.h + 1.0) * s).ceil().max(0.0) as usize).min(bh as usize);
             (x0, y0, x1, y1)
-        });
-        if let Some((x0, y0, x1, y1)) = damage {
-            if x1 > x0 && y1 > y0 {
-                let shm_canvas = self.pool.canvas(&self.buffers[idx].0).expect("free buffer");
-                let cairo_stride = canvas.stride() as usize;
-                canvas
-                    .with_data(|src| {
+        }).filter(|(x0, y0, x1, y1)| x1 > x0 && y1 > y0).collect();
+        if !damage.is_empty() {
+            let shm_canvas = self.pool.canvas(&self.buffers[idx].0).expect("free buffer");
+            let cairo_stride = canvas.stride() as usize;
+            canvas
+                .with_data(|src| {
+                    for &(x0, y0, x1, y1) in &damage {
                         for y in y0..y1 {
                             let (a, b) = (y * cairo_stride + x0 * 4, y * cairo_stride + x1 * 4);
                             let (c, d) = (y * stride as usize + x0 * 4, y * stride as usize + x1 * 4);
                             shm_canvas[c..d].copy_from_slice(&src[a..b]);
                         }
-                    })
-                    .expect("cairo surface data");
-            }
+                    }
+                })
+                .expect("cairo surface data");
         }
         if self.clock.debug {
-            if let Some((x0, y0, x1, y1)) = damage {
-                eprintln!("copy: {:.0} us ({}x{})", t_copy.elapsed().as_secs_f64() * 1e6, x1 - x0, y1 - y0);
-            }
+            let px: usize = damage.iter().map(|(x0, y0, x1, y1)| (x1 - x0) * (y1 - y0)).sum();
+            eprintln!("copy: {:.0} us ({} rects, {} px)", t_copy.elapsed().as_secs_f64() * 1e6, damage.len(), px);
         }
         let buffer = &self.buffers[idx].0;
 
@@ -1644,7 +1684,7 @@ impl App {
             }
             self.layer.set_opaque_region(Some(region.wl_region()));
         }
-        if let Some((x0, y0, x1, y1)) = damage {
+        for &(x0, y0, x1, y1) in &damage {
             surface.damage_buffer(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32);
         }
         self.last_frame = Some(frame);
@@ -2895,6 +2935,19 @@ mod tests {
         assert!(island.accepts_quick_menu_click());
         assert!(island.toggle_launcher(12.0));
         assert!(!island.accepts_quick_menu_click());
+    }
+
+    #[test]
+    fn damage_keeps_edge_strips_apart_but_merges_neighbours() {
+        let (w, h) = (1504.0, 1002.0);
+        let mut d = Damage::of(crate::edge::strips(w, h));
+        assert_eq!(d.0.len(), 4, "four strips, not the whole screen");
+        d.add(Rect { x: 600.0, y: 0.0, w: 300.0, h: 40.0 });
+        assert_eq!(d.0.len(), 5);
+        // the island a frame later overlaps the old one: one rectangle
+        d.add(Rect { x: 602.0, y: 0.0, w: 300.0, h: 42.0 });
+        assert_eq!(d.0.len(), 5);
+        assert!(d.0.iter().all(|r| r.w * r.h < w * h / 2.0));
     }
 
     #[test]
