@@ -147,6 +147,9 @@ const PILL_LIGHT_DELAY: f64 = 0.25;
 /// How much thicker the frame is while Focus (Do Not Disturb) is on.
 const FOCUS_FRAME: f64 = 4.0;
 
+/// How far a downward tug pulls the frame's top edge down with it.
+const TUG_SAG: f64 = 0.22;
+
 /// How much of a sideways tug is a lean (the top lagging behind the
 /// bottom) rather than a slide along the edge.
 const TUG_LEAN: f64 = 0.4;
@@ -895,6 +898,9 @@ pub struct Island {
     surface_cx: f64,
     /// the box as last drawn, and its corner radius (None: above the edge)
     box_geom: Option<(Rect, f64)>,
+    /// a tugged island's top: its centre, how far either side its fillets
+    /// end, and how far the edge is pulled down there
+    tug_top: Option<(f64, f64, f64)>,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1161,6 +1167,7 @@ impl Island {
             focus_frame: Spring::new(0.0, 0.45, 0.8),
             surface_cx: 490.0,
             box_geom: None,
+            tug_top: None,
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -2940,6 +2947,7 @@ impl Island {
         let dy = -BOX_H * hide.x * (1.0 - p);
         if dy <= -(BOX_H + FILLET) && p <= 0.0 {
             self.box_geom = None;
+            self.tug_top = None;
             return Frame::default();
         }
         // in the hand (or wobbling back) the closed line gives a little:
@@ -3171,15 +3179,23 @@ impl Island {
             self.player_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
         }
 
+        self.tug_top = None;
         if tugged {
             // the top lags behind the bottom: a shear about the middle;
-            // the fillets draw out into a neck as it is pulled down
+            // the fillets draw out into a neck as it is pulled down, from
+            // the frame's edge as the pull has bent it (the membrane, drawn
+            // with the frame marks, runs level over the island and leaves
+            // the fillets' ends flat, so they meet without a corner)
             cr.save().unwrap();
             let mid = (edge + y1) / 2.0;
             let k = TUG_LEAN * tug_x / (y1 - edge).max(1.0);
+            let sag = if self.config.edge_light { TUG_SAG * tug_y.max(0.0) } else { 0.0 };
+            let top = edge + sag;
+            let fillet = FILLET + 0.45 * tug_y.max(0.0);
             cr.transform(cairo::Matrix::new(1.0, 0.0, k, 1.0, -k * mid, 0.0));
-            self.trace_notch_with(cr, x0 + thin, x1 - thin, edge, y1, r, FILLET + 0.45 * tug_y.max(0.0));
+            self.trace_notch_with(cr, x0 + thin, x1 - thin, top, y1, r, fillet);
             cr.restore().unwrap();
+            self.tug_top = Some(((x0 + x1) / 2.0 + k * (top - mid), (x1 - x0) / 2.0 - thin + fillet, sag));
         } else {
             self.trace_notch(cr, x0, x1, dy, y1, r);
         }
@@ -4981,11 +4997,8 @@ impl Island {
     /// microphone's orange light. Returns what they cover.
     pub fn draw_frame_marks(&mut self, cr: &Context, w: f64, now: Time) -> Vec<Rect> {
         // the top edge: pulled down round a tugged island, rippling
-        let (tug_x, tug_y) = self.tug_now(now);
-        let line = (1.0 - self.pill.state(now).x).clamp(0.0, 1.0);
-        let sag = if self.config.edge_light { 0.22 * tug_y.max(0.0) * line } else { 0.0 };
-        let cx = self.island_cx(now) + tug_x * line;
-        let mut marks = self.membrane.draw(cr, w, self.config.screen_corners, cx, sag, now);
+        let (cx, attach, sag) = self.tug_top.unwrap_or((self.island_cx(now), 0.0, 0.0));
+        let mut marks = self.membrane.draw(cr, w, self.config.screen_corners, cx, attach, sag, now);
         marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
         marks
     }
@@ -5438,6 +5451,8 @@ mod tests {
             title: "Says".into(), art_url: String::new(), track_id: "gallery".into(), length: 534.0,
         }
     }
+
+    pub(super) fn gallery_island_pub() -> Island { gallery_island() }
 
     fn gallery_island() -> Island {
         let mut island = Island::new(Config::default());
@@ -6923,3 +6938,41 @@ mod command_tests {
     }
 }
 
+
+#[cfg(test)]
+mod tug_membrane_look {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/tug-membrane.png"]
+    fn tug_membrane() {
+        let renderer = Renderer::new(3.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 1200, 300).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let mut island = tests::gallery_island_pub();
+        for (i, (dx, dy)) in [(0.0, 200.0), (160.0, 120.0)].into_iter().enumerate() {
+            let mut t = 10.0;
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 1200, 300).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            sc.scale(1.5, 1.5);
+            for _ in 0..40 { island.advance(t); island.draw(&sc, &renderer, 200.0, t); t += 1.0 / 60.0; }
+            let line = island.line_rect.unwrap();
+            let (x, y) = (line.x + line.w / 2.0, line.y + line.h / 2.0);
+            island.tug_press(x, y, t);
+            island.tug_to(x + dx, y + dy, t + 0.1);
+            cr.save().unwrap();
+            cr.translate(i as f64 * 600.0, 0.0);
+            cr.rectangle(0.0, 0.0, 600.0, 300.0);
+            cr.clip();
+            cr.scale(1.5, 1.5);
+            cr.set_source_rgb(0.15, 0.32, 0.38);
+            cr.paint().unwrap();
+            island.draw(&cr, &renderer, 200.0, t + 0.1);
+            island.draw_frame_marks(&cr, 400.0, t + 0.1);
+            cr.restore().unwrap();
+            island.tug_release(t + 0.1);
+            for _ in 0..120 { t += 1.0 / 60.0; island.advance(t); }
+        }
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/tug-membrane.png").unwrap()).unwrap();
+    }
+}

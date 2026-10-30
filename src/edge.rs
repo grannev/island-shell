@@ -1089,7 +1089,7 @@ const RIPPLE_LIFE: f64 = 1.1;
 const RIPPLE_HEIGHT: f64 = 9.0;
 const RIPPLE_WIDTH: f64 = 70.0;
 /// How wide the pulled-down membrane is round the island.
-const SAG_WIDTH: f64 = 240.0;
+const SAG_WIDTH: f64 = 170.0;
 /// Samples along the edge.
 const MEMBRANE_STEP: f64 = 6.0;
 
@@ -1137,13 +1137,17 @@ impl Membrane {
     /// Paint the membrane (black, over everything) for a screen `w` wide
     /// whose corners have `radius`: pulled down `sag` px round `cx`, plus the
     /// ripples. Returns what it covered.
-    pub fn draw(&mut self, cr: &Context, w: f64, radius: f64, cx: f64, sag: f64, now: Time) -> Vec<Rect> {
+    /// (`attach`: how far either side of `cx` the edge runs level, pulled
+    /// down by the full `sag`: the island's fillets end there.)
+    pub fn draw(&mut self, cr: &Context, w: f64, radius: f64, cx: f64, attach: f64, sag: f64, now: Time) -> Vec<Rect> {
         self.ripples.retain(|r| now - r.start < RIPPLE_LIFE);
         let mut covered = Vec::new();
         let n = (w / MEMBRANE_STEP).ceil() as usize;
         let ys: Vec<(f64, f64)> = (0..=n).map(|i| {
             let x = (i as f64 * MEMBRANE_STEP).min(w);
-            let pull = sag * (-((x - cx) / SAG_WIDTH).powi(2)).exp();
+            // level over the island, then easing back up with no kink
+            let out = ((x - cx).abs() - attach).max(0.0);
+            let pull = sag * (-(out / SAG_WIDTH).powi(2)).exp();
             (x, pull + self.ripples_at(x, now))
         }).collect();
         let deepest = ys.iter().map(|p| p.1).fold(0.0, f64::max);
@@ -1193,7 +1197,7 @@ mod membrane_tests {
         let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
         let covered = {
             let cr = Context::new(&surface).unwrap();
-            m.draw(&cr, 600.0, 16.0, 300.0, sag, now)
+            m.draw(&cr, 600.0, 16.0, 300.0, 0.0, sag, now)
         };
         let stride = surface.stride() as usize;
         (surface.data().unwrap()[y * stride + x * 4 + 3], covered)
