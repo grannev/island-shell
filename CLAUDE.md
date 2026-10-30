@@ -188,7 +188,8 @@ under them, onto the side edges) and the screen; distances along that loop,
 straight stretches as masked gradients and corners as radial ones, convex or
 concave. The membrane's ripples ride every lower edge hanging from the top
 (the island's, the drops') and the top edge between them, ducking round
-each turn, and die out at the screen's sides; pill waves wait
+each turn, and end by slamming into the screen's sides: the crest piles up,
+the corner there (a drop's fillet or the screen's) swells and shudders; pill waves wait
 `PILL_LIGHT_DELAY` for the pill to open): a notification's colour runs along the top, a
 critical one goes round, Touch ID breathes blue / flashes green / shudders
 red; a running timer is a line growing round the screen clockwise from the

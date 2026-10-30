@@ -21,7 +21,7 @@ use crate::island::{Font, Rect, Renderer};
 pub const HEIGHT: f64 = 32.0;
 /// Their free corner and the fillets where they leave an edge.
 const RADIUS: f64 = 14.0;
-const FILLET: f64 = 14.0;
+pub const FILLET: f64 = 14.0;
 /// Room inside a drop before its first item and after its last (the free
 /// end also clears the rounded corner).
 const LEAD: f64 = 4.0;

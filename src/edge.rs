@@ -878,6 +878,14 @@ const RIPPLE_WIDTH: f64 = 70.0;
 const SAG_WIDTH: f64 = 170.0;
 /// Samples along the edge.
 const MEMBRANE_STEP: f64 = 6.0;
+/// What bounces back off the screen's side, and how soon it is spent (px).
+const REBOUND: f64 = 0.55;
+const REBOUND_RUN: f64 = 70.0;
+/// How much a corner swells when a full crest hits it (px), from how soon
+/// before (s, the crest's shoulder arriving) and for how long.
+const IMPACT: f64 = 12.0;
+const IMPACT_LEAD: f64 = 0.04;
+const IMPACT_LIFE: f64 = 0.5;
 
 impl Membrane {
     /// Send ripples out from `cx` (0..1 strength), starting at `at`.
@@ -888,11 +896,13 @@ impl Membrane {
     }
 
     pub fn is_animating(&self, now: Time) -> bool {
-        self.ripples.iter().any(|r| now - r.start < RIPPLE_LIFE)
+        self.ripples.iter().any(|r| now - r.start < RIPPLE_LIFE + IMPACT_LIFE)
     }
 
-    /// How far the edge is pushed down at `x` by the ripples.
-    fn ripples_at(&self, x: f64, now: Time) -> f64 {
+    /// How far the edge is pushed down at `x` by the ripples on a screen `w`
+    /// wide. A crest runs into the screen's side as into a wall: it piles up
+    /// against it, and the little that bounces back dies within a stretch.
+    fn ripples_at(&self, x: f64, w: f64, now: Time) -> f64 {
         self.ripples.iter().map(|r| {
             let t = now - r.start;
             if !(0.0..RIPPLE_LIFE).contains(&t) {
@@ -902,21 +912,36 @@ impl Membrane {
             let front = RIPPLE_SPEED * t;
             // a leading crest and a smaller one after it, dying away
             let fade = (1.0 - t / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (d / 900.0).min(1.0));
-            let bump = |at: f64, k: f64| k * (-((d - at) / RIPPLE_WIDTH).powi(2)).exp();
-            r.strength * RIPPLE_HEIGHT * fade * (bump(front, 1.0) + bump(front - 2.6 * RIPPLE_WIDTH, 0.45))
+            let bump = |d: f64, at: f64, k: f64| k * (-((d - at) / RIPPLE_WIDTH).powi(2)).exp();
+            let crests = |d: f64| bump(d, front, 1.0) + bump(d, front - 2.6 * RIPPLE_WIDTH, 0.45);
+            // the wall on this side, and what has come back off it
+            let wall = if x < r.cx { r.cx } else { w - r.cx };
+            let back = 2.0 * wall - d;
+            let past = (front - wall).max(0.0);
+            let rebound = REBOUND * (-past / REBOUND_RUN).exp();
+            r.strength * RIPPLE_HEIGHT * fade * (crests(d) + rebound * crests(back))
         }).sum()
     }
 
-    /// How much a top corner's radius has grown: it quivers as a ripple
-    /// arrives at `corner_x`.
-    fn quiver(&self, corner_x: f64, now: Time) -> f64 {
+    /// How much the corner where the edge meets the screen's side `wall_x`
+    /// has swollen: a crest slams into it, it bulges and shudders, settling.
+    fn impact(&self, wall_x: f64, now: Time) -> f64 {
         self.ripples.iter().map(|r| {
-            let arrives = r.start + (corner_x - r.cx).abs() / RIPPLE_SPEED;
+            let wall = (wall_x - r.cx).abs();
+            let arrives = r.start + wall / RIPPLE_SPEED;
             let t = now - arrives;
-            if !(0.0..0.45).contains(&t) {
+            if !(-IMPACT_LEAD..IMPACT_LIFE).contains(&t) || arrives - r.start >= RIPPLE_LIFE {
                 return 0.0;
             }
-            r.strength * 3.5 * (-t / 0.14).exp() * (std::f64::consts::TAU * t / 0.11).sin().abs()
+            // as strong as the crest that hits
+            let age = arrives - r.start;
+            let fade = ((1.0 - age / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (wall / 900.0).min(1.0))).sqrt();
+            let swell = if t < 0.0 {
+                smooth(1.0 + t / IMPACT_LEAD)
+            } else {
+                (-t / 0.16).exp() * (0.7 + 0.3 * (std::f64::consts::TAU * t / 0.1).cos())
+            };
+            r.strength * fade * IMPACT * swell
         }).sum()
     }
 
@@ -928,18 +953,19 @@ impl Membrane {
     /// (`spans`: the black hanging lower along the top — the island, the
     /// bar's drops — as (from x, to x, its lower edge): the ripples run
     /// along those edges too, from one side of the screen to the other.
-    /// `corners`: the screen's top corners' radius on a side with no drop,
-    /// which quiver as a ripple ends there.)
+    /// `walls`: the corner where that edge meets each of the screen's sides
+    /// as (radius, smoothing) — the screen's corner, or a drop's fillet —
+    /// which a ripple runs into and ends against.)
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, cr: &Context, w: f64, spans: &[(f64, f64, f64)], corners: [Option<f64>; 2], cx: f64, attach: f64, sag: f64, now: Time) -> Vec<Rect> {
-        self.ripples.retain(|r| now - r.start < RIPPLE_LIFE);
+    pub fn draw(&mut self, cr: &Context, w: f64, spans: &[(f64, f64, f64)], walls: [(f64, f64); 2], cx: f64, attach: f64, sag: f64, now: Time) -> Vec<Rect> {
+        self.ripples.retain(|r| now - r.start < RIPPLE_LIFE + IMPACT_LIFE);
         let mut covered = Vec::new();
         let base_at = |x: f64| spans.iter().find(|(a, b, _)| x >= *a && x <= *b).map_or(0.0, |s| s.2);
         // where the edge turns (a span's side, rounded by its corners and
-        // fillets) the ripple ducks round it; at the screen's sides it ends
+        // fillets) the ripple ducks round it; the screen's sides it hits
         let turns: Vec<f64> = spans.iter().flat_map(|(a, b, _)| [*a, *b]).filter(|x| *x > 0.5 && *x < w - 0.5).collect();
         let fade = |x: f64| {
-            let near = turns.iter().map(|t| (x - t).abs()).fold(x.min(w - x), f64::min);
+            let near = turns.iter().map(|t| (x - t).abs()).fold(f64::INFINITY, f64::min);
             smooth((near - TURN_CLEAR) / TURN_FADE)
         };
         let n = (w / MEMBRANE_STEP).ceil() as usize;
@@ -949,7 +975,7 @@ impl Membrane {
             // the tug's pull: level over the island, easing back up
             let out = ((x - cx).abs() - attach).max(0.0);
             let pull = if base == 0.0 { sag * (-(out / SAG_WIDTH).powi(2)).exp() } else { 0.0 };
-            (x, base, pull + self.ripples_at(x, now) * fade(x))
+            (x, base, pull + self.ripples_at(x, w, now) * fade(x))
         }).collect();
         cr.save().unwrap();
         cr.set_source_rgb(0.0, 0.0, 0.0);
@@ -976,26 +1002,31 @@ impl Membrane {
             }
             start = end + 1;
         }
-        // a side with no drop: its top corner quivers as a ripple ends there
-        for ((corner_x, radius), sign) in [(0.0, corners[0]), (w, corners[1])].into_iter().zip([1.0, -1.0]) {
-            let Some(radius) = radius else { continue };
-            let grow = self.quiver(corner_x, now);
-            if grow < 0.05 {
+        // the corners at the screen's sides: a crest slams into each, which
+        // bulges and shudders as the ripple ends there
+        // (the corner rides down with the crest on it, so the two are one curve)
+        let ends = [points[0].2, points[points.len() - 1].2];
+        for (((wall_x, (radius, smoothing)), sign), depth) in [(0.0, walls[0]), (w, walls[1])].into_iter().zip([1.0, -1.0]).zip(ends) {
+            let grow = self.impact(wall_x, now);
+            if grow < 0.05 && depth < 0.15 {
                 continue;
             }
-            let r = radius + grow;
-            let (ax, ay) = (corner_x + sign * r, r);
-            cr.new_path();
-            cr.move_to(corner_x, 0.0);
-            cr.line_to(corner_x, ay);
-            if sign > 0.0 {
-                cr.arc(ax, ay, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-            } else {
-                cr.arc_negative(ax, ay, r, 0.0, -0.5 * std::f64::consts::PI);
-            }
-            cr.close_path();
+            let (r, y) = (radius + grow, base_at(wall_x) + depth);
+            let x = |dx: f64| wall_x + sign * dx;
+            // the corner's fillet grown to `r`, and the wall behind it, up to
+            // the edge at rest (whatever the crest's slope, no seam to it)
+            let (base, run) = (y - depth, 2.0 * (1.0 + smoothing) * r + 1.0);
+            crate::drop::trace(cr, &[
+                (x(run), y, 0.0),
+                (x(0.0), y, r),
+                (x(0.0), y + run, 0.0),
+                (x(-1.0), y + run, 0.0),
+                (x(-1.0), base, 0.0),
+                (x(run), base, 0.0),
+            ], smoothing);
             let _ = cr.fill();
-            covered.push(Rect { x: if sign > 0.0 { 0.0 } else { w - r - 1.0 }, y: 0.0, w: r + 1.0, h: r + 1.0 });
+            let reach = run + 1.0;
+            covered.push(Rect { x: if sign > 0.0 { 0.0 } else { w - reach }, y: y - depth - 1.0, w: reach, h: reach + depth + 1.0 });
         }
         cr.restore().unwrap();
         covered
@@ -1015,7 +1046,7 @@ mod membrane_tests {
         let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
         let covered = {
             let cr = Context::new(&surface).unwrap();
-            m.draw(&cr, 600.0, &[], [Some(16.0), Some(16.0)], 300.0, 0.0, sag, now)
+            m.draw(&cr, 600.0, &[], [(16.0, 0.0), (16.0, 0.0)], 300.0, 0.0, sag, now)
         };
         let stride = surface.stride() as usize;
         (surface.data().unwrap()[y * stride + x * 4 + 3], covered)
@@ -1041,7 +1072,7 @@ mod membrane_tests {
             let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
             {
                 let cr = Context::new(&surface).unwrap();
-                m.draw(&cr, 600.0, &spans, [None, None], 300.0, 0.0, 0.0, now);
+                m.draw(&cr, 600.0, &spans, [(14.0, 0.6), (14.0, 0.6)], 300.0, 0.0, 0.0, now);
             }
             let stride = surface.stride() as usize;
             surface.data().unwrap()[y * stride + x * 4 + 3]
@@ -1051,8 +1082,14 @@ mod membrane_tests {
         let t = (520.0 - 300.0) / RIPPLE_SPEED;
         assert_eq!(draw(&mut m, t, 520, 35), 255, "the crest rides along the drop's edge");
         assert_eq!(draw(&mut m, t, 520, 60), 0);
-        // and it ends at the screen's side: nothing past the last px
-        assert_eq!(draw(&mut m, (595.0 - 300.0) / RIPPLE_SPEED, 598, 36), 0, "it dies out at the edge");
+        // it runs right into the screen's side, piling up against it, and
+        // the drop's fillet there swells as it hits
+        let hit = (600.0 - 300.0) / RIPPLE_SPEED;
+        assert_eq!(draw(&mut m, hit, 597, 38), 255, "the crest reaches the side");
+        assert_eq!(draw(&mut m, hit + 0.03, 599, 42), 255, "the fillet bulges");
+        // and then it is over: nothing comes back across the drop
+        assert_eq!(draw(&mut m, hit + 0.25, 480, 34), 0, "spent against the wall");
+        assert_eq!(draw(&mut m, hit + 0.6, 597, 47), 0, "the corner settles");
     }
 
     #[test]
@@ -1064,9 +1101,11 @@ mod membrane_tests {
         assert!(alpha_after(&mut m, 0.0, 0.1, 430, 3).0 > 200);
         assert!(alpha_after(&mut m, 0.0, 0.1, 300, 3).0 < 100);
         // the corners: 300 px away, reached at ~0.23 s
-        let (_, covered) = alpha_after(&mut m, 0.0, 0.3, 0, 0);
-        assert!(covered.iter().any(|r| r.x == 0.0 && r.w > 16.0 && r.h > 16.0 && r.w < 30.0));
-        assert!(!m.is_animating(RIPPLE_LIFE + 0.01));
+        let (_, covered) = alpha_after(&mut m, 0.0, 0.25, 0, 0);
+        assert!(covered.iter().any(|r| r.x == 0.0 && r.w > 2.0 * 16.0 + 2.0));
+        // the screen's corner swells: black where its arc was open
+        assert_eq!(alpha_after(&mut m, 0.0, 0.25, 5, 5).0, 255);
+        assert!(!m.is_animating(RIPPLE_LIFE + IMPACT_LIFE + 0.01));
     }
 }
 
