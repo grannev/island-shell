@@ -573,6 +573,7 @@ at the beginning of a line or as a separate word), read at start;
     timer_sound = on      # the timer ruler's ticks and the alarm
     screen_corners = 16   # radius of the screen's rounded corners, px (0 = square)
     edge_light = on       # light along the screen's edges (notifications, Touch ID)
+    ambilight = off       # music lights the bottom edge in the cover's colour
 
 Without `clock` the closed island rests as a short black capsule (150 px), and
 a right click on any free part of it opens the calendar. Its activities then

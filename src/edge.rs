@@ -44,6 +44,10 @@ pub enum Wave {
     /// green rising from the bottom corners up the sides and draining
     /// away (the charger plugged in)
     Rise,
+    /// a streak of light along the top edge, to the right (the next
+    /// track) or the left (the previous one)
+    StreakRight,
+    StreakLeft,
 }
 
 impl Wave {
@@ -54,6 +58,7 @@ impl Wave {
             Wave::Flash => 0.75,
             Wave::Shudder => 0.6,
             Wave::Rise => 1.8,
+            Wave::StreakRight | Wave::StreakLeft => 0.7,
         }
     }
 }
@@ -109,6 +114,8 @@ pub struct Edge {
     /// the frame grown this much thicker (Focus / Do Not Disturb), and the
     /// screen's corner radius it rounds with
     border: (f64, f64),
+    /// music's light along the bottom edge: the cover's colour, how bright
+    ambient: Option<(Rgb, f64)>,
     /// a continuous wave (Touch ID waiting): its colour, since when, and
     /// when it began to fade out
     breath: Option<(Rgb, Time, Option<Time>)>,
@@ -157,6 +164,11 @@ impl Edge {
         self.level = level.filter(|l| l.shown > 0.005);
     }
 
+    /// Light the bottom edge in the cover's colour (None: dark).
+    pub fn set_ambient(&mut self, ambient: Option<(Rgb, f64)>) {
+        self.ambient = ambient.filter(|a| a.1 > 0.005);
+    }
+
     /// Thicken the frame by `width` (0 = as usual), concentric with the
     /// screen's corners of `radius`.
     pub fn set_border(&mut self, width: f64, radius: f64) {
@@ -181,7 +193,7 @@ impl Edge {
             self.breath = None;
         }
         if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() && self.level.is_none()
-            && self.ember <= 0.0 && self.border.0 <= 0.05 {
+            && self.ember <= 0.0 && self.border.0 <= 0.05 && self.ambient.is_none() {
             return Vec::new();
         }
         let far = (w / 2.0 + cx.abs().min(w)).hypot(h) + SOFT;
@@ -196,6 +208,15 @@ impl Edge {
                     Side::Top => return 0.0,
                 };
                 if d > 4.0 * EMBER_REACH { 0.0 } else { ember * (-d / EMBER_REACH).exp() }
+            });
+        }
+        if let Some((colour, strength)) = self.ambient {
+            lit |= paint_by(cr, w, h, colour, &|side, t| match side {
+                // brightest under the middle of the screen, as if lit from
+                // behind it, and up the lower part of the sides
+                Side::Bottom => strength * (0.55 + 0.45 * (std::f64::consts::PI * t / w).sin()),
+                Side::Left | Side::Right => strength * 0.55 * ((t - 0.6 * h) / (0.4 * h)).clamp(0.0, 1.0),
+                Side::Top => 0.0,
             });
         }
         if let Some(g) = self.gauge {
@@ -238,6 +259,21 @@ impl Edge {
                 Wave::Flash => vec![(0.0, rise * (1.0 - smooth((k - 0.15) / 0.85))), (far, rise * (1.0 - smooth((k - 0.15) / 0.85)))],
                 // drawn above, from the bottom corners
                 Wave::Rise => continue,
+                Wave::StreakRight | Wave::StreakLeft => {
+                    let dir = if p.wave == Wave::StreakRight { 1.0 } else { -1.0 };
+                    let at = cx + dir * (w / 2.0 + 120.0) * ease_out(k);
+                    let alpha = (1.0 - k).powf(1.3) * rise;
+                    lit |= paint_by(cr, w, h, p.colour, &|side, t| {
+                        if side != Side::Top { return 0.0; }
+                        // a head and a tail behind it, which never reaches
+                        // back past the island
+                        if (t - cx) * dir < 0.0 { return 0.0; }
+                        let d = (t - at) * dir;
+                        let shape = if d > 0.0 { (-(d / 60.0).powi(2)).exp() } else { (d / 150.0).exp() };
+                        alpha * shape
+                    });
+                    continue;
+                }
                 Wave::Shudder => {
                     // out and back, twice, dying away
                     let reach = 360.0 * (std::f64::consts::PI * k * 2.0).sin().abs() * (1.0 - k);
@@ -621,6 +657,18 @@ mod tests {
         assert_eq!(alpha(&mut s, 300, 399), 0);
         assert_eq!(alpha(&mut s, 0, 100), 0);
         assert!(!edge.is_animating(0.0), "a still glow costs no frames");
+    }
+
+    #[test]
+    fn a_next_track_streaks_right_along_the_top() {
+        let mut edge = Edge::default();
+        edge.pulse(Wave::StreakRight, (1.0, 1.0, 1.0), 0.0);
+        let (mut s, _) = render(&mut edge, 0.15);
+        let right = alpha(&mut s, 450, 1);
+        assert!(right > 20 && alpha(&mut s, 150, 1) < right / 4, "{right}");
+        edge.set_ambient(Some(((1.0, 0.2, 0.2), 0.5)));
+        let (mut s, _) = render(&mut edge, 1.0);
+        assert!(alpha(&mut s, 300, 399) > 20 && alpha(&mut s, 300, 0) == 0);
     }
 
     #[test]

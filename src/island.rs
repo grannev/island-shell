@@ -299,6 +299,9 @@ pub struct Config {
     pub screen_corners: f64,
     /// Light along the screen's edges for notifications and Touch ID.
     pub edge_light: bool,
+    /// Music lights the bottom edge in the cover's colours, with the bass
+    /// (it redraws the edges while music plays).
+    pub ambilight: bool,
 }
 
 /// The X1 Titanium's lid corners, measured off a photo: ~55 photo px where
@@ -326,15 +329,16 @@ impl Default for Config {
             timer_sound: true,
             screen_corners: SCREEN_CORNERS,
             edge_light: true,
+            ambilight: false,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 16] = [
+    pub const KEYS: [&'static str; 17] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
         "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact", "timer_sound",
-        "screen_corners", "edge_light",
+        "screen_corners", "edge_light", "ambilight",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -382,6 +386,7 @@ impl Config {
             "timer_sound" => self.timer_sound = number()? != 0.0,
             "screen_corners" => self.screen_corners = number()?.clamp(0.0, 80.0),
             "edge_light" => self.edge_light = number()? != 0.0,
+            "ambilight" => self.ambilight = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -392,10 +397,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={} edge_light={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={} edge_light={} ambilight={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
-            self.compact.describe(), self.timer_sound as u8, self.screen_corners, self.edge_light as u8,
+            self.compact.describe(), self.timer_sound as u8, self.screen_corners, self.edge_light as u8, self.ambilight as u8,
         )
     }
 
@@ -4851,9 +4856,9 @@ impl Island {
         let song = self.song.as_ref()?;
         self.pressed = Some((control, now));
         let command = match control {
-            player::Control::Previous => crate::dbus::PlayerCommand::Previous,
+            player::Control::Previous => { self.track_streak(false, now); crate::dbus::PlayerCommand::Previous }
             player::Control::PlayPause => crate::dbus::PlayerCommand::PlayPause,
-            player::Control::Next => crate::dbus::PlayerCommand::Next,
+            player::Control::Next => { self.track_streak(true, now); crate::dbus::PlayerCommand::Next }
             // the island's own business, see `clear_song`
             player::Control::Clear => return None,
             player::Control::Seek(fraction) => {
@@ -4935,6 +4940,13 @@ impl Island {
             colour: if self.level_right { (0.95, 0.97, 1.0) } else { warm },
         }));
         self.edge.set_ember(if self.low_battery && self.config.edge_light { 0.55 } else { 0.0 });
+        // music: the bottom edge in the cover's colour, breathing with the bass
+        let ambient = self.song.as_ref().filter(|s| s.playing() && self.config.ambilight).map(|song| {
+            let colour = self.art.colour(&song.now.art_url).unwrap_or(self.config.accent);
+            let bass = self.eq.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            (colour, 0.12 + 0.5 * bass)
+        });
+        self.edge.set_ambient(ambient);
         // Focus: the frame gathers the screen in a little
         self.focus_frame.set(if self.dnd && self.config.edge_light { 1.0 } else { 0.0 }, now);
         self.edge.set_border(FOCUS_FRAME * self.focus_frame.value(now).max(0.0), self.config.screen_corners);
@@ -4966,6 +4978,17 @@ impl Island {
     /// Where the island's centre is on the surface now (dodging moves it).
     fn island_cx(&self, now: Time) -> f64 {
         self.surface_cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x)
+    }
+
+    /// A track skipped from the island: a streak of the music's colour runs
+    /// along the top edge the way it went.
+    pub fn track_streak(&mut self, forward: bool, now: Time) {
+        if !self.config.edge_light || self.song.is_none() {
+            return;
+        }
+        let colour = self.song.as_ref().and_then(|s| self.art.colour(&s.now.art_url)).unwrap_or(self.config.accent);
+        let wave = if forward { crate::edge::Wave::StreakRight } else { crate::edge::Wave::StreakLeft };
+        self.edge.pulse(wave, colour, now);
     }
 
     /// Switch the screen off into the island (before locking or sleeping).

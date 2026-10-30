@@ -2699,10 +2699,14 @@ impl App {
         }
     }
 
-    fn player_control(&self, cmd: PlayerCommand) {
+    fn player_control(&mut self, cmd: PlayerCommand) {
         if self.island.accepts_player_clicks() {
             if let Some(song) = self.island.song() {
                 dbus::control(&song.now.bus_name, &song.now.track_id, cmd);
+            }
+            if matches!(cmd, PlayerCommand::Next | PlayerCommand::Previous) {
+                let now = self.frame_time();
+                self.island.track_streak(matches!(cmd, PlayerCommand::Next), now);
             }
         }
     }

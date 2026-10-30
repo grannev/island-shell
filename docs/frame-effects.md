@@ -68,8 +68,9 @@ Status: [ ] to do, [x] done.
       input region there, which would steal the corner clicks people throw
       the mouse at (waybar's first workspace button).
 
-## Stage 8 — music (optional, config)
-- [ ] Ambilight: a faint glow along the bottom edge in the cover's colours,
-      breathing with the bass.
-- [ ] Track change: a streak of light along the top edge in the swipe's
-      direction.
+## Stage 8 — music (done)
+- [x] Ambilight (config `ambilight`, off by default: it repaints the edges
+      while music plays): a faint glow along the bottom edge in the cover's
+      colour (`Art::colour`), breathing with the bass.
+- [x] Track change: a streak of light in the cover's colour along the top
+      edge, right for the next track, left for the previous one.

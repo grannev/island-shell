@@ -190,7 +190,9 @@ is a membrane (`edge::Membrane`, drawn with the frame marks, over the
 island): a tug pulls it down round the island, letting go or hiding the
 island sends ripples to the corners, whose radius quivers as they arrive.
 A screenshot blinks a rounded shutter in from every side
-(`Curtain::shutter`); Do Not Disturb thickens the frame by 4 px.
+(`Curtain::shutter`); Do Not Disturb thickens the frame by 4 px. Skipping a
+track streaks the cover's colour along the top edge; `ambilight` (off by
+default) lights the bottom edge with the cover's colour and the bass.
 Locking or sleeping from the island (Control
 Center, `island-shell lock|sleep`, mod+l) first switches the screen off into
 the island like an old TV (`src/curtain.rs`), then sends the request; the
