@@ -25,10 +25,16 @@ Status: [ ] to do, [x] done.
       the frame flashes. (A stopwatch is a comet going round once a minute;
       a paused timer's line dims; the line is still between the 1 Hz ticks.)
 
-## Stage 3 — screen off into the island
-- [ ] Lock / sleep from the island: the frame closes the screen into a
+## Stage 3 — screen off into the island (done: `src/curtain.rs`)
+- [x] Lock / sleep from the island: the frame closes the screen into a
       rounded rectangle that is drawn into the island (an old TV switching
-      off); waking, the island lets the screen out again.
+      off); waking, the island lets the screen out again. Triggers: the
+      Control Center's Lock / Sleep, `island-shell lock|sleep` (mod+l in
+      sway). The lock or suspend goes out once the screen is off; a thread
+      waits for hyprlock/swaylock to come and go (`dbus::watch_unlock`; a
+      locker that never shows within 6 s counts as gone). `island-shell
+      curtain` is a demo without locking, `island-shell wake` a way out.
+      Not yet: locks the island did not start (swayidle idle / before-sleep).
 
 ## Stage 4 — indicators
 - [ ] Screen recording: a thin red rim around the screen, tied to the red dot.

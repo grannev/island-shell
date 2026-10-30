@@ -179,7 +179,11 @@ whole-screen effects belong on this surface; their staged plan is
 critical one goes round, Touch ID breathes blue / flashes green / shudders
 red; a running timer is a line growing round the screen clockwise from the
 island (orange, green for Pomodoro breaks; a stopwatch is a comet), and the
-frame flashes when it runs out. Each edge is one composite (a gradient along it through a precomputed
+frame flashes when it runs out. Locking or sleeping from the island (Control
+Center, `island-shell lock|sleep`, mod+l) first switches the screen off into
+the island like an old TV (`src/curtain.rs`), then sends the request; the
+picture comes back out of the island when the locker exits
+(`dbus::watch_unlock`, 6 s fallback; `island-shell wake`). Each edge is one composite (a gradient along it through a precomputed
 falloff mask, only the lit stretch): ~2 ms a frame, never full outline strokes
 (those cost 40–80 ms). Damage is a few rectangles (`app::Damage`), so edge
 strips never turn into a whole-screen copy.

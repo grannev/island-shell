@@ -867,6 +867,8 @@ pub struct Island {
     tug: Option<Tug>,
     /// light along the screen's edges (see `edge`)
     edge: crate::edge::Edge,
+    /// the screen switching off into the island (see `curtain`)
+    curtain: crate::curtain::Curtain,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1124,6 +1126,7 @@ impl Island {
             floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
             tug: None,
             edge: crate::edge::Edge::default(),
+            curtain: crate::curtain::Curtain::default(),
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -1210,6 +1213,7 @@ impl Island {
             || self.floats.is_moving(now)
             || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
             || self.edge.is_animating(now)
+            || self.curtain.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -4839,7 +4843,29 @@ impl Island {
         });
         self.edge.set_gauge(gauge);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
-        self.edge.draw(cr, w, h, cx, now)
+        let mut painted = self.edge.draw(cr, w, h, cx, now);
+        // the screen closing into the island (or coming out of it): over
+        // the light, under the island
+        let island = self.line_rect.unwrap_or(Rect { x: cx - 75.0, y: 0.0, w: 150.0, h: BOX_H });
+        if let Some(r) = self.curtain.draw(cr, w, h, self.config.screen_corners, island, now) {
+            painted.push(r);
+        }
+        painted
+    }
+
+    /// Switch the screen off into the island (before locking or sleeping).
+    pub fn switch_off(&mut self, now: Time) {
+        self.curtain.close(now);
+    }
+
+    /// Let the screen out of the island again (unlocked, woken).
+    pub fn switch_on(&mut self, now: Time) {
+        self.curtain.open(now);
+    }
+
+    /// Has the screen gone all the way into the island?
+    pub fn switched_off(&self, now: Time) -> bool {
+        self.curtain.is_off(now)
     }
 
     /// The notch outline, traced counter-clockwise: the concave fillets at

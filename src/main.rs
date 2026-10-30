@@ -11,6 +11,7 @@ mod apps;
 mod activity;
 mod art;
 mod ctl;
+mod curtain;
 mod dbus;
 mod edge;
 mod editor;

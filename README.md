@@ -535,6 +535,9 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell type <text> | key <name>       # drive the launcher from a script
     island-shell scrub <0..1> | scrub end       # drag the playhead from a script
     island-shell player-clear                   # pause and hide the player until it plays again
+    island-shell lock | sleep                   # the screen switches off into the island, then locks / suspends
+    island-shell curtain                        # the same switch-off and back, without locking (a demo)
+    island-shell wake                           # let the screen out of the island, should it stay off
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)

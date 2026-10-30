@@ -43,6 +43,8 @@ pub enum Event {
     AuthStatus(String, bool),
     /// where the active player is in the track, in seconds
     Position(f64),
+    /// the lock screen the island asked for has gone (or never came)
+    Unlocked,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -379,6 +381,34 @@ fn player_loop(tx: &Sender<Event>) -> zbus::Result<()> {
         }
     }
     Ok(())
+}
+
+/// After the island has locked or suspended: wait (on a thread) for the lock
+/// screen to come and go, then tell the island to let the screen out. A
+/// locker that never shows up within a few seconds counts as gone, so the
+/// screen is never left switched off.
+pub fn watch_unlock(tx: Sender<Event>) {
+    thread::spawn(move || {
+        let locker = || {
+            std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|entry| {
+                std::fs::read_to_string(entry.path().join("comm"))
+                    .is_ok_and(|comm| matches!(comm.trim(), "hyprlock" | "swaylock"))
+            })
+        };
+        let started = Instant::now();
+        let mut seen = false;
+        while started.elapsed() < Duration::from_secs(6) {
+            if locker() {
+                seen = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+        while seen && locker() {
+            thread::sleep(Duration::from_millis(250));
+        }
+        let _ = tx.send(Event::Unlocked);
+    });
 }
 
 pub fn spawn_auth_watch(tx: Sender<Event>) {

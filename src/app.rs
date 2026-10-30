@@ -330,6 +330,8 @@ pub struct App {
     /// it was a click (replayed then) or a tug
     tug_click: Option<PointerEvent>,
     tug_replay: bool,
+    /// what to do once the screen has switched off into the island
+    after_off: Option<crate::control::Request>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     kbd_interactivity: KeyboardInteractivity,
@@ -482,6 +484,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         touch_tracks: false,
         tug_click: None,
         tug_replay: false,
+        after_off: None,
         keyboard: None,
         modifiers: Modifiers::default(),
         kbd_interactivity: KeyboardInteractivity::None,
@@ -528,6 +531,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             dbus::Event::AuthStarted => app.island.auth_started(now),
             dbus::Event::AuthStatus(status, done) => app.island.auth_status(&status, done, now),
             dbus::Event::Position(position) => app.island.set_position(position, now),
+            dbus::Event::Unlocked => app.island.switch_on(now),
         }
         app.after_change();
     })?;
@@ -1121,6 +1125,27 @@ impl App {
                 self.after_change();
                 return reply;
             }
+            Command::Lock => {
+                self.island.close_quick_menu(now);
+                self.switch_off_then(crate::control::Request::Lock, now);
+            }
+            Command::Sleep => {
+                self.island.close_quick_menu(now);
+                self.switch_off_then(crate::control::Request::Suspend, now);
+            }
+            Command::Curtain => {
+                self.island.switch_off(now);
+                let _ = self.loop_handle.insert_source(Timer::from_duration(Duration::from_millis(1600)), |_, _, app: &mut App| {
+                    let now = app.frame_time();
+                    app.island.switch_on(now);
+                    app.after_change();
+                    TimeoutAction::Drop
+                });
+            }
+            Command::Wake => {
+                self.after_off = None;
+                self.island.switch_on(now);
+            }
             Command::PlayerClear => {
                 if self.island.song().is_none() {
                     return "no player".into();
@@ -1702,6 +1727,14 @@ impl App {
         buffer.attach_to(surface).expect("attach");
         self.layer.commit();
         self.frame_stats.record(started.elapsed().as_secs_f64(), self.clock.refresh);
+        // the screen is off: now lock (or sleep), and let it out once the
+        // lock screen has gone
+        if self.after_off.is_some() && self.island.switched_off(t) {
+            if let Some(request) = self.after_off.take() {
+                let _ = self.controls.send(request);
+                dbus::watch_unlock(self.dbus_tx.clone());
+            }
+        }
         if self.clock.debug {
             eprintln!("draw: {:.0} us steady={}", started.elapsed().as_secs_f64() * 1e6, steady as u8);
         }
@@ -2528,8 +2561,8 @@ impl App {
                 self.island.quick_show(View::Main, now);
             }
             Action::Layout => { let _ = self.controls.send(Request::NextLayout); }
-            Action::Lock => { let _ = self.controls.send(Request::Lock); }
-            Action::Sleep => { let _ = self.controls.send(Request::Suspend); }
+            Action::Lock => self.switch_off_then(Request::Lock, now),
+            Action::Sleep => self.switch_off_then(Request::Suspend, now),
             Action::Logout => {
                 if self.island.arm_logout(now) {
                     self.island.close_quick_menu(now);
@@ -2643,6 +2676,13 @@ impl App {
             }
             None => close_changed,
         }
+    }
+
+    /// Switch the screen off into the island; `request` (lock, suspend)
+    /// goes out once it is off (see `draw`).
+    fn switch_off_then(&mut self, request: crate::control::Request, now: Time) {
+        self.island.switch_off(now);
+        self.after_off = Some(request);
     }
 
     /// Pause the player and take it off the island until it plays again.

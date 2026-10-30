@@ -45,6 +45,13 @@ pub enum Command {
     Scrub(String),
     /// pause the player and take it off the island until it plays again
     PlayerClear,
+    /// switch the screen off into the island, then lock / suspend
+    Lock,
+    Sleep,
+    /// let the screen out of the island (should it ever stay off)
+    Wake,
+    /// the screen goes into the island and comes back (a demo, no lock)
+    Curtain,
     /// `nvim <json>`: a message from the companion Neovim plugin
     Nvim(String),
     /// A live activity supplied explicitly (also used by screenshot hooks).
@@ -105,6 +112,10 @@ impl Command {
             ["key", name] => Command::Key(name.to_string()),
             ["scrub", value] => Command::Scrub(value.to_string()),
             ["player-clear"] => Command::PlayerClear,
+            ["lock"] => Command::Lock,
+            ["sleep"] => Command::Sleep,
+            ["wake"] => Command::Wake,
+            ["curtain"] => Command::Curtain,
             ["volume", value, tail @ ..] => Command::Activity(crate::activity::Event::Slider {
                 kind: crate::activity::SliderKind::Volume,
                 value: value.parse::<f64>().ok()?.clamp(0.0, 1.0),
