@@ -474,13 +474,16 @@ pub fn hit(view: View, controls: &Controls, x: f64, y: f64) -> Option<Hit> {
 }
 
 pub fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64) {
-    cr.save().unwrap();
-    cr.translate(x, y);
-    cr.scale(scale, scale);
-    cr.set_line_cap(cairo::LineCap::Round);
-    cr.set_line_join(cairo::LineJoin::Round);
-    cr.set_line_width(2.2);
-    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+    menu_style::stamp(cr, || format!("icon {action:?} {scale}"), x, y, 16.0 * scale + 3.0, (1.0, 1.0, 1.0, alpha), |cr| {
+        cr.scale(scale, scale);
+        cr.set_line_cap(cairo::LineCap::Round);
+        cr.set_line_join(cairo::LineJoin::Round);
+        cr.set_line_width(2.2);
+        icon_body(cr, action);
+    });
+}
+
+fn icon_body(cr: &Context, action: Action) {
     match action {
         Action::Wifi => {
             for (r, a, b) in [(12.0, 3.83, 5.59), (8.0, 3.88, 5.54), (4.0, 4.02, 5.40)] {
@@ -540,7 +543,6 @@ pub fn icon(cr: &Context, action: Action, x: f64, y: f64, alpha: f64, scale: f64
         }
         _ => {}
     }
-    cr.restore().unwrap();
 }
 
 fn clock(seconds: f64) -> String {
@@ -558,10 +560,15 @@ fn stroke_style(cr: &Context, width: f64, alpha: f64) {
 
 /// The small glyphs: speaker, sun, outputs, keyboard and session buttons.
 pub fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64, f64, f64, f64)) {
-    cr.save().unwrap();
-    cr.translate(cx, cy);
-    stroke_style(cr, 1.8, 1.0);
-    cr.set_source_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
+    // the level only matters in steps of half (the speaker's waves)
+    let steps = (level * 2.0 + 0.98).floor();
+    menu_style::stamp(cr, || format!("glyph {name} {steps}"), cx, cy, 15.0, rgba, |cr| {
+        stroke_style(cr, 1.8, 1.0);
+        glyph_body(cr, name, level);
+    });
+}
+
+fn glyph_body(cr: &Context, name: &str, level: f64) {
     let tau = std::f64::consts::TAU;
     match name {
         "sun" => {
@@ -766,8 +773,6 @@ pub fn glyph(cr: &Context, name: &str, cx: f64, cy: f64, level: f64, rgba: (f64,
         }
         _ => {}
     }
-    cr.restore().unwrap();
-    cr.new_path();
 }
 
 fn sink_glyph(kind: SinkKind) -> &'static str {
@@ -1050,12 +1055,8 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
             _ => (menu_style::bounce_scale(since), 0.0),
         };
         menu_style::transformed(cr, wx, wy, scale, angle, || {
-            cr.new_path();
-            cr.arc(wx, wy, WELL_R, 0.0, std::f64::consts::TAU);
-            cr.set_source_rgba(1.0, 1.0, 1.0, 0.075 * (1.0 - on) * alpha);
-            let _ = cr.fill_preserve();
-            cr.set_source_rgba(accent.0, accent.1, accent.2, on * alpha);
-            let _ = cr.fill();
+            menu_style::disc(cr, wx, wy, WELL_R, (1.0, 1.0, 1.0, 0.075 * (1.0 - on) * alpha));
+            menu_style::disc(cr, wx, wy, WELL_R, (accent.0, accent.1, accent.2, on * alpha));
             match action {
                 Action::Wifi | Action::Bluetooth | Action::Timer | Action::Launcher | Action::Notifications | Action::Dnd => {
                     icon(cr, action, wx, wy, alpha, 0.68);

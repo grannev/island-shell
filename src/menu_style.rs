@@ -179,14 +179,82 @@ pub fn tile(cr: &Context, x: f64, y: f64, size: f64, colour: Rgb, alpha: f64) {
 /// A round icon well: accent-filled when active, grey otherwise (Control
 /// Center's module buttons, list rows' leading symbols).
 pub fn well(cr: &Context, cx: f64, cy: f64, r: f64, colour: Option<Rgb>, alpha: f64) {
-    cr.new_path();
-    cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
-    match colour {
-        Some(c) => set(cr, c, alpha),
-        None => cr.set_source_rgba(1.0, 1.0, 1.0, 0.14 * alpha),
-    }
-    let _ = cr.fill();
+    let rgba = match colour {
+        Some(c) => (c.0, c.1, c.2, alpha.clamp(0.0, 1.0)),
+        None => (1.0, 1.0, 1.0, 0.14 * alpha),
+    };
+    disc(cr, cx, cy, r, rgba);
 }
+
+/// A filled circle, stamped from a cached mask (see `stamp`).
+pub fn disc(cr: &Context, cx: f64, cy: f64, r: f64, rgba: (f64, f64, f64, f64)) {
+    stamp(cr, || format!("disc {r}"), cx, cy, r + 1.0, rgba, |c| {
+        c.new_path();
+        c.arc(0.0, 0.0, r, 0.0, std::f64::consts::TAU);
+        let _ = c.fill();
+    });
+}
+
+/// Vector symbols are drawn once per size into an alpha mask and stamped
+/// in their colour from then on: a symbol's strokes cost tens of µs a
+/// frame, a stamp a few. `draw` paints the symbol at the origin (the source
+/// is opaque white), reaching at most `extent` from it. Rotated or freely
+/// scaled (a bounce, a shake), it is drawn directly.
+pub fn stamp(cr: &Context, key: impl FnOnce() -> String, x: f64, y: f64, extent: f64, rgba: (f64, f64, f64, f64), draw: impl FnOnce(&Context)) {
+    let m = cr.matrix();
+    let s = m.xx();
+    let plain = m.xy() == 0.0 && m.yx() == 0.0 && (m.yy() - s).abs() < 1e-9 && s > 0.0 && ((s * 4.0).fract()).abs() < 1e-9;
+    if !plain || rgba.3 <= 0.002 {
+        if rgba.3 > 0.002 {
+            cr.save().unwrap();
+            cr.translate(x, y);
+            cr.set_source_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
+            draw(cr);
+            cr.restore().unwrap();
+            cr.new_path();
+        }
+        return;
+    }
+    let half = (extent * s).ceil() + 2.0;
+    let key = format!("{} @{s}", key());
+    let mask = STAMPS.with(|stamps| {
+        let mut stamps = stamps.borrow_mut();
+        if let Some(mask) = stamps.get(&key) {
+            return Some(mask.clone());
+        }
+        let size = (2.0 * half) as i32;
+        let mask = cairo::ImageSurface::create(cairo::Format::A8, size, size).ok()?;
+        {
+            let c = Context::new(&mask).ok()?;
+            c.translate(half, half);
+            c.scale(s, s);
+            c.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            draw(&c);
+        }
+        mask.flush();
+        if stamps.len() >= 512 {
+            stamps.clear();
+        }
+        stamps.insert(key, mask.clone());
+        Some(mask)
+    });
+    let Some(mask) = mask else { return };
+    // on whole pixels: an unfiltered copy, several times cheaper than a
+    // filtered one, and the symbol is never off by more than half a pixel
+    let (dx, dy) = cr.user_to_device(x, y);
+    cr.save().unwrap();
+    cr.identity_matrix();
+    cr.set_source_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
+    let _ = cr.mask_surface(&mask, (dx - half).round(), (dy - half).round());
+    cr.restore().unwrap();
+    cr.new_path();
+}
+
+thread_local! {
+    static STAMPS: std::cell::RefCell<std::collections::HashMap<String, cairo::ImageSurface>> = Default::default();
+}
+
+
 
 /// A sheet header whose subtitle animates its changes (motion.rs) under
 /// `key` (include the sheet's instance so a fresh sheet does not animate).

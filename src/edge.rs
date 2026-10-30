@@ -187,7 +187,8 @@ impl Edge {
     /// Paint the light for `now` on an output `w`×`h` whose corners have
     /// `radius`, with the island centred on `cx`. Returns the strips it
     /// painted (empty when dark).
-    pub fn draw(&mut self, cr: &Context, w: f64, h: f64, cx: f64, now: Time) -> Vec<Rect> {
+    pub fn draw(&mut self, cr: &Context, w: f64, h: f64, cx: f64, radius: f64, now: Time) -> Vec<Rect> {
+        let r = radius.clamp(0.0, w.min(h) / 2.0);
         self.pulses.retain(|p| now - p.start < p.wave.duration());
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
@@ -200,7 +201,7 @@ impl Edge {
         let mut lit = false;
         if self.ember > 0.0 {
             let ember = self.ember;
-            lit |= paint_by(cr, w, h, FAILURE_RED, &|side, t| {
+            lit |= paint_by(cr, w, h, r, FAILURE_RED, &|side, t| {
                 // distance from the nearer bottom corner, along the edge
                 let d = match side {
                     Side::Bottom => t.min(w - t),
@@ -211,7 +212,7 @@ impl Edge {
             });
         }
         if let Some((colour, strength)) = self.ambient {
-            lit |= paint_by(cr, w, h, colour, &|side, t| match side {
+            lit |= paint_by(cr, w, h, r, colour, &|side, t| match side {
                 // brightest under the middle of the screen, as if lit from
                 // behind it, and up the lower part of the sides
                 Side::Bottom => strength * (0.55 + 0.45 * (std::f64::consts::PI * t / w).sin()),
@@ -220,11 +221,11 @@ impl Edge {
             });
         }
         if let Some(g) = self.gauge {
-            lit |= paint_gauge(cr, w, h, cx, &g);
+            lit |= paint_gauge(cr, w, h, r, cx, &g);
         }
         if let Some(l) = self.level {
             let top = h * (1.0 - l.value.clamp(0.0, 1.0));
-            lit |= paint_by(cr, w, h, l.colour, &|side, t| {
+            lit |= paint_by(cr, w, h, r, l.colour, &|side, t| {
                 if side != if l.right { Side::Right } else { Side::Left } || t < top - STEP {
                     return 0.0;
                 }
@@ -240,7 +241,7 @@ impl Edge {
                 let fill = if k < 0.35 { ease_out(k / 0.35) } else if k < 0.5 { 1.0 } else { 1.0 - smooth((k - 0.5) / 0.5) };
                 let alpha = smooth(k / 0.06) * (1.0 - smooth((k - 0.75) / 0.25));
                 let surface = h * 0.55 * fill;
-                lit |= paint_by(cr, w, h, p.colour, &|side, t| match side {
+                lit |= paint_by(cr, w, h, r, p.colour, &|side, t| match side {
                     Side::Bottom => 0.8 * alpha,
                     // the liquid's surface is soft, a little brighter
                     Side::Left | Side::Right => {
@@ -263,7 +264,7 @@ impl Edge {
                     let dir = if p.wave == Wave::StreakRight { 1.0 } else { -1.0 };
                     let at = cx + dir * (w / 2.0 + 120.0) * ease_out(k);
                     let alpha = (1.0 - k).powf(1.3) * rise;
-                    lit |= paint_by(cr, w, h, p.colour, &|side, t| {
+                    lit |= paint_by(cr, w, h, r, p.colour, &|side, t| {
                         if side != Side::Top { return 0.0; }
                         // a head and a tail behind it, which never reaches
                         // back past the island
@@ -280,7 +281,7 @@ impl Edge {
                     front(reach, (1.0 - k) * rise, 0.25)
                 }
             };
-            lit |= paint(cr, w, h, cx, p.colour, &stops);
+            lit |= paint(cr, w, h, r, cx, p.colour, &stops);
         }
         if let Some((colour, since, end)) = self.breath {
             let fade_in = smooth((now - since) / BREATH_FADE);
@@ -292,7 +293,7 @@ impl Edge {
             let rim = 0.35 * strength;
             let wave: Vec<(f64, f64)> = front(ease_out(phase) * far, strength * (1.0 - phase * 0.6), 0.0)
                 .into_iter().map(|(d, a)| (d, a.max(rim))).chain([(far + SOFT, rim)]).collect();
-            lit |= paint(cr, w, h, cx, colour, &wave);
+            lit |= paint(cr, w, h, r, cx, colour, &wave);
         }
         // the thicker frame goes over the light: the light comes out of it
         let (width, radius) = self.border;
@@ -336,11 +337,11 @@ fn way_round(side: Side, t: f64, w: f64, h: f64, cx: f64) -> f64 {
 
 /// The timer's line: grown round from the island as far as its progress,
 /// brighter at the head; or a stopwatch's comet.
-fn paint_gauge(cr: &Context, w: f64, h: f64, cx: f64, g: &Gauge) -> bool {
+fn paint_gauge(cr: &Context, w: f64, h: f64, r: f64, cx: f64, g: &Gauge) -> bool {
     let perimeter = 2.0 * (w + h);
     let head = g.progress.clamp(0.0, 1.0) * perimeter;
     let dim = if g.running { 1.0 } else { 0.45 };
-    paint_by(cr, w, h, g.colour, &|side, t| {
+    paint_by(cr, w, h, r, g.colour, &|side, t| {
         let s = way_round(side, t, w, h, cx);
         let behind = if g.comet { (head - s).rem_euclid(perimeter) } else { head - s };
         let line = if g.comet {
@@ -422,11 +423,11 @@ enum Side {
 
 /// Light the screen's edges in `colour`, its strength along the way given
 /// by `stops` (distance from the island's top centre, strength).
-fn paint(cr: &Context, w: f64, h: f64, cx: f64, colour: Rgb, stops: &[(f64, f64)]) -> bool {
+fn paint(cr: &Context, w: f64, h: f64, r: f64, cx: f64, colour: Rgb, stops: &[(f64, f64)]) -> bool {
     if stops.iter().all(|s| s.1 <= 0.003) {
         return false;
     }
-    paint_by(cr, w, h, colour, &|side, t| {
+    paint_by(cr, w, h, r, colour, &|side, t| {
         let d = match side {
             Side::Top => (t - cx).abs(),
             Side::Bottom => (t - cx).hypot(h),
@@ -441,8 +442,8 @@ fn paint(cr: &Context, w: f64, h: f64, cx: f64, colour: Rgb, stops: &[(f64, f64)
 /// `strength(side, t)` (`t` from the left or top end of that edge). Each
 /// edge is one composite: a gradient along it for the strength, through a
 /// precomputed falloff into the screen. Returns whether anything was lit.
-fn paint_by(cr: &Context, w: f64, h: f64, colour: Rgb, strength: &dyn Fn(Side, f64) -> f64) -> bool {
-    let falloff = FALLOFF.with(|f| f.clone());
+fn paint_by(cr: &Context, w: f64, h: f64, r: f64, colour: Rgb, strength: &dyn Fn(Side, f64) -> f64) -> bool {
+    let falloff_mask = FALLOFF.with(|f| f.clone());
     let k = FALLOFF_N as f64 / DEPTH;
     // each edge: where it runs (start, direction, length), and how its
     // falloff is mapped (the column runs along the edge's normal; the
@@ -468,20 +469,66 @@ fn paint_by(cr: &Context, w: f64, h: f64, colour: Rgb, strength: &dyn Fn(Side, f
         for (t, a) in &samples[lo..=hi] {
             gradient.add_color_stop_rgba(((t - t0) / (t1 - t0)).clamp(0.0, 1.0), colour.0, colour.1, colour.2, a.clamp(0.0, 1.0));
         }
-        let mask = falloff.clone();
+        lit = true;
+        // the straight stretch stops where the screen's corners round off
+        let (c0, c1) = (t0.max(r), t1.min(len - r));
+        if c1 <= c0 {
+            continue;
+        }
+        let mask = falloff_mask.clone();
         mask.set_matrix(matrix);
         cr.save().unwrap();
         // only the lit stretch of the edge's band
-        let (bx, by) = (x0 + dx * t0 - dy * if x0 > 0.0 { DEPTH } else { 0.0 }, y0 + dy * t0 - dx * if y0 > 0.0 { DEPTH } else { 0.0 });
-        let (bw, bh) = if dx > 0.0 { (t1 - t0, DEPTH) } else { (DEPTH, t1 - t0) };
+        let (bx, by) = (x0 + dx * c0 - dy * if x0 > 0.0 { DEPTH } else { 0.0 }, y0 + dy * c0 - dx * if y0 > 0.0 { DEPTH } else { 0.0 });
+        let (bw, bh) = if dx > 0.0 { (c1 - c0, DEPTH) } else { (DEPTH, c1 - c0) };
         cr.rectangle(bx, by, bw, bh);
         cr.clip();
         let _ = cr.set_source(&gradient);
         let _ = cr.mask(&mask);
         cr.restore().unwrap();
-        lit = true;
+    }
+    // the corners: the light follows the screen's rounded edge, dying away
+    // inwards from the arc as it does from a straight edge
+    if r > 0.5 {
+        let corners = [
+            ((0.0, 0.0), (r, r), (Side::Top, 0.0), (Side::Left, 0.0)),
+            ((w - r, 0.0), (w - r, r), (Side::Top, w), (Side::Right, 0.0)),
+            ((0.0, h - r), (r, h - r), (Side::Bottom, 0.0), (Side::Left, h)),
+            ((w - r, h - r), (w - r, h - r), (Side::Bottom, w), (Side::Right, h)),
+        ];
+        for ((sx, sy), (ccx, ccy), (a, ta), (b, tb)) in corners {
+            let s = strength(a, ta).max(strength(b, tb));
+            if s <= 0.003 {
+                continue;
+            }
+            let gradient = cairo::RadialGradient::new(ccx, ccy, 0.0, ccx, ccy, r);
+            gradient.set_extend(cairo::Extend::Pad);
+            // from the centre (deepest) out to the arc (the edge)
+            let steps = 12;
+            for i in (0..=steps).rev() {
+                let d = r * i as f64 / steps as f64;
+                gradient.add_color_stop_rgba((r - d) / r, colour.0, colour.1, colour.2, (s * falloff(d)).clamp(0.0, 1.0));
+            }
+            cr.save().unwrap();
+            cr.rectangle(sx, sy, r, r);
+            cr.clip();
+            let _ = cr.set_source(&gradient);
+            let _ = cr.paint();
+            cr.restore().unwrap();
+            lit = true;
+        }
     }
     lit
+}
+
+/// How the light dies away `d` px into the screen: a bright line at the
+/// edge over a wide soft glow.
+fn falloff(d: f64) -> f64 {
+    if d >= DEPTH {
+        return 0.0;
+    }
+    let a = 0.72 * (-d / 2.0).exp() + 0.30 * (-d / 7.0).exp();
+    (a * (1.0 - (d / DEPTH).powi(3))).clamp(0.0, 1.0)
 }
 
 /// Spacing of the strength samples along an edge (logical px).
@@ -499,9 +546,7 @@ thread_local! {
             let mut data = image.data().expect("falloff data");
             for row in 0..FALLOFF_N {
                 let d = (row as f64 + 0.5) * DEPTH / FALLOFF_N as f64;
-                let a = 0.72 * (-d / 2.0).exp() + 0.30 * (-d / 7.0).exp();
-                let edge_fade = 1.0 - (d / DEPTH).powi(3);
-                data[row * stride] = (255.0 * (a * edge_fade).clamp(0.0, 1.0)).round() as u8;
+                data[row * stride] = (255.0 * falloff(d)).round() as u8;
             }
         }
         let pattern = cairo::SurfacePattern::create(&image);
@@ -544,7 +589,7 @@ mod tests {
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 400).unwrap();
         let rects = {
             let cr = Context::new(&surface).unwrap();
-            edge.draw(&cr, 600.0, 400.0, 300.0, now)
+            edge.draw(&cr, 600.0, 400.0, 300.0, 16.0, now)
         };
         (surface, rects)
     }
@@ -753,7 +798,7 @@ mod gallery {
                 cr.set_source_rgb(0.10, 0.17, 0.22);
                 cr.rectangle(0.0, 0.0, w, h);
                 cr.fill().unwrap();
-                edge.draw(&cr, w, h, w / 2.0, now);
+                edge.draw(&cr, w, h, w / 2.0, 16.0, now);
                 crate::bezel::paint(&cr, w, h, 16.0);
                 cr.set_source_rgb(0.0, 0.0, 0.0);
                 cr.rectangle(w / 2.0 - 100.0, 0.0, 200.0, 32.0);
@@ -783,14 +828,14 @@ mod bench {
             let started = std::time::Instant::now();
             let n = 60;
             for i in 0..n {
-                edge.draw(&cr, 1504.0, 1002.0, 752.0, wave.duration() * i as f64 / n as f64);
+                edge.draw(&cr, 1504.0, 1002.0, 752.0, 16.0, wave.duration() * i as f64 / n as f64);
             }
             eprintln!("{name}: {:.2} ms/frame", started.elapsed().as_secs_f64() * 1e3 / n as f64);
         }
         let mut edge = Edge::default();
         edge.breathe(Some(TOUCH_ID_BLUE), 0.0);
         let started = std::time::Instant::now();
-        for i in 0..60 { edge.draw(&cr, 1504.0, 1002.0, 752.0, i as f64 / 60.0); }
+        for i in 0..60 { edge.draw(&cr, 1504.0, 1002.0, 752.0, 16.0, i as f64 / 60.0); }
         eprintln!("breath: {:.2} ms/frame", started.elapsed().as_secs_f64() * 1e3 / 60.0);
     }
 }
@@ -821,7 +866,7 @@ mod gauge_gallery {
             cr.clip();
             cr.set_source_rgb(0.10, 0.17, 0.22);
             cr.paint().unwrap();
-            edge.draw(&cr, w, h, w / 2.0, 0.0);
+            edge.draw(&cr, w, h, w / 2.0, 16.0, 0.0);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             cr.rectangle(w / 2.0 - 100.0, 0.0, 200.0, 32.0);
             cr.fill().unwrap();
@@ -988,5 +1033,33 @@ mod membrane_tests {
         let (_, covered) = alpha_after(&mut m, 0.0, 0.3, 0, 0);
         assert!(covered.iter().any(|r| r.x == 0.0 && r.w > 16.0 && r.h > 16.0 && r.w < 30.0));
         assert!(!m.is_animating(RIPPLE_LIFE + 0.01));
+    }
+}
+
+#[cfg(test)]
+mod corner_look {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/edge-corner.png"]
+    fn corner_closeup() {
+        let (w, h) = (1504.0, 1002.0);
+        let out = cairo::ImageSurface::create(cairo::Format::Rgb24, 600, 300).unwrap();
+        let cr = Context::new(&out).unwrap();
+        for (i, wave) in [Some(Wave::Flash), None].into_iter().enumerate() {
+            let mut edge = Edge::default();
+            match wave { Some(w) => edge.pulse(w, TOUCH_ID_BLUE, 0.0), None => edge.breathe(Some(TOUCH_ID_BLUE), 0.0) }
+            cr.save().unwrap();
+            cr.translate(i as f64 * 300.0, 0.0);
+            cr.rectangle(0.0, 0.0, 300.0, 300.0);
+            cr.clip();
+            cr.scale(1.5 * 4.0, 1.5 * 4.0);
+            cr.set_source_rgb(0.10, 0.17, 0.22);
+            cr.paint().unwrap();
+            edge.draw(&cr, w, h, w / 2.0, 16.0, 0.12);
+            crate::bezel::paint(&cr, w, h, 16.0);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        out.write_to_png(&mut std::fs::File::create("target/gallery/edge-corner.png").unwrap()).unwrap();
     }
 }

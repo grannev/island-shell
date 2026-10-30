@@ -1592,9 +1592,14 @@ impl App {
             cr.scale(self.scale, self.scale);
             // wipe where the previous frame painted (the rest is still clear)
             let full = self.last_frame.is_none();
+            let (w, h) = (self.width as f64, self.height as f64);
+            // the frame's corners are wiped and painted over everything
+            // every frame (four small squares): whatever lights the screen
+            // under them is painted again first
+            let squares = crate::bezel::corners(w, h, corners);
             let stale = match self.last_frame {
                 None => Damage::of([whole]),
-                Some(prev) => Damage::of(prev.bounds.into_iter().chain(self.last_edges.iter().copied())),
+                Some(prev) => Damage::of(prev.bounds.into_iter().chain(self.last_edges.iter().copied()).chain(squares.iter().copied())),
             };
             cr.set_operator(cairo::Operator::Clear);
             for r in &stale.0 {
@@ -1603,29 +1608,21 @@ impl App {
             let _ = cr.fill();
             cr.set_operator(cairo::Operator::Over);
             let t_paint = std::time::Instant::now();
-            let (w, h) = (self.width as f64, self.height as f64);
             // light along the edges runs under the island
             let edges = self.island.draw_edges(&cr, w, h, w / 2.0, t);
+            let t_island = std::time::Instant::now();
             let frame = self.island.draw(&cr, &self.renderer, w / 2.0, t);
             if self.clock.debug {
-                eprintln!("paint: {:.0} us", t_paint.elapsed().as_secs_f64() * 1e6);
+                eprintln!("paint: {:.0} us (edges {:.0} us, island {:.0} us)", t_paint.elapsed().as_secs_f64() * 1e6,
+                    (t_island - t_paint).as_secs_f64() * 1e6, t_island.elapsed().as_secs_f64() * 1e6);
             }
             let mut changed = stale;
             changed.extend(&Damage::of(frame.bounds.into_iter().chain(edges.iter().copied())));
             self.last_edges = edges;
-            // the frame beyond the screen: painted once, and again only if
-            // something was wiped or drawn where it stands
-            let squares = crate::bezel::corners(w, h, corners);
-            let touched = |c: &Rect| squares.iter().any(|s| {
-                c.x - 1.0 < s.x + s.w && s.x < c.x + c.w + 1.0 && c.y - 1.0 < s.y + s.h && s.y < c.y + c.h + 1.0
-            });
-            if full || self.bezel_drawn != Some(corners) || changed.0.iter().any(touched) {
-                crate::bezel::paint(&cr, w, h, corners);
-                self.bezel_drawn = Some(corners);
-                for s in squares {
-                    changed.add(s);
-                }
-            }
+            // the frame beyond the screen, over everything drawn so far
+            let _ = full;
+            crate::bezel::paint(&cr, w, h, corners);
+            self.bezel_drawn = Some(corners);
             // marks in the frame (the microphone's light) go over its
             // corners; wiped with the edges next frame, so they never stack
             let marks = self.island.draw_frame_marks(&cr, w, t);

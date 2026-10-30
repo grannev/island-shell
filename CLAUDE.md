@@ -172,7 +172,11 @@ stay usable while a sheet is open; its offset comes from sway IPC
 The island's surface covers the whole output (input only over the box): the
 island is one drop of a black frame beyond the screen's edges, of which only
 the corners show (`src/bezel.rs`, config `screen_corners`, 16 px measured off
-the lid), painted once and repainted only when a wipe touches them. Future
+the lid). The four corner squares are wiped and the corners painted over
+everything every frame (never `Clear` inside them: what lights the screen
+inside the arc — edge light, the curtain — must stay), and edge light follows
+the arc in the corners (a radial falloff from the arc meeting the straight
+stretches). Future
 whole-screen effects belong on this surface; their staged plan is
 `docs/frame-effects.md`. Light along the edges (`src/edge.rs`, config
 `edge_light`): a notification's colour runs from the island along the top, a
@@ -229,7 +233,13 @@ entrance timestamps are separate from last-update timestamps: key repeat only
 extends the hold. Cairo icon helpers start fresh paths so text positions never
 become stray stroked lines.
 
-Performance: desktop entries, icons and art are loaded on bounded background
+Performance: vector symbols (`quick::icon`, `quick::glyph`) and discs
+(`menu_style::well`/`disc`) are stamped from cached A8 masks
+(`menu_style::stamp`) at whole device pixels — an unfiltered mask composite;
+a fractional offset makes cairo filter and costs ~10x. Rotated or freely
+scaled ones (bounces, shakes) draw directly. Measure such changes with an
+interleaved A/B in one process: the laptop's clock and load make separate runs
+noisy. Desktop entries, icons and art are loaded on bounded background
 workers (`background.rs`); launcher caches survive closing. Worker replies wake
 the event loop; never add file decoding, process waits or directory scans to a
 paint/input handler. Art generations reject stale results. Pango's cache is a

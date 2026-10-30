@@ -22,19 +22,15 @@ pub fn corners(w: f64, h: f64, radius: f64) -> Vec<Rect> {
 
 /// Paint the frame's corners: black outside a quarter circle, so a
 /// corner reads as the screen's own edge rather than something on it.
-/// Each square is wiped first, so painting again never thickens the
-/// antialiased edge.
+/// Painted over whatever is there: what lights the screen inside the arc
+/// (an edge's light, the curtain) stays. The caller wipes the squares
+/// before each frame's drawing, so the antialiased edge never thickens.
 pub fn paint(cr: &Context, w: f64, h: f64, radius: f64) {
     let r = radius.min(w / 2.0).min(h / 2.0);
     if r <= 0.0 {
         return;
     }
     cr.save().ok();
-    for square in corners(w, h, r) {
-        cr.set_operator(cairo::Operator::Clear);
-        cr.rectangle(square.x, square.y, square.w, square.h);
-        let _ = cr.fill();
-    }
     cr.set_operator(cairo::Operator::Over);
     cr.set_source_rgb(0.0, 0.0, 0.0);
     cr.new_path();
@@ -69,8 +65,6 @@ mod tests {
             let cr = Context::new(&surface).unwrap();
             cr.scale(scale, scale);
             paint(&cr, w as f64, h as f64, 16.0);
-            // twice: the edge must not darken
-            paint(&cr, w as f64, h as f64, 16.0);
         }
         let stride = surface.stride() as usize;
         let data = surface.take_data().unwrap();
@@ -89,6 +83,23 @@ mod tests {
             edge.push(alpha(4.0 + i as f64 * 0.05, 4.0 + i as f64 * 0.05));
         }
         assert!(edge.windows(2).all(|p| p[0] >= p[1]), "{edge:?}");
+    }
+
+    #[test]
+    fn what_lights_the_screen_inside_the_arc_stays() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 100, 100).unwrap();
+        {
+            let cr = Context::new(&surface).unwrap();
+            // a light (or the curtain) already painted into the corner
+            cr.set_source_rgba(0.2, 0.6, 1.0, 1.0);
+            cr.paint().unwrap();
+            paint(&cr, 100.0, 100.0, 16.0);
+        }
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().unwrap();
+        let px = |x: usize, y: usize| &data[y * stride + x * 4..y * stride + x * 4 + 4];
+        assert_eq!(px(10, 10), &[255, 153, 51, 255], "inside the arc: still lit");
+        assert_eq!(px(0, 0), &[0, 0, 0, 255], "the very corner: the frame");
     }
 
     #[test]

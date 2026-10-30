@@ -1330,9 +1330,10 @@ impl Island {
         }
         // System events and panels rise on their own even when the compact
         // island is parked above the edge. Once they finish, it stays hidden.
-        // dropping into the edge, the island sends a ripple along it, as
-        // the drop meets the water
-        if self.is_hidden() && self.hide.target() < 0.5 && self.config.edge_light {
+        // put away by hand (mod+i), the island drops into the edge and sends
+        // a ripple along it, as the drop meets the water; not when it goes
+        // back under a fullscreen window after a pill, over a playing video
+        if self.is_hidden() && self.hidden.user && self.hide.target() < 0.5 && self.config.edge_light {
             let cx = self.island_cx(now);
             self.membrane.ripple(cx, 0.8, now + 0.12);
         }
@@ -4951,7 +4952,7 @@ impl Island {
         self.focus_frame.set(if self.dnd && self.config.edge_light { 1.0 } else { 0.0 }, now);
         self.edge.set_border(FOCUS_FRAME * self.focus_frame.value(now).max(0.0), self.config.screen_corners);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
-        let mut painted = self.edge.draw(cr, w, h, cx, now);
+        let mut painted = self.edge.draw(cr, w, h, cx, self.config.screen_corners, now);
         painted.extend(self.curtain.draw_shutter(cr, w, h, self.config.screen_corners, now));
         // the screen closing into the island (or coming out of it): over
         // the light, under the island
