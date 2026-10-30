@@ -261,7 +261,7 @@ struct DismissSurface {
     /// where the free area it fills starts on the output, and the
     /// output's width (the island is centred on the whole output)
     usable: Option<sway::Usable>,
-    input_hole: std::cell::Cell<Option<Option<(i32, i32, i32, i32)>>>,
+    input_hole: std::cell::RefCell<Option<Vec<(i32, i32, i32, i32)>>>,
 }
 
 #[derive(Default)]
@@ -402,6 +402,8 @@ pub struct App {
     bar_tx: channel::Sender<crate::bar_sources::BarEvent>,
     /// the details drawer's sampler runs while this holds
     drawer_sampling: Arc<AtomicBool>,
+    /// the tray's host (started with the bar)
+    tray: Option<std::sync::mpsc::Sender<crate::tray::Request>>,
     /// the notification the server was asked not to expire
     held_notice: Option<u32>,
     quick_was_open: bool,
@@ -546,6 +548,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         recorder_tx,
         bar_tx,
         drawer_sampling: Arc::new(AtomicBool::new(false)),
+        tray: None,
         held_notice: None,
         quick_was_open: false,
         sound_poll: None,
@@ -630,6 +633,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         app.island.bar.details = Some(details);
                         app.redraw();
                     }
+                }
+                crate::bar_sources::BarEvent::Tray(items) => {
+                    app.island.bar.tray = items.into_iter().map(|t| crate::bar::TrayIcon {
+                        id: t.id,
+                        icon: t.icon.and_then(crate::background::Pixels::into_surface),
+                        has_menu: t.has_menu,
+                        item_is_menu: t.item_is_menu,
+                        title: t.title,
+                    }).collect();
+                    app.redraw();
+                }
+                crate::bar_sources::BarEvent::Menu(id, entries) => {
+                    let now = app.frame_time();
+                    app.island.bar.open_menu(id, entries, now);
+                    app.after_change();
                 }
             }
         }
@@ -957,7 +975,7 @@ impl App {
                     self.clock.refresh * 1e3,
                     self.clock.pipeline,
                     self.buffers.len(),
-                    self.dismiss.as_ref().map(|d| (d.size, d.usable.map(|u| (u.x, u.y)))),
+                    (self.dismiss.as_ref().map(|d| (d.size, d.usable.map(|u| (u.x, u.y)))), self.bar_reserve.is_some()),
                     self.island.config.describe(),
                     self.island.describe(now) + &self.frame_stats.describe()
                 );
@@ -1459,7 +1477,33 @@ impl App {
                 command.arg("toggle");
                 std::thread::spawn(move || { let _ = command.status(); });
             }
-            Action::TrayActivate(..) | Action::TraySecondary(..) | Action::TrayMenu(..) => {}
+            Action::TrayActivate(id, x, y) => {
+                // a menu-only item opens its menu; the rest are activated
+                if self.island.bar.tray.iter().any(|t| t.id == id && t.item_is_menu && t.has_menu) {
+                    self.tray_send(crate::tray::Request::Menu { id });
+                } else {
+                    self.tray_send(crate::tray::Request::Activate { id, x: x as i32, y: y as i32 });
+                }
+            }
+            Action::TraySecondary(id, x, y) => self.tray_send(crate::tray::Request::Secondary { id, x: x as i32, y: y as i32 }),
+            Action::TrayMenu(id, x, y) => {
+                // the island's own sheet for a dbusmenu; else the item's own
+                if self.island.bar.tray.iter().any(|t| t.id == id && t.has_menu) {
+                    self.tray_send(crate::tray::Request::Menu { id });
+                } else {
+                    self.tray_send(crate::tray::Request::ContextMenu { id, x: x as i32, y: y as i32 });
+                }
+            }
+            Action::TrayScroll(id, delta) => self.tray_send(crate::tray::Request::Scroll { id, delta }),
+            Action::MenuChoose(id, entry) => {
+                self.tray_send(crate::tray::Request::MenuClicked { id, entry });
+            }
+        }
+    }
+
+    fn tray_send(&mut self, request: crate::tray::Request) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.send(request);
         }
     }
 
@@ -1558,7 +1602,7 @@ impl App {
             self.touch_sticky = false;
             self.pointer_left();
         }
-        self.sync_dismiss_surface(wants_keyboard || self.touch_sticky);
+        self.sync_dismiss_surface(wants_keyboard || self.touch_sticky || self.island.bar.menu_open());
         self.sync_bar_reserve();
         let has_song = self.island.song().is_some();
         if has_song && self.cava.is_none() && !self.cava_pending && std::time::Instant::now() >= self.cava_retry {
@@ -2025,16 +2069,26 @@ impl App {
     /// The bar's room at the top: reserved while the bar is on, on the
     /// island's output.
     fn sync_bar_reserve(&mut self) {
-        let want = self.island.config.bar && self.bound_output.is_some();
-        if !want {
+        // the tray's watcher and host, once (they wait for Waybar to let go
+        // of the watcher's name)
+        if self.island.config.bar && self.tray.is_none() {
+            let px = (crate::bar::TRAY_ICON * self.scale).round() as i32;
+            self.tray = Some(crate::tray::spawn(self.bar_tx.clone(), px));
+        }
+        // the island's output (when the compositor chose it, the one its
+        // surface is on)
+        let output = self.bound_output.clone().or_else(|| {
+            self.layer.wl_surface().data::<SurfaceData<()>>().and_then(|data| data.outputs().next())
+        });
+        if !self.island.config.bar || output.is_none() {
             self.bar_reserve = None;
             return;
         }
-        if self.bar_reserve.as_ref().is_some_and(|r| r.output == self.bound_output) {
+        if self.bar_reserve.as_ref().is_some_and(|r| r.output == output) {
             return;
         }
         let surface = self.compositor.create_surface(&self.qh);
-        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Top, Some("island-bar"), self.bound_output.as_ref());
+        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Top, Some("island-bar"), output.as_ref());
         layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
         layer.set_size(0, crate::bar::HEIGHT as u32);
         layer.set_exclusive_zone(crate::bar::HEIGHT as i32);
@@ -2046,7 +2100,7 @@ impl App {
         let Ok((buffer, pixels)) = self.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) else { return };
         pixels.fill(0);
         layer.commit();
-        self.bar_reserve = Some(BarReserve { layer, viewport, buffer, output: self.bound_output.clone() });
+        self.bar_reserve = Some(BarReserve { layer, viewport, buffer, output });
     }
 
     fn sync_dismiss_surface(&mut self, want: bool) {
@@ -2078,7 +2132,7 @@ impl App {
         };
         pixels.fill(0);
         layer.commit(); // Wait for the initial configure before attaching.
-        self.dismiss = Some(DismissSurface { layer, viewport, buffer, size: (0, 0), usable: None, input_hole: std::cell::Cell::new(None) });
+        self.dismiss = Some(DismissSurface { layer, viewport, buffer, size: (0, 0), usable: None, input_hole: std::cell::RefCell::new(None) });
     }
 
     fn update_dismiss_region(&self) {
@@ -2089,12 +2143,15 @@ impl App {
             Some(u) => (u.output_w.max(0) as u32, (u.x, u.y)),
             None => (w, (0, 0)),
         };
-        let hole = self.last_frame.and_then(|frame| frame.input).map(|rect| dismiss_hole(rect, output_w, self.width, origin));
-        if dismiss.input_hole.get() == Some(hole) { return; }
-        dismiss.input_hole.set(Some(hole));
+        // holes: the island, and the bar's drops and menu
+        let holes: Vec<(i32, i32, i32, i32)> = self.last_frame.and_then(|frame| frame.input).into_iter()
+            .chain(self.bar_input.iter().copied())
+            .map(|rect| dismiss_hole(rect, output_w, self.width, origin)).collect();
+        if dismiss.input_hole.borrow().as_ref() == Some(&holes) { return; }
+        *dismiss.input_hole.borrow_mut() = Some(holes.clone());
         let region = Region::new(&self.compositor).expect("wl_region");
         region.add(0, 0, w as i32, h as i32);
-        if let Some((x, y, width, height)) = hole {
+        for (x, y, width, height) in holes {
             region.subtract(x, y, width, height);
         }
         dismiss.layer.set_input_region(Some(region.wl_region()));
@@ -2103,6 +2160,7 @@ impl App {
 
     fn dismiss_menus(&mut self) {
         let now = self.frame_time();
+        self.island.bar.close_menu(now);
         self.island.close_launcher(now);
         self.island.close_activity_panel(now);
         self.after_change();
@@ -2123,7 +2181,12 @@ impl CompositorHandler for App {
         self.frame_pending = false;
         self.draw(true);
     }
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: &wl_output::WlOutput) {
+        // now the island's output is known: the bar's room goes there
+        if surface == self.layer.wl_surface() {
+            self.sync_bar_reserve();
+        }
+    }
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
 
@@ -2212,7 +2275,7 @@ impl LayerShellHandler for App {
                 dismiss.usable = usable;
                 let first = dismiss.size == (0, 0);
                 dismiss.size = (w, h);
-                dismiss.input_hole.set(None);
+                *dismiss.input_hole.borrow_mut() = None;
                 dismiss.viewport.set_destination(w as i32, h as i32);
                 if first {
                     dismiss.buffer.attach_to(dismiss.layer.wl_surface()).expect("unused dismiss buffer");
@@ -2326,9 +2389,10 @@ impl App {
                     PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                         let item = self.island.bar.item_at(x, y);
                         changed |= self.island.bar.hover(item, now);
+                        changed |= self.island.bar.menu_hover(x, y);
                     }
                     PointerEventKind::Press { button, .. } => {
-                        if let Some(action) = self.island.bar.press(x, y, button) {
+                        if let Some(action) = self.island.bar.press(x, y, button, now) {
                             self.bar_action(action);
                         }
                         changed = true;

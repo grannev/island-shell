@@ -131,7 +131,7 @@ bar/sources.rs    environment workers feeding `BarEvent`s into the loop
 - Only one process may own the watcher name: the tray part starts only when
   Waybar is gone (or takes the name over if it is free).
 
-## 3. Stages
+## 3. Stages (1–7 done 2026-10-31; Waybar is off, `bar = on`)
 1. `drop.rs`: one drop geometry; the island and the side level use it;
    gallery shots of the corner drops.
 2. Bar skeleton: `Bar` with two empty corner drops, layout rows with animated

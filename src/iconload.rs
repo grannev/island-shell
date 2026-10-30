@@ -64,7 +64,7 @@ impl Icons {
     }
 }
 
-struct Loader {
+pub(crate) struct Loader {
     themes: Vec<String>,
     bases: Vec<PathBuf>,
     cache: RefCell<HashMap<String, Option<cairo::ImageSurface>>>,
@@ -75,7 +75,7 @@ struct Loader {
 }
 
 impl Loader {
-    fn new() -> Loader {
+    pub(crate) fn new() -> Loader {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let mut bases = vec![home.join(".local/share/icons"), home.join(".icons")];
         let system = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
@@ -119,7 +119,7 @@ impl Loader {
     }
 
     /// The icon at exactly `px` × `px` device pixels, rendered once.
-    pub fn get_scaled(&self, name: &str, px: i32) -> Option<cairo::ImageSurface> {
+    pub(crate) fn get_scaled(&self, name: &str, px: i32) -> Option<cairo::ImageSurface> {
         let key = (name.to_string(), px);
         if let Some(hit) = self.scaled.borrow().get(&key) {
             return hit.clone();
@@ -199,7 +199,7 @@ fn index_inherits(bases: &[PathBuf], theme: &str) -> Vec<String> {
 
 /// Load a PNG straight, anything else through a rasterised copy in the
 /// cache directory (rendered once).
-fn load(path: &Path) -> Option<cairo::ImageSurface> {
+pub(crate) fn load(path: &Path) -> Option<cairo::ImageSurface> {
     let png =
         if path.extension().and_then(|e| e.to_str()) == Some("png") { path.to_path_buf() } else { rasterise(path)? };
     let mut file = std::fs::File::open(&png).ok()?;

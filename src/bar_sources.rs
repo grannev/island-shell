@@ -14,6 +14,10 @@ use crate::bar::Details;
 /// What the bar's workers report.
 pub enum BarEvent {
     Details(Details),
+    /// the tray's items, in order
+    Tray(Vec<crate::tray::TrayItem>),
+    /// an item's menu, read for its sheet
+    Menu(String, Vec<crate::tray::MenuEntry>),
 }
 
 /// Sample disk, CPU and memory every two seconds while `open` holds.

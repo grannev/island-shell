@@ -574,6 +574,7 @@ at the beginning of a line or as a separate word), read at start;
     screen_corners = 16   # radius of the screen's rounded corners, px (0 = square)
     edge_light = on       # light along the screen's edges (notifications, Touch ID)
     ambilight = off       # music lights the bottom edge in the cover's colour
+    bar = on              # Waybar's row in the island's corner drops (off: run Waybar again)
 
 Without `clock` the closed island rests as a short black capsule (150 px), and
 a right click on any free part of it opens the calendar. Its activities then

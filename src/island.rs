@@ -6930,7 +6930,7 @@ mod bar_look {
     #[ignore = "writes target/gallery/bar.png"]
     fn bar_look() {
         let renderer = Renderer::new(1.5);
-        let (w, h) = (1504.0, 70.0);
+        let (w, h) = (1504.0, 380.0);
         let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * 1.5) as i32, (h * 1.5 * 2.0) as i32).unwrap();
         let cr = Context::new(&surface).unwrap();
         for (row, drawer) in [false, true].into_iter().enumerate() {
@@ -6944,6 +6944,18 @@ mod bar_look {
             island.bar.battery = Some(crate::bar::Battery { percent: 84, charging: false, remaining: None });
             island.bar.details = Some(crate::bar::Details { disk_free: "118G".into(), cpu: 7, memory_gb: 3.4 });
             island.bar.set_drawer(drawer);
+            island.bar.tray = vec![crate::bar::TrayIcon { id: "vpn".into(), icon: None, has_menu: true, item_is_menu: false, title: "VPN".into() }];
+            if drawer {
+                use crate::tray::MenuEntry;
+                let e = |id, label: &str, enabled| MenuEntry { id, label: label.into(), enabled, ..MenuEntry::default() };
+                let sep = MenuEntry { separator: true, ..MenuEntry::default() };
+                let mut checked = e(8, "Start at login", true);
+                checked.toggle = Some(true);
+                let mut more = e(9, "Servers", true);
+                more.children = vec![e(10, "Auto", true)];
+                island.bar.open_menu("vpn".into(), vec![e(7, "Show AmneziaVPN", true), sep.clone(), e(5, "Connect", false),
+                    e(4, "Disconnect", true), checked, more, sep, e(2, "Visit Website", true), e(1, "Quit AmneziaVPN", true)], 10.0);
+            }
             let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
             let sc = Context::new(&scratch).unwrap();
             sc.scale(1.5, 1.5);

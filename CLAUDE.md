@@ -29,10 +29,12 @@ a PipeWire capture, dunst (or an own org.freedesktop.Notifications).
 - Debian 13, SwayFX 0.5.1 (built from ~/.local/src/swayfx, patched), output
   eDP-1 2256x1504 @ scale 1.5 → 1504x1002 logical. Fractional scale: the
   island must render crisply at 1.5 (glyphs on whole output pixels).
-- The main waybar (~/.config/waybar/sway.jsonc, bar "main") stays: 26 px
-  tall, transparent, SF Pro Text Medium 16 px; its "⋯" drawer (group
-  signal SIGRTMIN+9, mod+o = ~/.config/sway/scripts/details-toggle.sh)
-  opens to the left of the right-hand modules — the island must dodge it.
+- The main Waybar is retired (2026-10-31): the island draws its row
+  itself (`src/bar.rs`, config `bar = on`; the sway `bar {}` block is
+  commented out with a note on going back). Inventory and plan:
+  `docs/bar.md`. The ⋯ drawer (mod+o → details-toggle.sh → `island-shell
+  dodge-toggle`) opens to the left of the right-hand items; the island
+  dodges it.
 - Fonts: SF Pro Text (Regular…Black) in ~/.local/share/fonts/SF-Pro; SF
   Symbols glyphs are PUA code points of the same fonts (used: speaker
   U+1002A5/A7/A9, mute U+1002A3 (right-facing, not the RTL U+10063A), keyboard.fill U+100E91, battery
@@ -239,6 +241,18 @@ entrance timestamps are separate from last-update timestamps: key repeat only
 extends the hold. Cairo icon helpers start fresh paths so text positions never
 become stray stroked lines.
 
+The bar (`src/bar.rs`): two drops of the frame pressed into the top
+corners, 32 px like the island (an empty top-layer surface reserves the room,
+`BarReserve`): workspaces (sway events, a sliding focus pill, click / scroll)
+left; the drawer (disk / CPU / memory sampled only while open,
+`bar_sources.rs`), volume (click mute, scroll 5 %), layout (click: wvkbd),
+battery (tooltip with the time left) and the tray right. The bar holds state
+and returns `bar::Action`s; it does no I/O. The tray (`src/tray.rs`): the
+island owns `org.kde.StatusNotifierWatcher` (same properties/signals as
+Waybar's, lock.sh counts items) and hosts the items on threads; menus
+(dbusmenu, variant-wrapped a{sv} values unwrapped) open as sheets hanging from
+the right drop (`drop::notch` under its edge), closed by an outside click (the
+dismiss catcher has holes for the bar).
 Performance: the surface is the whole screen, so a full repaint and copy is
 a 10–17 ms frame: only a new size (or the first configure) resets the canvas
 (a configure that merely acknowledges a keyboard-focus change must not), and

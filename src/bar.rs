@@ -83,6 +83,9 @@ pub struct Details {
 pub struct TrayIcon {
     pub id: String,
     pub icon: Option<cairo::ImageSurface>,
+    /// it has a menu of its own (dbusmenu), and a click opens it
+    pub has_menu: bool,
+    pub item_is_menu: bool,
     /// for its tooltip (with the tray's menus)
     #[allow(dead_code)]
     pub title: String,
@@ -118,7 +121,37 @@ pub enum Action {
     TrayActivate(String, f64, f64),
     TraySecondary(String, f64, f64),
     TrayMenu(String, f64, f64),
+    TrayScroll(String, i32),
+    /// an entry of a tray item's menu was chosen
+    MenuChoose(String, i32),
 }
+
+/// A tray item's menu, open as a sheet hanging from the right drop.
+struct Menu {
+    id: String,
+    /// the pages: the menu, then each submenu opened from it
+    pages: Vec<Vec<crate::tray::MenuEntry>>,
+    opened: Time,
+    grow: Spring,
+    hovered: Option<usize>,
+    /// where it was drawn, and its rows
+    rect: Option<Rect>,
+    rows: Vec<(Rect, Row)>,
+    closing: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Row {
+    Back,
+    Entry(usize),
+}
+
+const MENU_ROW: f64 = 32.0;
+const MENU_SEPARATOR: f64 = 9.0;
+const MENU_PAD: f64 = 6.0;
+const MENU_MIN_W: f64 = 190.0;
+const MENU_MAX_W: f64 = 320.0;
+const MENU_R: f64 = 18.0;
 
 pub struct Bar {
     pub workspaces: Vec<Workspace>,
@@ -141,6 +174,7 @@ pub struct Bar {
     /// where each item was drawn last, for hit testing
     slots: Vec<(Item, Rect)>,
     drops: [Option<Rect>; 2],
+    menu: Option<Menu>,
 }
 
 impl Default for Bar {
@@ -162,6 +196,7 @@ impl Default for Bar {
             hide: Spring::new(0.0, 0.3, 1.0),
             slots: Vec::new(),
             drops: [None, None],
+            menu: None,
         }
     }
 }
@@ -194,8 +229,43 @@ impl Bar {
         self.hide.set(if hidden { 1.0 } else { 0.0 }, now);
     }
 
+    /// A tray item's menu arrived: open it as a sheet under the item.
+    pub fn open_menu(&mut self, id: String, entries: Vec<crate::tray::MenuEntry>, now: Time) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut grow = Spring::new(0.0, 0.34, 0.78);
+        grow.set(1.0, now);
+        self.menu = Some(Menu { id, pages: vec![entries], opened: now, grow, hovered: None, rect: None, rows: Vec::new(), closing: false });
+    }
+
+    pub fn close_menu(&mut self, now: Time) {
+        if let Some(m) = self.menu.as_mut() {
+            m.closing = true;
+            m.grow.set_with(0.0, 0.22, 1.0, now);
+        }
+    }
+
+    /// Is a menu up (for the outside click that closes it)?
+    pub fn menu_open(&self) -> bool {
+        self.menu.as_ref().is_some_and(|m| !m.closing)
+    }
+
+    /// The pointer over the menu: which row is lit.
+    pub fn menu_hover(&mut self, x: f64, y: f64) -> bool {
+        let Some(m) = self.menu.as_mut() else { return false };
+        let row = m.rows.iter().position(|(r, row)| inside(*r, x, y) && match row {
+            Row::Entry(i) => m.pages.last().and_then(|p| p.get(*i)).is_some_and(|e| e.enabled && !e.separator),
+            Row::Back => true,
+        });
+        let changed = row != m.hovered;
+        m.hovered = row;
+        changed
+    }
+
     pub fn is_animating(&self, now: Time) -> bool {
-        self.hide.is_moving(now)
+        self.menu.as_ref().is_some_and(|m| m.grow.is_moving(now) || now - m.opened < 0.4)
+            || self.hide.is_moving(now)
             || self.widths.values().any(|s| s.is_moving(now))
             || self.focus_x.as_ref().is_some_and(|s| s.is_moving(now))
             || self.focus_w.as_ref().is_some_and(|s| s.is_moving(now))
@@ -207,9 +277,10 @@ impl Bar {
         self.slots.iter().find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|(i, _)| i.clone())
     }
 
-    /// Is the point over one of the drops?
+    /// Is the point over one of the drops (or the menu hanging from one)?
     pub fn contains(&self, x: f64, y: f64) -> bool {
-        self.drops.iter().flatten().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+        self.drops.iter().flatten().any(|r| inside(*r, x, y))
+            || self.menu.as_ref().and_then(|m| m.rect).is_some_and(|r| inside(r, x, y))
     }
 
     /// The pointer moved over the bar (None: it left).
@@ -229,7 +300,37 @@ impl Bar {
 
     /// A press on the bar: what it asks for. `button`: 0x110 left, 0x111
     /// right, 0x112 middle.
-    pub fn press(&self, x: f64, y: f64, button: u32) -> Option<Action> {
+    pub fn press(&mut self, x: f64, y: f64, button: u32, now: Time) -> Option<Action> {
+        // the menu first: a row chosen, a submenu entered, the way back
+        if let Some(m) = self.menu.as_mut().filter(|m| !m.closing) {
+            if m.rect.is_some_and(|r| inside(r, x, y)) {
+                let row = m.rows.iter().find(|(r, _)| inside(*r, x, y)).map(|(_, row)| row.clone());
+                match row {
+                    Some(Row::Back) => {
+                        m.pages.pop();
+                        m.hovered = None;
+                    }
+                    Some(Row::Entry(i)) => {
+                        let entry = m.pages.last()?.get(i)?.clone();
+                        if entry.separator || !entry.enabled {
+                            return None;
+                        }
+                        if !entry.children.is_empty() {
+                            m.pages.push(entry.children);
+                            m.hovered = None;
+                            return None;
+                        }
+                        let id = m.id.clone();
+                        self.close_menu(now);
+                        return Some(Action::MenuChoose(id, entry.id));
+                    }
+                    None => {}
+                }
+                return None;
+            }
+            // anywhere else on the bar: the menu folds first
+            self.close_menu(now);
+        }
         let item = self.item_at(x, y)?;
         let (cx, cy) = self.slots.iter().find(|(i, _)| *i == item).map(|(_, r)| (r.x + r.w / 2.0, r.y + r.h)).unwrap_or((x, y));
         Some(match (item, button) {
@@ -249,6 +350,7 @@ impl Bar {
         match self.item_at(x, y)? {
             Item::Workspace(_) => Some(Action::CycleWorkspace(if dy > 0.0 { 1 } else { -1 })),
             Item::Volume => Some(Action::VolumeStep(if dy > 0.0 { -1 } else { 1 })),
+            Item::Tray(id) => Some(Action::TrayScroll(id, if dy > 0.0 { 1 } else { -1 })),
             _ => None,
         }
     }
@@ -451,9 +553,101 @@ impl Bar {
                 frame.painted.push(Rect { x: tx - 2.0, y: 0.0, w: tw + 4.0, h: ty + th + 2.0 });
             }
         }
+        self.draw_menu(cr, renderer, w, smoothing, now, &mut frame);
         cr.restore().unwrap();
         frame.input.retain(|r| r.h > 0.5);
         frame
+    }
+
+    /// The tray item's menu: a sheet hanging from the right drop's lower
+    /// edge under the item, fillets where it leaves it, as the island hangs
+    /// from the screen's edge.
+    fn draw_menu(&mut self, cr: &Context, renderer: &Renderer, w: f64, smoothing: f64, now: Time, frame: &mut BarFrame) {
+        let Some(m) = self.menu.as_mut() else { return };
+        let k = m.grow.value(now).max(0.0);
+        if m.closing && k <= 0.01 {
+            self.menu = None;
+            return;
+        }
+        let page = m.pages.last().cloned().unwrap_or_default();
+        let back = m.pages.len() > 1;
+        let label_w = page.iter().map(|e| renderer.layout(cr, &e.label, Font::Body).pixel_extents().1.width() as f64).fold(0.0, f64::max);
+        let mw = (label_w + 70.0).clamp(MENU_MIN_W, MENU_MAX_W);
+        let content: f64 = if back { MENU_ROW } else { 0.0 }
+            + page.iter().map(|e| if e.separator { MENU_SEPARATOR } else { MENU_ROW }).sum::<f64>();
+        let full_h = (content + 2.0 * MENU_PAD).min(520.0);
+        // under the item, inside the drop's span
+        let anchor = self.slots.iter().find(|(i, _)| *i == Item::Tray(m.id.clone())).map(|(_, r)| r.x + r.w / 2.0).unwrap_or(w - 40.0);
+        let drop_x = self.drops[1].map_or(w - mw, |d| d.x);
+        let x1 = (anchor + mw / 2.0).min(w - 2.0);
+        let x0 = (x1 - mw).max(drop_x + RADIUS + FILLET);
+        let x1 = x0 + mw;
+        let y0 = HEIGHT;
+        let h = full_h * k;
+        crate::drop::notch(cr, x0, x1, y0, y0 + h.max(0.5), MENU_R.min(h / 2.0).max(0.0), FILLET * k.min(1.0), smoothing);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        let _ = cr.fill();
+        let rect = Rect { x: x0, y: y0, w: mw, h };
+        m.rect = Some(rect);
+        frame.painted.push(Rect { x: x0 - FILLET - 2.0, y: 0.0, w: mw + 2.0 * FILLET + 4.0, h: y0 + full_h * 1.1 + 4.0 });
+        frame.input.push(rect);
+        // the rows come in once it has most of its height
+        let alpha = ((k - 0.5) / 0.4).clamp(0.0, 1.0);
+        m.rows.clear();
+        let mut y = y0 + MENU_PAD;
+        let mut rows: Vec<(Row, f64)> = Vec::new();
+        if back { rows.push((Row::Back, MENU_ROW)); }
+        for (i, e) in page.iter().enumerate() {
+            rows.push((Row::Entry(i), if e.separator { MENU_SEPARATOR } else { MENU_ROW }));
+        }
+        cr.save().unwrap();
+        cr.rectangle(x0, y0, mw, h);
+        cr.clip();
+        for (n, (row, rh)) in rows.into_iter().enumerate() {
+            let r = Rect { x: x0 + 6.0, y, w: mw - 12.0, h: rh };
+            if alpha > 0.002 {
+                if m.hovered == Some(n) {
+                    rounded(cr, r, 9.0);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha);
+                    let _ = cr.fill();
+                }
+                match &row {
+                    Row::Back => menu_label(cr, renderer, "‹ Назад", r, true, alpha * 0.7),
+                    Row::Entry(i) => {
+                        let e = &page[*i];
+                        if e.separator {
+                            cr.rectangle(r.x + 8.0, r.y + rh / 2.0 - 0.5, r.w - 16.0, 1.0);
+                            cr.set_source_rgba(1.0, 1.0, 1.0, 0.12 * alpha);
+                            let _ = cr.fill();
+                        } else {
+                            menu_label(cr, renderer, &e.label, r, e.enabled, alpha);
+                            if e.toggle == Some(true) {
+                                // a check mark before it
+                                let (cx, cy) = (r.x + 14.0, r.y + rh / 2.0);
+                                cr.new_path();
+                                cr.move_to(cx - 4.5, cy + 0.5);
+                                cr.line_to(cx - 1.2, cy + 3.8);
+                                cr.line_to(cx + 5.0, cy - 3.8);
+                                cr.set_line_width(1.8);
+                                cr.set_line_cap(cairo::LineCap::Round);
+                                cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * alpha);
+                                let _ = cr.stroke();
+                            }
+                            if !e.children.is_empty() {
+                                let chevron = renderer.layout(cr, "›", Font::Body);
+                                let (_, ext) = chevron.pixel_extents();
+                                cr.set_source_rgba(1.0, 1.0, 1.0, 0.5 * alpha);
+                                cr.move_to(renderer.snap(r.x + r.w - 12.0 - ext.width() as f64), renderer.snap(r.y + (rh - ext.height() as f64) / 2.0 - ext.y() as f64));
+                                pangocairo::functions::show_layout(cr, &chevron);
+                            }
+                        }
+                    }
+                }
+            }
+            m.rows.push((r, row));
+            y += rh;
+        }
+        cr.restore().unwrap();
     }
 
     fn colour_of(&self, item: &Item) -> (f64, f64, f64) {
@@ -500,6 +694,19 @@ fn battery_tip(b: Battery) -> String {
         (false, Some(m)) => format!("Осталось {}", time(m)),
         (false, None) => format!("Батарея {}%", b.percent),
     }
+}
+
+fn inside(r: Rect, x: f64, y: f64) -> bool {
+    x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
+}
+
+/// A menu row's label, after the room for a check mark.
+fn menu_label(cr: &Context, renderer: &Renderer, text: &str, r: Rect, enabled: bool, alpha: f64) {
+    let layout = renderer.layout_ellipsized(cr, text, Font::Body, r.w - 44.0, 1);
+    let (_, ext) = layout.pixel_extents();
+    cr.set_source_rgba(1.0, 1.0, 1.0, alpha * if enabled { 0.95 } else { 0.35 });
+    cr.move_to(renderer.snap(r.x + 28.0), renderer.snap(r.y + (r.h - ext.height() as f64) / 2.0 - ext.y() as f64));
+    pangocairo::functions::show_layout(cr, &layout);
 }
 
 fn rounded(cr: &Context, r: Rect, radius: f64) {
@@ -582,15 +789,15 @@ mod tests {
         settle(&mut bar, 10.0);
         let at = |bar: &Bar, item: Item| bar.slots.iter().find(|(i, _)| *i == item).map(|(_, r)| (r.x + r.w / 2.0, 16.0)).unwrap();
         let (x, y) = at(&bar, Item::Workspace("10".into()));
-        assert_eq!(bar.press(x, y, 0x110), Some(Action::Workspace("10".into())));
+        assert_eq!(bar.press(x, y, 0x110, 11.0), Some(Action::Workspace("10".into())));
         assert_eq!(bar.scroll(x, y, 1.0), Some(Action::CycleWorkspace(1)));
         assert_eq!(bar.cycled(1).as_deref(), Some("10"));
         assert_eq!(bar.cycled(-1).as_deref(), Some("2"));
         let (x, y) = at(&bar, Item::Volume);
-        assert_eq!(bar.press(x, y, 0x110), Some(Action::ToggleMute));
+        assert_eq!(bar.press(x, y, 0x110, 11.0), Some(Action::ToggleMute));
         assert_eq!(bar.scroll(x, y, -1.0), Some(Action::VolumeStep(1)));
         let (x, y) = at(&bar, Item::Details);
-        assert_eq!(bar.press(x, y, 0x110), Some(Action::ToggleDrawer));
+        assert_eq!(bar.press(x, y, 0x110, 11.0), Some(Action::ToggleDrawer));
     }
 
     #[test]
@@ -602,6 +809,32 @@ mod tests {
         assert!(open.w > closed.w + 100.0, "{} → {}", closed.w, open.w);
         assert!((open.x + open.w - 1504.0).abs() < 1e-9, "still pressed to the right edge");
         assert!(bar.slots.iter().any(|(i, r)| *i == Item::Cpu && r.w > 20.0));
+    }
+
+    #[test]
+    fn a_tray_menu_hangs_from_the_right_drop_and_chooses() {
+        use crate::tray::MenuEntry;
+        let mut bar = bar();
+        bar.tray = vec![TrayIcon { id: ":1.5/StatusNotifierItem".into(), icon: None, has_menu: true, item_is_menu: false, title: "T".into() }];
+        settle(&mut bar, 10.0);
+        let entry = |id, label: &str| MenuEntry { id, label: label.into(), enabled: true, ..MenuEntry::default() };
+        let mut sub = entry(3, "More");
+        sub.children = vec![entry(4, "Deep")];
+        bar.open_menu(":1.5/StatusNotifierItem".into(), vec![entry(1, "Open"), MenuEntry { separator: true, ..MenuEntry::default() }, sub], 12.0);
+        assert!(bar.menu_open());
+        settle(&mut bar, 12.0);
+        let rect = bar.menu.as_ref().unwrap().rect.unwrap();
+        assert!(rect.y == HEIGHT && rect.x + rect.w <= 1504.0 && rect.h > 60.0);
+        let row = |bar: &Bar, n: usize| { let r = bar.menu.as_ref().unwrap().rows[n].0; (r.x + 20.0, r.y + r.h / 2.0) };
+        // into the submenu, and its entry chosen
+        let (x, y) = row(&bar, 2);
+        assert_eq!(bar.press(x, y, 0x110, 13.0), None);
+        settle(&mut bar, 13.0);
+        let (x, y) = row(&bar, 1);
+        assert_eq!(bar.press(x, y, 0x110, 14.0), Some(Action::MenuChoose(":1.5/StatusNotifierItem".into(), 4)));
+        assert!(!bar.menu_open());
+        settle(&mut bar, 14.0);
+        assert!(bar.menu.is_none(), "folded away");
     }
 
     #[test]

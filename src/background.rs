@@ -45,6 +45,7 @@ impl<K: Send + Clone + 'static, V: Send + 'static> Worker<K, V> {
 }
 
 /// Only owned pixel bytes cross threads; Cairo objects stay on their owner.
+#[derive(Clone)]
 pub struct Pixels {
     bytes: Vec<u8>,
     width: i32,

@@ -49,6 +49,7 @@ mod tasks;
 mod timer_page;
 mod touch;
 mod touchid;
+mod tray;
 mod weather;
 
 fn main() {
