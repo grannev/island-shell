@@ -35,6 +35,7 @@ mod notify;
 mod notice_center;
 mod notification_server;
 mod nvim;
+mod outline;
 mod network;
 mod connections;
 mod control;

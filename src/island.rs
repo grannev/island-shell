@@ -4957,8 +4957,10 @@ impl Island {
     /// island's surface centred on `cx`; painted under the island. Returns
     /// the strips it painted.
     pub fn draw_edges(&mut self, cr: &Context, w: f64, h: f64, cx: f64, now: Time) -> Vec<Rect> {
-        // the light comes out of the island as it was last drawn
+        // the light comes out of the island as it was last drawn, and rounds
+        // the bar's drops
         self.edge.set_island(self.box_geom.filter(|_| !self.hidden.any() || self.pill.state(now).x > 0.05));
+        self.edge.set_drops(if self.config.bar { self.bar.drop_sizes() } else { [None, None] });
         // Touch ID breathes round the screen while it waits for a finger
         let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
         // the light begins once Touch ID's pill has grown
@@ -4999,7 +5001,14 @@ impl Island {
     pub fn draw_frame_marks(&mut self, cr: &Context, renderer: &Renderer, w: f64, h: f64, now: Time) -> Vec<Rect> {
         // the top edge: pulled down round a tugged island, rippling
         let (cx, attach, sag) = self.tug_top.unwrap_or((self.island_cx(now), 0.0, 0.0));
-        let mut marks = self.membrane.draw(cr, w, self.config.screen_corners, cx, attach, sag, now);
+        // the edge's ripples run between the bar's drops (or the corners)
+        let corners = self.config.screen_corners;
+        let drops = if self.config.bar { self.bar.drop_sizes() } else { [None, None] };
+        let walls = [
+            drops[0].map_or((0.0, corners), |d| (d.w, 14.0)),
+            drops[1].map_or((w, corners), |d| (w - d.w, 14.0)),
+        ];
+        let mut marks = self.membrane.draw(cr, w, walls, cx, attach, sag, now);
         marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
         marks.extend(self.side_hud.draw(cr, renderer, h, now));
         marks
@@ -6978,5 +6987,48 @@ mod bar_look {
         }
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/bar.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod light_round_drops {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/light-drops.png"]
+    fn light_round_drops() {
+        let renderer = Renderer::new(1.5);
+        let (w, h) = (1504.0, 1002.0);
+        let rows = [10.35, 10.55, 10.8];
+        let (fh, scale) = (110.0, 0.8);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * scale) as i32, ((fh * scale + 4.0) * rows.len() as f64) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (i, t) in rows.into_iter().enumerate() {
+            let mut island = tests::gallery_island_pub();
+            island.config.bar = true;
+            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into() }).collect();
+            island.controls.volume = Some(0.3);
+            island.controls.layout = Some("English".into());
+            island.bar.battery = Some(crate::bar::Battery { percent: 50, charging: false, remaining: None });
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            sc.scale(1.5, 1.5);
+            let mut now = 9.0;
+            for _ in 0..60 { island.advance(now); island.draw_edges(&sc, w, h, w / 2.0, now); island.draw(&sc, &renderer, w / 2.0, now); island.draw_bar(&sc, &renderer, w, now); now += 1.0 / 60.0; }
+            island.edge.pulse(crate::edge::Wave::Top, (0.165, 0.67, 0.93), 10.0);
+            cr.save().unwrap();
+            cr.translate(0.0, i as f64 * (fh * scale + 4.0));
+            cr.rectangle(0.0, 0.0, w * scale, fh * scale);
+            cr.clip();
+            cr.scale(scale, scale);
+            cr.set_source_rgb(0.10, 0.17, 0.22);
+            cr.paint().unwrap();
+            island.draw_edges(&cr, w, h, w / 2.0, t);
+            island.draw(&cr, &renderer, w / 2.0, t);
+            island.draw_bar(&cr, &renderer, w, t);
+            crate::bezel::paint(&cr, w, h, 16.0);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/light-drops.png").unwrap()).unwrap();
     }
 }

@@ -216,6 +216,11 @@ struct Cell {
 }
 
 impl Bar {
+    /// The drops as last drawn (left, right): how far out and how tall.
+    pub fn drop_sizes(&self) -> [Option<crate::outline::Drop>; 2] {
+        self.drops.map(|d| d.filter(|r| r.w > 1.0 && r.h > 1.0).map(|r| crate::outline::Drop { w: r.w, h: r.h }))
+    }
+
     pub fn drawer_open(&self) -> bool {
         self.drawer
     }
