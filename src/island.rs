@@ -869,6 +869,13 @@ pub struct Island {
     edge: crate::edge::Edge,
     /// the screen switching off into the island (see `curtain`)
     curtain: crate::curtain::Curtain,
+    /// a volume / brightness level up the screen's side: how far shown,
+    /// its value, and which (true: volume, on the right)
+    level_shown: Spring,
+    level_value: Spring,
+    level_right: bool,
+    /// the battery is low and not charging: the bottom corners smoulder
+    low_battery: bool,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1127,6 +1134,10 @@ impl Island {
             tug: None,
             edge: crate::edge::Edge::default(),
             curtain: crate::curtain::Curtain::default(),
+            level_shown: Spring::new(0.0, 0.35, 1.0),
+            level_value: Spring::new(0.0, 0.25, 1.0),
+            level_right: true,
+            low_battery: false,
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -1214,6 +1225,7 @@ impl Island {
             || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
             || self.edge.is_animating(now)
             || self.curtain.is_animating(now)
+            || self.level_shown.is_moving(now) || self.level_shown.value(now) > 0.005 && self.level_value.is_moving(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -2099,6 +2111,17 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
+        // the battery's states light the frame's bottom corners
+        match event {
+            activity::Event::Charging { .. } => {
+                self.low_battery = false;
+                if self.config.edge_light {
+                    self.edge.pulse(crate::edge::Wave::Rise, crate::edge::SUCCESS_GREEN, now);
+                }
+            }
+            activity::Event::BatteryLow { .. } => self.low_battery = true,
+            _ => {}
+        }
         if let activity::Event::MicInUse { apps } = event {
             self.set_mic_users(apps, now);
             return;
@@ -4856,6 +4879,30 @@ impl Island {
             comet: t.counts_up(),
         });
         self.edge.set_gauge(gauge);
+        // volume and brightness stand up the screen's sides as they change
+        let level = match self.visible_activity().map(|a| &a.event) {
+            Some(activity::Event::Slider { kind, value, muted }) if self.config.edge_light => {
+                Some((*kind == activity::SliderKind::Volume, if *muted { 0.0 } else { *value }))
+            }
+            _ => None,
+        };
+        if let Some((right, value)) = level {
+            if self.level_shown.value(now) < 0.01 || right != self.level_right {
+                // fresh (or the other side): it grows from nothing there
+                self.level_right = right;
+                self.level_value = Spring::new(0.0, 0.25, 1.0);
+            }
+            self.level_value.set(value, now);
+        }
+        self.level_shown.set(if level.is_some() { 1.0 } else { 0.0 }, now);
+        let warm = (1.0, 0.84, 0.42);
+        self.edge.set_level(Some(crate::edge::Level {
+            right: self.level_right,
+            value: self.level_value.value(now),
+            shown: self.level_shown.value(now).clamp(0.0, 1.0),
+            colour: if self.level_right { (0.95, 0.97, 1.0) } else { warm },
+        }));
+        self.edge.set_ember(if self.low_battery && self.config.edge_light { 0.55 } else { 0.0 });
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
         let mut painted = self.edge.draw(cr, w, h, cx, now);
         // the screen closing into the island (or coming out of it): over

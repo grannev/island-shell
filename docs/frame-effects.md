@@ -46,10 +46,12 @@ Status: [ ] to do, [x] done.
 - [ ] (skipped) Camera in use: the laptop has a camera LED; detecting an
       open /dev/video* means scanning /proc and costs idle CPU.
 
-## Stage 5 — levels and power
-- [ ] Volume / brightness: a thin level slides out of the right edge.
-- [ ] Charging: green "liquid" rises from the bottom corners and drains.
-- [ ] Low battery: the bottom corners smoulder red.
+## Stage 5 — levels and power (done)
+- [x] Volume / brightness: a thin level stands up the screen's side while
+      the level pill shows (volume right, brightness left, warm).
+- [x] Charging: green "liquid" rises from the bottom corners and drains.
+- [x] Low battery: the bottom corners smoulder red until the charger is
+      plugged in (a still glow: no frames of its own).
 
 ## Stage 6 — the frame as a material
 - [ ] Rubber edge: a hard tug bends the top edge after the island like a

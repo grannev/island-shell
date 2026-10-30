@@ -41,6 +41,9 @@ pub enum Wave {
     Flash,
     /// a short shake out of the island and back (a miss)
     Shudder,
+    /// green rising from the bottom corners up the sides and draining
+    /// away (the charger plugged in)
+    Rise,
 }
 
 impl Wave {
@@ -50,6 +53,7 @@ impl Wave {
             Wave::Around => 1.7,
             Wave::Flash => 0.75,
             Wave::Shudder => 0.6,
+            Wave::Rise => 1.8,
         }
     }
 }
@@ -74,6 +78,9 @@ pub struct Gauge {
     pub comet: bool,
 }
 
+/// How far along the edges a low battery's red reaches from the corners.
+const EMBER_REACH: f64 = 70.0;
+
 /// How bright the gauge's line is, and its head.
 const GAUGE_LINE: f64 = 0.5;
 const GAUGE_HEAD: f64 = 0.5;
@@ -81,10 +88,24 @@ const GAUGE_HEAD_LEN: f64 = 48.0;
 /// A comet's tail, as a share of the way round.
 const COMET_TAIL: f64 = 0.22;
 
+/// A volume or brightness level standing up one side of the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// the right edge (volume), else the left (brightness)
+    pub right: bool,
+    pub value: f64,
+    /// how far it is shown, 0..1
+    pub shown: f64,
+    pub colour: Rgb,
+}
+
 #[derive(Default)]
 pub struct Edge {
     pulses: Vec<Pulse>,
     gauge: Option<Gauge>,
+    level: Option<Level>,
+    /// the bottom corners smouldering red (low battery), how strongly
+    ember: f64,
     /// a continuous wave (Touch ID waiting): its colour, since when, and
     /// when it began to fade out
     breath: Option<(Rgb, Time, Option<Time>)>,
@@ -128,6 +149,16 @@ impl Edge {
         self.gauge = gauge;
     }
 
+    /// A level up one side (still unless the island's springs move it).
+    pub fn set_level(&mut self, level: Option<Level>) {
+        self.level = level.filter(|l| l.shown > 0.005);
+    }
+
+    /// The bottom corners' red glow (0 = none); it stands still.
+    pub fn set_ember(&mut self, strength: f64) {
+        self.ember = strength;
+    }
+
     pub fn is_animating(&self, now: Time) -> bool {
         self.pulses.iter().any(|p| now - p.start < p.wave.duration()) || self.breath.is_some()
     }
@@ -140,21 +171,63 @@ impl Edge {
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
         }
-        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() {
+        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() && self.level.is_none() && self.ember <= 0.0 {
             return Vec::new();
         }
         let far = (w / 2.0 + cx.abs().min(w)).hypot(h) + SOFT;
         let mut lit = false;
+        if self.ember > 0.0 {
+            let ember = self.ember;
+            lit |= paint_by(cr, w, h, FAILURE_RED, &|side, t| {
+                // distance from the nearer bottom corner, along the edge
+                let d = match side {
+                    Side::Bottom => t.min(w - t),
+                    Side::Left | Side::Right => h - t,
+                    Side::Top => return 0.0,
+                };
+                if d > 4.0 * EMBER_REACH { 0.0 } else { ember * (-d / EMBER_REACH).exp() }
+            });
+        }
         if let Some(g) = self.gauge {
             lit |= paint_gauge(cr, w, h, cx, &g);
         }
+        if let Some(l) = self.level {
+            let top = h * (1.0 - l.value.clamp(0.0, 1.0));
+            lit |= paint_by(cr, w, h, l.colour, &|side, t| {
+                if side != if l.right { Side::Right } else { Side::Left } || t < top - STEP {
+                    return 0.0;
+                }
+                // a line up from the bottom, brightest at its top
+                let tip = (1.0 - (t - top).max(0.0) / GAUGE_HEAD_LEN).max(0.0);
+                l.shown * (GAUGE_LINE + GAUGE_HEAD * tip)
+            });
+        }
         for p in &self.pulses {
+            if p.wave == Wave::Rise {
+                let k = ((now - p.start) / p.wave.duration()).clamp(0.0, 1.0);
+                // up quickly, a moment full, then draining away
+                let fill = if k < 0.35 { ease_out(k / 0.35) } else if k < 0.5 { 1.0 } else { 1.0 - smooth((k - 0.5) / 0.5) };
+                let alpha = smooth(k / 0.06) * (1.0 - smooth((k - 0.75) / 0.25));
+                let surface = h * 0.55 * fill;
+                lit |= paint_by(cr, w, h, p.colour, &|side, t| match side {
+                    Side::Bottom => 0.8 * alpha,
+                    // the liquid's surface is soft, a little brighter
+                    Side::Left | Side::Right => {
+                        let depth = surface - (h - t);
+                        if depth < -40.0 { 0.0 } else if depth < 0.0 { alpha * (1.0 + depth / 40.0) } else { alpha * 0.8 }
+                    }
+                    Side::Top => 0.0,
+                });
+                continue;
+            }
             let k = ((now - p.start) / p.wave.duration()).clamp(0.0, 1.0);
             let rise = smooth(k / 0.08);
             let stops: Vec<(f64, f64)> = match p.wave {
                 Wave::Top => front(ease_out(k) * 0.64 * w, (1.0 - k).powf(1.4) * rise, 0.18),
                 Wave::Around => front(ease_out(k) * far, (1.0 - k).powf(1.2) * rise, 0.22),
                 Wave::Flash => vec![(0.0, rise * (1.0 - smooth((k - 0.15) / 0.85))), (far, rise * (1.0 - smooth((k - 0.15) / 0.85)))],
+                // drawn above, from the bottom corners
+                Wave::Rise => continue,
                 Wave::Shudder => {
                     // out and back, twice, dying away
                     let reach = 360.0 * (std::f64::consts::PI * k * 2.0).sin().abs() * (1.0 - k);
@@ -500,6 +573,34 @@ mod tests {
         // premultiplied BGRA: an opaque orange centre
         assert_eq!(px(596, 4)[3], 255);
         assert!(px(596, 4)[2] > 240 && px(596, 4)[0] < 30);
+    }
+
+    #[test]
+    fn levels_stand_up_their_side_and_embers_stay_in_the_bottom_corners() {
+        let mut edge = Edge::default();
+        edge.set_level(Some(Level { right: true, value: 0.5, shown: 1.0, colour: (1.0, 1.0, 1.0) }));
+        let (mut s, _) = render(&mut edge, 0.0);
+        assert!(alpha(&mut s, 599, 350) > 20, "the lower half of the right edge");
+        assert_eq!(alpha(&mut s, 599, 100), 0);
+        assert_eq!(alpha(&mut s, 0, 350), 0, "nothing on the left");
+        edge.set_level(None);
+        edge.set_ember(0.6);
+        let (mut s, _) = render(&mut edge, 0.0);
+        assert!(alpha(&mut s, 2, 398) > 20 && alpha(&mut s, 598, 398) > 20);
+        assert_eq!(alpha(&mut s, 300, 399), 0);
+        assert_eq!(alpha(&mut s, 0, 100), 0);
+        assert!(!edge.is_animating(0.0), "a still glow costs no frames");
+    }
+
+    #[test]
+    fn charging_rises_from_the_bottom_and_drains() {
+        let mut edge = Edge::default();
+        edge.pulse(Wave::Rise, SUCCESS_GREEN, 0.0);
+        let (mut s, _) = render(&mut edge, 0.8);
+        assert!(alpha(&mut s, 0, 300) > 20 && alpha(&mut s, 599, 300) > 20);
+        assert_eq!(alpha(&mut s, 0, 60), 0, "it does not reach the top");
+        let (_, rects) = render(&mut edge, 2.0);
+        assert!(rects.is_empty());
     }
 
     #[test]
