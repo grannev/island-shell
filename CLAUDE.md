@@ -169,6 +169,11 @@ closing click is consumed. It has exclusive zone 0, so it covers only the free
 area: wvkbd (on-screen keyboard, `~/.config/sway/scripts/osk.sh`) and the bar
 stay usable while a sheet is open; its offset comes from sway IPC
 (`sway::Query::usable`).
+The island's surface covers the whole output (input only over the box): the
+island is one drop of a black frame beyond the screen's edges, of which only
+the corners show (`src/bezel.rs`, config `screen_corners`, 16 px measured off
+the lid), painted once and repainted only when a wipe touches them. Future
+whole-screen effects belong on this surface.
 Touchscreen: the island binds wl_touch (`src/touch.rs`), so sway no longer
 emulates clicks; one finger becomes pointer events. Sliders, the playhead,
 the timer ruler and notifications are grabbed at once; elsewhere a tap clicks,

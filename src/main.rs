@@ -18,6 +18,7 @@ mod eq;
 mod icons;
 mod iconload;
 mod background;
+mod bezel;
 mod files;
 mod floating;
 mod island;

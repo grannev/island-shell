@@ -67,14 +67,11 @@ use crate::island::{Config, Frame, Island, Rect, Renderer};
 use crate::notify;
 use crate::sway;
 
-/// Logical size of the (mostly transparent) surface: wide enough for the
-/// dodge and the spread, tall enough for the Touch ID pill and the liquid
-/// stretch.
+/// Logical size of the (mostly transparent) surface until the compositor
+/// says otherwise: it covers the whole output, so the island can reach the
+/// screen's edges (the frame beyond them shows in the corners), and its
+/// input region only ever covers the island itself.
 const SURFACE_W: u32 = 980;
-/// tall enough for the launcher panel and the tallest sheet (the Control
-/// Center with "Now playing", the Sound page with four applications); the
-/// surface is transparent and its input region only ever covers the
-/// island itself
 const SURFACE_H: u32 = 640;
 
 const BTN_LEFT: u32 = 0x110;
@@ -296,6 +293,8 @@ pub struct App {
     /// where the pointer is, in logical px inside the surface
     pointer_at: (f64, f64),
     last_frame: Option<Frame>,
+    /// the screen-corner radius the canvas holds (None: not painted yet)
+    bezel_drawn: Option<f64>,
     /// the whole picture, always up to date
     canvas: Option<cairo::ImageSurface>,
     /// shm buffers, reused once the compositor releases them; each remembers
@@ -441,6 +440,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         kbd_interactivity: KeyboardInteractivity::None,
         pointer_at: (0.0, 0.0),
         last_frame: None,
+        bezel_drawn: None,
         canvas: None,
         buffers: Vec::new(),
         clock: FrameClock::new(),
@@ -720,10 +720,10 @@ fn create_island_surface(
 ) -> (LayerSurface, WpViewport, Option<WpFractionalScaleV1>) {
     let surface = compositor.create_surface(qh);
     let layer = layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("island-shell"), output);
-    layer.set_anchor(Anchor::TOP);
+    layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(-1);
     layer.set_keyboard_interactivity(keyboard);
-    layer.set_size(SURFACE_W, SURFACE_H);
+    layer.set_size(0, 0);
     let viewport = viewporter.get_viewport(layer.wl_surface(), qh, ());
     let fractional = fractional_mgr.map(|m| m.get_fractional_scale(layer.wl_surface(), qh, ()));
     // an empty input region until the first frame says where the box is
@@ -1485,6 +1485,11 @@ impl App {
             return;
         }
         self.drawn_for = Some(t);
+        // the screen's corners changed size: start from a clean canvas
+        let corners = self.island.config.screen_corners;
+        if self.bezel_drawn != Some(corners) {
+            self.last_frame = None;
+        }
         if self.island.advance(t) {
             self.arm_deadline();
         }
@@ -1506,6 +1511,7 @@ impl App {
             self.canvas = Some(cairo::ImageSurface::create(cairo::Format::ARgb32, bw, bh).expect("cairo surface"));
             self.buffers.clear();
             self.last_frame = None;
+            self.bezel_drawn = None;
         }
         let canvas = self.canvas.clone().unwrap();
         let (frame, changed) = {
@@ -1527,10 +1533,24 @@ impl App {
             if self.clock.debug {
                 eprintln!("paint: {:.0} us", t_paint.elapsed().as_secs_f64() * 1e6);
             }
-            let changed = match (stale, frame.bounds) {
+            let mut changed = match (stale, frame.bounds) {
                 (Some(a), Some(b)) => Some(a.union(b)),
                 (a, b) => a.or(b),
             };
+            // the frame beyond the screen: painted once, and again only if
+            // something was wiped or drawn where it stands
+            let (w, h) = (self.width as f64, self.height as f64);
+            let squares = crate::bezel::corners(w, h, corners);
+            let touched = |c: &Rect| squares.iter().any(|s| {
+                c.x - 1.0 < s.x + s.w && s.x < c.x + c.w + 1.0 && c.y - 1.0 < s.y + s.h && s.y < c.y + c.h + 1.0
+            });
+            if stale == Some(whole) || self.bezel_drawn != Some(corners) || changed.as_ref().is_some_and(touched) {
+                crate::bezel::paint(&cr, w, h, corners);
+                self.bezel_drawn = Some(corners);
+                for s in squares {
+                    changed = Some(changed.map_or(s, |c| c.union(s)));
+                }
+            }
             (frame, changed)
         };
         canvas.flush();

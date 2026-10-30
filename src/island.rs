@@ -272,7 +272,15 @@ pub struct Config {
     pub compact: Compact,
     /// The timer ruler's ticks and the alarm when a countdown ends.
     pub timer_sound: bool,
+    /// Radius of the screen's own corners, logical px (0 = square): the
+    /// island's black runs on past the screen's edges and rounds them off
+    /// like the lid around them.
+    pub screen_corners: f64,
 }
+
+/// The X1 Titanium's lid corners, measured off a photo: ~55 photo px where
+/// the 26 px bar is ~95.
+pub const SCREEN_CORNERS: f64 = 16.0;
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
 
@@ -293,14 +301,16 @@ impl Default for Config {
             weather: "auto".into(),
             compact: Compact::ALL,
             timer_sound: true,
+            screen_corners: SCREEN_CORNERS,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 14] = [
+    pub const KEYS: [&'static str; 15] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
         "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact", "timer_sound",
+        "screen_corners",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -346,6 +356,7 @@ impl Config {
             }
             "compact" => self.compact = Compact::parse(value.trim_matches('"'))?,
             "timer_sound" => self.timer_sound = number()? != 0.0,
+            "screen_corners" => self.screen_corners = number()?.clamp(0.0, 80.0),
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -356,10 +367,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
-            self.compact.describe(), self.timer_sound as u8,
+            self.compact.describe(), self.timer_sound as u8, self.screen_corners,
         )
     }
 
