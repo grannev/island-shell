@@ -3632,11 +3632,13 @@ impl Island {
             input.w += 2.0 * floating::REACH;
             input.h = input.h.max(floating::bottom(page) + 2.0 - top);
         }
-        // opaque: the box minus its curved corners (a T shape)
-        let opaque = [
+        // opaque: the box minus its curved corners (a T shape); none while
+        // tugged — the leaning, thinned outline leaves parts of that box
+        // clear, and the compositor fills a declared-opaque clear pixel black
+        let opaque = if tugged { [None, None] } else { [
             (y1 - r > top).then(|| Rect { x: x0, y: top, w: x1 - x0, h: y1 - r - top }),
             (x1 - x0 > 2.0 * r).then(|| Rect { x: x0 + r, y: (y1 - r).max(top), w: x1 - x0 - 2.0 * r, h: r.min(y1 - top) }),
-        ];
+        ] };
         Frame { bounds: Some(bounds), input: Some(input), opaque }
     }
 
@@ -6377,6 +6379,24 @@ mod tests {
         island.open_quick_menu(16.0);
         settle(&mut island, 16.0, 40);
         assert!(!island.tug_press(x, y, 17.0));
+    }
+
+    #[test]
+    fn a_tugged_island_declares_no_opaque_box() {
+        let mut island = Island::new(Config::default());
+        settle(&mut island, 10.0, 30);
+        let line = island.line_rect.expect("the closed line");
+        let (x, y) = (line.x + line.w / 2.0, line.y + line.h / 2.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 300).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        assert!(island.draw(&cr, &renderer, 490.0, 11.0).opaque.iter().any(Option::is_some));
+        island.tug_press(x, y, 11.0);
+        island.tug_to(x + 200.0, y + 100.0, 11.1);
+        assert!(island.draw(&cr, &renderer, 490.0, 11.1).opaque.iter().all(Option::is_none));
+        island.tug_release(11.1);
+        let rest = island.draw(&cr, &renderer, 490.0, 14.0);
+        assert!(rest.opaque.iter().any(Option::is_some), "back at rest it is opaque again");
     }
 
     #[test]
