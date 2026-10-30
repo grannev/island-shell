@@ -20,13 +20,27 @@ const RUN: f64 = 4.0;
 /// by its radius with `smoothing` (0 = circular arcs). Each corner may take
 /// at most half of each edge it shares.
 pub fn trace(cr: &Context, vertices: &[Vertex], smoothing: f64) {
+    trace_with(cr, vertices.len(), |i| (vertices[i], smoothing), true);
+}
+
+/// Trace an open, axis-aligned outline through `vertices`, each rounded by
+/// its own (radius, smoothing) as `trace` rounds a closed one; its two ends
+/// stay where they are.
+pub fn trace_open(cr: &Context, vertices: &[(f64, f64, f64, f64)]) {
     let n = vertices.len();
+    trace_with(cr, n, |i| {
+        let (x, y, r, s) = vertices[i];
+        ((x, y, if i == 0 || i + 1 == n { 0.0 } else { r }), s)
+    }, false);
+}
+
+fn trace_with(cr: &Context, n: usize, vertex: impl Fn(usize) -> (Vertex, f64), closed: bool) {
     cr.new_path();
     let mut first = true;
     for i in 0..n {
-        let (px, py, _) = vertices[(i + n - 1) % n];
-        let (x, y, r) = vertices[i];
-        let (nx, ny, _) = vertices[(i + 1) % n];
+        let ((px, py, _), _) = vertex((i + n - 1) % n);
+        let ((x, y, r), smoothing) = vertex(i);
+        let ((nx, ny, _), _) = vertex((i + 1) % n);
         let (lin, lout) = ((x - px).hypot(y - py), (nx - x).hypot(ny - y));
         if r <= 0.0 || lin < 1e-9 || lout < 1e-9 {
             if first { cr.move_to(x, y) } else { cr.line_to(x, y) }
@@ -44,7 +58,9 @@ pub fn trace(cr: &Context, vertices: &[Vertex], smoothing: f64) {
         // other way is the mirror
         corner.trace(cr, x, y, dy.atan2(dx), dx * oy - dy * ox < 0.0);
     }
-    cr.close_path();
+    if closed {
+        cr.close_path();
+    }
 }
 
 /// The island: hanging from the top edge at `y0` between `x0` and `x1`,

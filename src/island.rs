@@ -5002,17 +5002,15 @@ impl Island {
         // the top edge: pulled down round a tugged island, rippling
         let (cx, attach, sag) = self.tug_top.unwrap_or((self.island_cx(now), 0.0, 0.0));
         // the edge's ripples run along it and along what hangs from it —
-        // the island's and the bar's drops' lower edges — to the screen's
-        // sides
-        let corners = self.config.screen_corners;
-        let drops = if self.config.bar { self.bar.drop_sizes() } else { [None, None] };
-        let mut spans: Vec<(f64, f64, f64)> = Vec::new();
-        if let Some(d) = drops[0] { spans.push((0.0, d.w, d.h)); }
-        if let Some((b, _)) = self.box_geom.filter(|(b, _)| b.y + b.h > 1.0) { spans.push((b.x, b.x + b.w, b.y + b.h)); }
-        if let Some(d) = drops[1] { spans.push((w - d.w, w, d.h)); }
-        // where the edge meets each side: a drop's fillet, or the screen's corner
-        let wall = |d: Option<crate::outline::Drop>| d.map_or((corners, 0.0), |_| (crate::bar::FILLET, self.config.smoothing));
-        let mut marks = self.membrane.draw(cr, w, &spans, [wall(drops[0]), wall(drops[1])], cx, attach, sag, now);
+        // the island's and the bar's drops' edges — to the screen's sides
+        // (a tugged island is sheared off its box: the pull alone shows)
+        let shore = crate::edge::Shore {
+            corner: self.config.screen_corners,
+            smoothing: self.config.smoothing,
+            drops: if self.config.bar { self.bar.drop_sizes() } else { [None, None] },
+            island: self.box_geom.filter(|_| self.tug_top.is_none()).map(|(b, r)| (b, r, FILLET)),
+        };
+        let mut marks = self.membrane.draw(cr, w, &shore, cx, attach, sag, now);
         marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
         marks.extend(self.side_hud.draw(cr, renderer, h, now));
         marks
@@ -7078,9 +7076,9 @@ mod ripple_look {
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/ripple-drops.png").unwrap()).unwrap();
         // the right side close up, as the crest hits it
-        let times = [0.5, 0.55, 0.58, 0.61, 0.65, 0.72, 0.85];
+        let times = [0.3, 0.36, 0.42, 0.5, 0.55, 0.58, 0.61, 0.65, 0.72, 0.85];
         let (cw, ch, zoom) = (150.0, 70.0, 3.0);
-        let close = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom * times.len() as f64) as i32, (ch * zoom) as i32).unwrap();
+        let close = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom * times.len() as f64) as i32, (2.0 * ch * zoom + 3.0) as i32).unwrap();
         let cr = Context::new(&close).unwrap();
         for (i, t) in times.into_iter().enumerate() {
             let mut island = tests::gallery_island_pub();
@@ -7092,17 +7090,21 @@ mod ripple_look {
             let mut now = 9.0;
             for _ in 0..60 { island.advance(now); island.draw(&sc, &renderer, w / 2.0, now); island.draw_bar(&sc, &renderer, w, now); now += 1.0 / 60.0; }
             island.membrane.ripple(w / 2.0, 1.0, 10.0);
-            cr.save().unwrap();
-            cr.translate(i as f64 * cw * zoom, 0.0);
-            cr.rectangle(0.0, 0.0, cw * zoom - 3.0, ch * zoom);
-            cr.clip();
-            cr.scale(zoom, zoom);
-            cr.translate(cw - w, 0.0);
-            cr.set_source_rgb(0.15, 0.32, 0.38);
-            cr.paint().unwrap();
-            island.draw_bar(&cr, &renderer, w, 10.0 + t);
-            island.draw_frame_marks(&cr, &renderer, w, h, 10.0 + t);
-            cr.restore().unwrap();
+            // the top row: the right side; the bottom: the drop's inner turn
+            let turn = island.bar.drop_sizes()[1].map_or(w, |d| w - d.w);
+            for (row, x) in [w - cw, turn - cw / 2.0].into_iter().enumerate() {
+                cr.save().unwrap();
+                cr.translate(i as f64 * cw * zoom, row as f64 * (ch * zoom + 3.0));
+                cr.rectangle(0.0, 0.0, cw * zoom - 3.0, ch * zoom);
+                cr.clip();
+                cr.scale(zoom, zoom);
+                cr.translate(-x, 0.0);
+                cr.set_source_rgb(0.15, 0.32, 0.38);
+                cr.paint().unwrap();
+                island.draw_bar(&cr, &renderer, w, 10.0 + t);
+                island.draw_frame_marks(&cr, &renderer, w, h, 10.0 + t);
+                cr.restore().unwrap();
+            }
         }
         drop(cr);
         close.write_to_png(&mut std::fs::File::create("target/gallery/ripple-wall.png").unwrap()).unwrap();

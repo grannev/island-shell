@@ -876,8 +876,6 @@ const RIPPLE_HEIGHT: f64 = 9.0;
 const RIPPLE_WIDTH: f64 = 70.0;
 /// How wide the pulled-down membrane is round the island.
 const SAG_WIDTH: f64 = 170.0;
-/// Samples along the edge.
-const MEMBRANE_STEP: f64 = 6.0;
 /// What bounces back off the screen's side, and how soon it is spent (px).
 const REBOUND: f64 = 0.55;
 const REBOUND_RUN: f64 = 70.0;
@@ -886,6 +884,127 @@ const REBOUND_RUN: f64 = 70.0;
 const IMPACT: f64 = 12.0;
 const IMPACT_LEAD: f64 = 0.04;
 const IMPACT_LIFE: f64 = 0.5;
+
+/// What hangs from the top edge, which the membrane's ripples ride: the
+/// bar's drops in the top corners and the island between them, as drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Shore {
+    /// the screen's corners (where no drop is)
+    pub corner: f64,
+    /// the drops' and the island's corner smoothing
+    pub smoothing: f64,
+    pub drops: [Option<crate::outline::Drop>; 2],
+    /// the island: its box (hanging from the top), corners and fillets
+    pub island: Option<(Rect, f64, f64)>,
+}
+
+/// The edge the ripples ride, from the screen's left side to its right,
+/// sampled every `SHORE_STEP` px of its length: each sample's point, its
+/// normal (out of the black, into the screen) and its distance along.
+struct ShoreLine {
+    points: Vec<(f64, f64, f64, f64, f64)>,
+    /// how far along each side's corner (its middle) is
+    walls: [f64; 2],
+    len: f64,
+}
+
+/// Samples along the membrane's edge (px of its length).
+const SHORE_STEP: f64 = 3.0;
+
+impl Shore {
+    /// The edge from the left side to the right, the corners where it meets
+    /// the sides swollen by `grow`.
+    fn line(&self, cr: &Context, w: f64, grow: [f64; 2]) -> ShoreLine {
+        use crate::outline::Drop;
+        let sm = self.smoothing;
+        let (df, dr) = (crate::bar::FILLET, crate::bar::RADIUS);
+        // a drop lifted into the edge (a fullscreen window) has its top
+        // fillet above the screen
+        let top = |d: Drop| (d.h - crate::bar::HEIGHT).min(0.0);
+        let mut v: Vec<(f64, f64, f64, f64)> = Vec::new();
+        // the left side: down the wall a little, round its corner (a drop's
+        // fillet or the screen's), along the drop and up its side
+        let wall_r = |d: Option<Drop>, g: f64| d.map_or((self.corner + g, 0.0), |_| (df + g, sm));
+        let (lr, ls) = wall_r(self.drops[0], grow[0]);
+        let run = |r: f64, s: f64| 2.0 * (1.0 + s) * r + 2.0;
+        let lb = self.drops[0].map_or(0.0, |d| d.h);
+        v.push((0.0, lb + run(lr, ls), 0.0, 0.0));
+        v.push((0.0, lb, lr, ls));
+        let wall_points = [(0.0, lb), (w, self.drops[1].map_or(0.0, |d| d.h))];
+        let mut left_end = 0.0;
+        if let Some(d) = self.drops[0] {
+            v.push((d.w, d.h, dr, sm));
+            v.push((d.w, top(d), df, sm));
+            left_end = d.w;
+        }
+        let right_start = self.drops[1].map_or(w, |d| w - d.w);
+        if let Some((b, r, f)) = self.island {
+            let (x0, x1, y1) = (b.x, b.x + b.w, b.y + b.h);
+            // (only clear of the drops: squeezed between them it is skipped)
+            if y1 > 1.0 && x0 - 2.0 * f > left_end && x1 + 2.0 * f < right_start {
+                v.push((x0, b.y, f, sm));
+                v.push((x0, y1, r, sm));
+                v.push((x1, y1, r, sm));
+                v.push((x1, b.y, f, sm));
+            }
+        }
+        let (rr, rs) = wall_r(self.drops[1], grow[1]);
+        if let Some(d) = self.drops[1] {
+            v.push((w - d.w, top(d), df, sm));
+            v.push((w - d.w, d.h, dr, sm));
+        }
+        let rb = wall_points[1].1;
+        v.push((w, rb, rr, rs));
+        v.push((w, rb + run(rr, rs), 0.0, 0.0));
+        // flattened by cairo, so it is the very curve the black was drawn by
+        cr.save().unwrap();
+        cr.identity_matrix();
+        crate::drop::trace_open(cr, &v);
+        let flat: Vec<(f64, f64)> = cr.copy_path_flat().map(|p| p.iter().filter_map(|seg| match seg {
+            cairo::PathSegment::MoveTo((x, y)) | cairo::PathSegment::LineTo((x, y)) => Some((x, y)),
+            _ => None,
+        }).collect()).unwrap_or_default();
+        cr.new_path();
+        cr.restore().unwrap();
+        // evenly along it, each sample's normal from the stretch it is on
+        let mut points = Vec::new();
+        let mut s = 0.0;
+        let mut next = 0.0;
+        for pair in flat.windows(2) {
+            let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+            let len = (x1 - x0).hypot(y1 - y0);
+            if len < 1e-6 {
+                continue;
+            }
+            let (dx, dy) = ((x1 - x0) / len, (y1 - y0) / len);
+            while next <= s + len {
+                let k = next - s;
+                points.push((x0 + dx * k, y0 + dy * k, -dy, dx, next));
+                next += SHORE_STEP;
+            }
+            s += len;
+        }
+        if let (Some(&(x, y)), Some(last)) = (flat.last(), points.last().copied()) {
+            if s - last.4 > 0.01 {
+                points.push((x, y, last.2, last.3, s));
+            }
+        }
+        let near = |(px, py): (f64, f64)| points.iter().min_by(|a, b| {
+            let da = (a.0 - px).hypot(a.1 - py);
+            let db = (b.0 - px).hypot(b.1 - py);
+            da.total_cmp(&db)
+        }).map_or(0.0, |p| p.4);
+        ShoreLine { walls: [near(wall_points[0]), near(wall_points[1])], len: s, points }
+    }
+}
+
+impl ShoreLine {
+    /// How far along the edge a ripple sent from `x` on the top starts:
+    /// where the edge passes over `x` (under the island when it is there).
+    fn source(&self, x: f64) -> f64 {
+        self.points.iter().min_by(|a, b| (a.0 - x).abs().total_cmp(&(b.0 - x).abs())).map_or(0.0, |p| p.4)
+    }
+}
 
 impl Membrane {
     /// Send ripples out from `cx` (0..1 strength), starting at `at`.
@@ -899,157 +1018,203 @@ impl Membrane {
         self.ripples.iter().any(|r| now - r.start < RIPPLE_LIFE + IMPACT_LIFE)
     }
 
-    /// How far the edge is pushed down at `x` by the ripples on a screen `w`
-    /// wide. A crest runs into the screen's side as into a wall: it piles up
-    /// against it, and the little that bounces back dies within a stretch.
-    fn ripples_at(&self, x: f64, w: f64, now: Time) -> f64 {
-        self.ripples.iter().map(|r| {
-            let t = now - r.start;
-            if !(0.0..RIPPLE_LIFE).contains(&t) {
-                return 0.0;
-            }
-            let d = (x - r.cx).abs();
-            let front = RIPPLE_SPEED * t;
-            // a leading crest and a smaller one after it, dying away
-            let fade = (1.0 - t / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (d / 900.0).min(1.0));
-            let bump = |d: f64, at: f64, k: f64| k * (-((d - at) / RIPPLE_WIDTH).powi(2)).exp();
-            let crests = |d: f64| bump(d, front, 1.0) + bump(d, front - 2.6 * RIPPLE_WIDTH, 0.45);
-            // the wall on this side, and what has come back off it
-            let wall = if x < r.cx { r.cx } else { w - r.cx };
-            let back = 2.0 * wall - d;
-            let past = (front - wall).max(0.0);
-            let rebound = REBOUND * (-past / REBOUND_RUN).exp();
-            r.strength * RIPPLE_HEIGHT * fade * (crests(d) + rebound * crests(back))
-        }).sum()
+    /// How far the edge is pushed out at `s` along it by a ripple sent from
+    /// `from` along it, whose wall on that side is `wall` away. A crest runs
+    /// into the screen's side as into a wall: it piles up against it, the
+    /// little that bounces back dies within a stretch, and what goes on
+    /// round the corner is swallowed there.
+    fn ripple_at(r: &Ripple, from: f64, wall: f64, s: f64, now: Time) -> f64 {
+        let t = now - r.start;
+        if !(0.0..RIPPLE_LIFE).contains(&t) {
+            return 0.0;
+        }
+        let d = (s - from).abs();
+        let front = RIPPLE_SPEED * t;
+        // a leading crest and a smaller one after it, dying away
+        let fade = (1.0 - t / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (d / 900.0).min(1.0));
+        let bump = |d: f64, at: f64, k: f64| k * (-((d - at) / RIPPLE_WIDTH).powi(2)).exp();
+        let crests = |d: f64| bump(d, front, 1.0) + bump(d, front - 2.6 * RIPPLE_WIDTH, 0.45);
+        // its height goes into the corner's swell over the last stretch
+        // before it, so nothing is cut off half way round the corner
+        let swallowed = smooth((wall - d) / SWALLOW);
+        let past = (front - wall).max(0.0);
+        let rebound = if d <= wall { REBOUND * (-past / REBOUND_RUN).exp() * crests(2.0 * wall - d) } else { 0.0 };
+        r.strength * RIPPLE_HEIGHT * fade * (crests(d) + rebound) * swallowed
     }
 
-    /// How much the corner where the edge meets the screen's side `wall_x`
-    /// has swollen: a crest slams into it, it bulges and shudders, settling.
-    fn impact(&self, wall_x: f64, now: Time) -> f64 {
-        self.ripples.iter().map(|r| {
-            let wall = (wall_x - r.cx).abs();
-            let arrives = r.start + wall / RIPPLE_SPEED;
-            let t = now - arrives;
-            if !(-IMPACT_LEAD..IMPACT_LIFE).contains(&t) || arrives - r.start >= RIPPLE_LIFE {
-                return 0.0;
-            }
-            // as strong as the crest that hits
-            let age = arrives - r.start;
-            let fade = ((1.0 - age / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (wall / 900.0).min(1.0))).sqrt();
-            let swell = if t < 0.0 {
-                smooth(1.0 + t / IMPACT_LEAD)
-            } else {
-                (-t / 0.16).exp() * (0.7 + 0.3 * (std::f64::consts::TAU * t / 0.1).cos())
-            };
-            r.strength * fade * IMPACT * swell
-        }).sum()
+    /// How much a ripple sent from `from` swells the corner `wall` away
+    /// along the edge: a crest slams into it, it bulges and shudders,
+    /// settling.
+    fn impact(r: &Ripple, wall: f64, now: Time) -> f64 {
+        let arrives = r.start + wall / RIPPLE_SPEED;
+        let t = now - arrives;
+        if !(-IMPACT_LEAD..IMPACT_LIFE).contains(&t) || arrives - r.start >= RIPPLE_LIFE {
+            return 0.0;
+        }
+        // as strong as the crest that hits
+        let age = arrives - r.start;
+        let fade = ((1.0 - age / RIPPLE_LIFE).powf(1.2) * (1.0 - 0.25 * (wall / 900.0).min(1.0))).sqrt();
+        let swell = if t < 0.0 {
+            smooth(1.0 + t / IMPACT_LEAD)
+        } else {
+            (-t / 0.16).exp() * (0.7 + 0.3 * (std::f64::consts::TAU * t / 0.1).cos())
+        };
+        r.strength * fade * IMPACT * swell
     }
 
-    /// Paint the membrane (black, over everything) for a screen `w` wide
-    /// whose corners have `radius`: pulled down `sag` px round `cx`, plus the
-    /// ripples. Returns what it covered.
+    /// Paint the membrane (black, over everything) for a screen `w` wide:
+    /// pulled down `sag` px round `cx`, plus the ripples. Returns what it
+    /// covered.
     /// (`attach`: how far either side of `cx` the edge runs level, pulled
     /// down by the full `sag`: the island's fillets end there.)
-    /// (`spans`: the black hanging lower along the top — the island, the
-    /// bar's drops — as (from x, to x, its lower edge): the ripples run
-    /// along those edges too, from one side of the screen to the other.
-    /// `walls`: the corner where that edge meets each of the screen's sides
-    /// as (radius, smoothing) — the screen's corner, or a drop's fillet —
-    /// which a ripple runs into and ends against.)
+    /// (`shore`: what hangs from the top edge. The ripples run along one
+    /// edge from one side of the screen to the other — the drops' and the
+    /// island's lower edges, round their corners and fillets, and the top
+    /// between them — and end against the corners where it meets the
+    /// screen's sides, which swell as they hit.)
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, cr: &Context, w: f64, spans: &[(f64, f64, f64)], walls: [(f64, f64); 2], cx: f64, attach: f64, sag: f64, now: Time) -> Vec<Rect> {
+    pub fn draw(&mut self, cr: &Context, w: f64, shore: &Shore, cx: f64, attach: f64, sag: f64, now: Time) -> Vec<Rect> {
         self.ripples.retain(|r| now - r.start < RIPPLE_LIFE + IMPACT_LIFE);
-        let mut covered = Vec::new();
-        let base_at = |x: f64| spans.iter().find(|(a, b, _)| x >= *a && x <= *b).map_or(0.0, |s| s.2);
-        // where the edge turns (a span's side, rounded by its corners and
-        // fillets) the ripple ducks round it; the screen's sides it hits
-        let turns: Vec<f64> = spans.iter().flat_map(|(a, b, _)| [*a, *b]).filter(|x| *x > 0.5 && *x < w - 0.5).collect();
-        let fade = |x: f64| {
-            let near = turns.iter().map(|t| (x - t).abs()).fold(f64::INFINITY, f64::min);
-            smooth((near - TURN_CLEAR) / TURN_FADE)
+        if self.ripples.is_empty() && sag < 0.05 {
+            return Vec::new();
+        }
+        // where each ripple starts along the edge and how far its walls are
+        let line = shore.line(cr, w, [0.0, 0.0]);
+        let walls = |line: &ShoreLine| -> Vec<(Ripple, f64, [f64; 2])> {
+            self.ripples.iter().map(|r| {
+                let from = line.source(r.cx);
+                (*r, from, [(from - line.walls[0]).max(0.0), (line.walls[1] - from).max(0.0)])
+            }).collect()
         };
-        let n = (w / MEMBRANE_STEP).ceil() as usize;
-        let points: Vec<(f64, f64, f64)> = (0..=n).map(|i| {
-            let x = (i as f64 * MEMBRANE_STEP).min(w);
-            let base = base_at(x);
-            // the tug's pull: level over the island, easing back up
+        let grow = {
+            let ripples = walls(&line);
+            [0, 1].map(|side| ripples.iter().map(|(r, _, wall)| Self::impact(r, wall[side], now)).sum::<f64>())
+        };
+        let line = if grow.iter().any(|g| *g > 0.05) { shore.line(cr, w, grow) } else { line };
+        let ripples = walls(&line);
+        let depth: Vec<f64> = line.points.iter().map(|&(x, y, _, ny, s)| {
+            // the tug's pull: the top edge, level over the island, easing
+            // back up
             let out = ((x - cx).abs() - attach).max(0.0);
-            let pull = if base == 0.0 { sag * (-(out / SAG_WIDTH).powi(2)).exp() } else { 0.0 };
-            (x, base, pull + self.ripples_at(x, w, now) * fade(x))
+            let pull = if y.abs() < 0.5 && ny > 0.9 { sag * (-(out / SAG_WIDTH).powi(2)).exp() } else { 0.0 };
+            let wave: f64 = ripples.iter().map(|(r, from, wall)| {
+                Self::ripple_at(r, *from, if s < *from { wall[0] } else { wall[1] }, s, now)
+            }).sum();
+            // nothing at the very ends, down the sides
+            let ends = smooth(s.min(line.len - s) / END_TAPER);
+            (pull + wave) * ends
         }).collect();
+        let mut covered = Vec::new();
         cr.save().unwrap();
         cr.set_source_rgb(0.0, 0.0, 0.0);
-        // each stretch of the same edge: black from it down to the ripple
-        let mut start = 0;
-        while start < points.len() {
-            let base = points[start].1;
-            let mut end = start;
-            while end + 1 < points.len() && points[end + 1].1 == base {
-                end += 1;
-            }
-            let deepest = points[start..=end].iter().map(|p| p.2).fold(0.0, f64::max);
-            if deepest > 0.15 {
-                let (xa, xb) = (points[start].0, points[end].0);
-                cr.new_path();
-                cr.move_to(xa, base);
-                for &(x, _, d) in &points[start..=end] {
-                    cr.line_to(x, base + d);
-                }
-                cr.line_to(xb, base);
-                cr.close_path();
-                let _ = cr.fill();
-                covered.push(Rect { x: xa - 1.0, y: 0.0, w: xb - xa + 2.0, h: base + deepest + 2.0 });
-            }
-            start = end + 1;
-        }
-        // the corners at the screen's sides: a crest slams into each, which
-        // bulges and shudders as the ripple ends there
-        // (the corner rides down with the crest on it, so the two are one curve)
-        let ends = [points[0].2, points[points.len() - 1].2];
-        for (((wall_x, (radius, smoothing)), sign), depth) in [(0.0, walls[0]), (w, walls[1])].into_iter().zip([1.0, -1.0]).zip(ends) {
-            let grow = self.impact(wall_x, now);
-            if grow < 0.05 && depth < 0.15 {
+        // each stretch that moves: black from just inside the edge out to
+        // where it has been pushed
+        let n = depth.len();
+        let mut i = 0;
+        while i < n {
+            if depth[i] < 0.05 {
+                i += 1;
                 continue;
             }
-            let (r, y) = (radius + grow, base_at(wall_x) + depth);
+            let a = i.saturating_sub(1);
+            while i < n && depth[i] >= 0.05 {
+                i += 1;
+            }
+            let b = i.min(n - 1);
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            cr.new_path();
+            for k in a..=b {
+                let (x, y, nx, ny, _) = line.points[k];
+                let (px, py) = (x - nx * INSIDE, y - ny * INSIDE);
+                cr.line_to(px, py);
+                (x0, y0, x1, y1) = (x0.min(px), y0.min(py), x1.max(px), y1.max(py));
+            }
+            for k in (a..=b).rev() {
+                let (x, y, nx, ny, _) = line.points[k];
+                let (px, py) = (x + nx * depth[k], y + ny * depth[k]);
+                cr.line_to(px, py);
+                (x0, y0, x1, y1) = (x0.min(px), y0.min(py), x1.max(px), y1.max(py));
+            }
+            cr.close_path();
+            let _ = cr.fill();
+            covered.push(Rect { x: x0 - 2.0, y: (y0 - 2.0).max(0.0), w: x1 - x0 + 4.0, h: y1 - y0.max(0.0) + 4.0 });
+        }
+        // the corners at the sides, swollen by a crest slamming into them
+        for (side, g) in grow.into_iter().enumerate() {
+            if g < 0.05 {
+                continue;
+            }
+            let (wall_x, base, r, smoothing) = match (side, shore.drops[side]) {
+                (0, Some(d)) => (0.0, d.h, crate::bar::FILLET + g, shore.smoothing),
+                (_, Some(d)) => (w, d.h, crate::bar::FILLET + g, shore.smoothing),
+                (0, None) => (0.0, 0.0, shore.corner + g, 0.0),
+                (_, None) => (w, 0.0, shore.corner + g, 0.0),
+            };
+            let sign = if side == 0 { 1.0 } else { -1.0 };
             let x = |dx: f64| wall_x + sign * dx;
-            // the corner's fillet grown to `r`, and the wall behind it, up to
-            // the edge at rest (whatever the crest's slope, no seam to it)
-            let (base, run) = (y - depth, 2.0 * (1.0 + smoothing) * r + 1.0);
+            let run = 2.0 * (1.0 + smoothing) * r + 1.0;
             crate::drop::trace(cr, &[
-                (x(run), y, 0.0),
-                (x(0.0), y, r),
-                (x(0.0), y + run, 0.0),
-                (x(-1.0), y + run, 0.0),
-                (x(-1.0), base, 0.0),
                 (x(run), base, 0.0),
+                (x(0.0), base, r),
+                (x(0.0), base + run, 0.0),
+                (x(-1.0), base + run, 0.0),
+                (x(-1.0), base - 1.0, 0.0),
+                (x(run), base - 1.0, 0.0),
             ], smoothing);
             let _ = cr.fill();
-            let reach = run + 1.0;
-            covered.push(Rect { x: if sign > 0.0 { 0.0 } else { w - reach }, y: y - depth - 1.0, w: reach, h: reach + depth + 1.0 });
+            covered.push(Rect { x: if side == 0 { 0.0 } else { w - run - 1.0 }, y: (base - 2.0).max(0.0), w: run + 1.0, h: run + 3.0 });
         }
         cr.restore().unwrap();
         covered
     }
 }
 
-/// Round a turn of the edge (a side of the island or a drop) the ripple
-/// ducks: flat this close to it, back to full over the next stretch.
-const TURN_CLEAR: f64 = 10.0;
-const TURN_FADE: f64 = 26.0;
+/// How far inside the black the membrane's fill begins (so it never leaves
+/// a seam along the edge), over how much before a side's corner a crest is
+/// swallowed and over how much of the edge's ends it fades to nothing.
+const INSIDE: f64 = 1.0;
+const SWALLOW: f64 = 28.0;
+const END_TAPER: f64 = 10.0;
 
 #[cfg(test)]
 mod membrane_tests {
     use super::*;
+    use crate::outline::Drop;
 
-    fn alpha_after(m: &mut Membrane, sag: f64, now: Time, x: usize, y: usize) -> (u8, Vec<Rect>) {
-        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
+    const BARE: Shore = Shore { corner: 16.0, smoothing: 0.0, drops: [None, None], island: None };
+
+    /// An island 250..350 down to 32, drops 120 and 150 wide, 32 tall.
+    fn bar() -> Shore {
+        Shore {
+            corner: 16.0,
+            smoothing: 0.6,
+            drops: [Some(Drop { w: 120.0, h: 32.0 }), Some(Drop { w: 150.0, h: 32.0 })],
+            island: Some((Rect { x: 250.0, y: 0.0, w: 100.0, h: 32.0 }, 14.0, 14.0)),
+        }
+    }
+
+    fn render(m: &mut Membrane, shore: &Shore, sag: f64, now: Time) -> (cairo::ImageSurface, Vec<Rect>) {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
         let covered = {
             let cr = Context::new(&surface).unwrap();
-            m.draw(&cr, 600.0, &[], [(16.0, 0.0), (16.0, 0.0)], 300.0, 0.0, sag, now)
+            m.draw(&cr, 600.0, shore, 300.0, 0.0, sag, now)
         };
+        (surface, covered)
+    }
+
+    fn alpha(surface: &mut cairo::ImageSurface, x: usize, y: usize) -> u8 {
         let stride = surface.stride() as usize;
-        (surface.data().unwrap()[y * stride + x * 4 + 3], covered)
+        surface.data().unwrap()[y * stride + x * 4 + 3]
+    }
+
+    fn alpha_after(m: &mut Membrane, sag: f64, now: Time, x: usize, y: usize) -> (u8, Vec<Rect>) {
+        let (mut s, covered) = render(m, &BARE, sag, now);
+        (alpha(&mut s, x, y), covered)
+    }
+
+    /// Frames over `t0..t1`, 1 ms apart: does any have (x, y) black?
+    fn ever(m: &mut Membrane, shore: &Shore, t0: Time, t1: Time, x: usize, y: usize) -> bool {
+        (0..((t1 - t0) * 1000.0) as usize).any(|i| alpha(&mut render(m, shore, 0.0, t0 + i as f64 / 1000.0).0, x, y) > 250)
     }
 
     #[test]
@@ -1064,47 +1229,51 @@ mod membrane_tests {
     }
 
     #[test]
-    fn a_ripple_runs_along_the_islands_and_the_drops_lower_edges() {
+    fn a_ripple_rides_round_every_turn_of_the_edge() {
         let mut m = Membrane::default();
-        // an island 250..350 down to 32, drops 0..120 and 450..600
-        let spans = [(0.0, 120.0, 32.0), (250.0, 350.0, 32.0), (450.0, 600.0, 32.0)];
-        let draw = |m: &mut Membrane, now: Time, x: usize, y: usize| {
-            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
-            {
-                let cr = Context::new(&surface).unwrap();
-                m.draw(&cr, 600.0, &spans, [(14.0, 0.6), (14.0, 0.6)], 300.0, 0.0, 0.0, now);
-            }
-            let stride = surface.stride() as usize;
-            surface.data().unwrap()[y * stride + x * 4 + 3]
-        };
+        let shore = bar();
         m.ripple(300.0, 1.0, 0.0);
-        // a crest under the right drop, below its edge (y 32 + a few px)
-        let t = (520.0 - 300.0) / RIPPLE_SPEED;
-        assert_eq!(draw(&mut m, t, 520, 35), 255, "the crest rides along the drop's edge");
-        assert_eq!(draw(&mut m, t, 520, 60), 0);
-        // it runs right into the screen's side, piling up against it, and
-        // the drop's fillet there swells as it hits
-        let hit = (600.0 - 300.0) / RIPPLE_SPEED;
-        assert_eq!(draw(&mut m, hit, 597, 38), 255, "the crest reaches the side");
-        assert_eq!(draw(&mut m, hit + 0.03, 599, 42), 255, "the fillet bulges");
-        // and then it is over: nothing comes back across the drop
-        assert_eq!(draw(&mut m, hit + 0.25, 480, 34), 0, "spent against the wall");
-        assert_eq!(draw(&mut m, hit + 0.6, 597, 47), 0, "the corner settles");
+        // under the island, along its lower edge
+        assert!(ever(&mut m, &shore, 0.0, 0.1, 330, 35), "along the island");
+        // down the island's side, beside it
+        assert!(ever(&mut m, &shore, 0.0, 0.2, 353, 22), "down the island's side");
+        // along the top between the island and the drop: never gone flat
+        // round the turns — every px along it is crossed by the crest
+        for x in [366, 380, 420, 440] {
+            assert!(ever(&mut m, &shore, 0.0, 0.4, x, 3), "along the top at {x}");
+        }
+        // down the drop's side and along its lower edge
+        assert!(ever(&mut m, &shore, 0.0, 0.5, 447, 20), "down the drop's side");
+        assert!(ever(&mut m, &shore, 0.0, 0.6, 520, 35), "along the drop");
+        // nothing far below the edge, ever
+        assert!(!ever(&mut m, &shore, 0.0, 0.6, 520, 60));
     }
 
     #[test]
-    fn a_ripple_runs_out_to_the_corners_and_they_quiver() {
+    fn a_ripple_ends_against_the_corner_at_the_screens_side() {
+        let mut m = Membrane::default();
+        let shore = bar();
+        m.ripple(300.0, 1.0, 0.0);
+        // it reaches the side at full height, and the drop's fillet there
+        // swells as it hits
+        assert!(ever(&mut m, &shore, 0.2, 0.7, 597, 40), "the crest reaches the side");
+        assert!(ever(&mut m, &shore, 0.2, 0.7, 599, 44), "the fillet bulges");
+        // nothing comes back across the drop, and the corner settles
+        assert!(!ever(&mut m, &shore, 0.75, 0.9, 480, 34), "spent against the wall");
+        assert!(!ever(&mut m, &shore, 1.0, 1.2, 597, 47), "the corner settles");
+    }
+
+    #[test]
+    fn a_ripple_runs_out_to_the_bare_corners_and_they_swell() {
         let mut m = Membrane::default();
         m.ripple(300.0, 1.0, 0.0);
         assert!(m.is_animating(0.5));
         // after 0.1 s the crest is ~130 px out
         assert!(alpha_after(&mut m, 0.0, 0.1, 430, 3).0 > 200);
         assert!(alpha_after(&mut m, 0.0, 0.1, 300, 3).0 < 100);
-        // the corners: 300 px away, reached at ~0.23 s
-        let (_, covered) = alpha_after(&mut m, 0.0, 0.25, 0, 0);
-        assert!(covered.iter().any(|r| r.x == 0.0 && r.w > 2.0 * 16.0 + 2.0));
-        // the screen's corner swells: black where its arc was open
-        assert_eq!(alpha_after(&mut m, 0.0, 0.25, 5, 5).0, 255);
+        // the corners, ~300 px away: black where the screen's arc was open
+        assert!(ever(&mut m, &BARE, 0.2, 0.35, 5, 5));
+        assert!(!ever(&mut m, &BARE, 1.0, 1.2, 5, 5), "and back");
         assert!(!m.is_animating(RIPPLE_LIFE + IMPACT_LIFE + 0.01));
     }
 }
