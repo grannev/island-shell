@@ -177,7 +177,9 @@ whole-screen effects belong on this surface; their staged plan is
 `docs/frame-effects.md`. Light along the edges (`src/edge.rs`, config
 `edge_light`): a notification's colour runs from the island along the top, a
 critical one goes round, Touch ID breathes blue / flashes green / shudders
-red. Each edge is one composite (a gradient along it through a precomputed
+red; a running timer is a line growing round the screen clockwise from the
+island (orange, green for Pomodoro breaks; a stopwatch is a comet), and the
+frame flashes when it runs out. Each edge is one composite (a gradient along it through a precomputed
 falloff mask, only the lit stretch): ~2 ms a frame, never full outline strokes
 (those cost 40–80 ms). Damage is a few rectangles (`app::Damage`), so edge
 strips never turn into a whole-screen copy.

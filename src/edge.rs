@@ -61,9 +61,30 @@ struct Pulse {
     start: Time,
 }
 
+/// A timer drawn as a line round the screen, clockwise from the island.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gauge {
+    /// how far round, 0..1 (a countdown's time gone; a stopwatch's sweep
+    /// through the minute)
+    pub progress: f64,
+    pub colour: Rgb,
+    /// paused: the line dims
+    pub running: bool,
+    /// a stopwatch: a comet with a fading tail instead of a growing line
+    pub comet: bool,
+}
+
+/// How bright the gauge's line is, and its head.
+const GAUGE_LINE: f64 = 0.5;
+const GAUGE_HEAD: f64 = 0.5;
+const GAUGE_HEAD_LEN: f64 = 48.0;
+/// A comet's tail, as a share of the way round.
+const COMET_TAIL: f64 = 0.22;
+
 #[derive(Default)]
 pub struct Edge {
     pulses: Vec<Pulse>,
+    gauge: Option<Gauge>,
     /// a continuous wave (Touch ID waiting): its colour, since when, and
     /// when it began to fade out
     breath: Option<(Rgb, Time, Option<Time>)>,
@@ -91,6 +112,11 @@ impl Edge {
         }
     }
 
+    /// Show (or take away) the timer's line; it is still between updates.
+    pub fn set_gauge(&mut self, gauge: Option<Gauge>) {
+        self.gauge = gauge;
+    }
+
     pub fn is_animating(&self, now: Time) -> bool {
         self.pulses.iter().any(|p| now - p.start < p.wave.duration()) || self.breath.is_some()
     }
@@ -103,11 +129,14 @@ impl Edge {
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
         }
-        if self.pulses.is_empty() && self.breath.is_none() {
+        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() {
             return Vec::new();
         }
         let far = (w / 2.0 + cx.abs().min(w)).hypot(h) + SOFT;
         let mut lit = false;
+        if let Some(g) = self.gauge {
+            lit |= paint_gauge(cr, w, h, cx, &g);
+        }
         for p in &self.pulses {
             let k = ((now - p.start) / p.wave.duration()).clamp(0.0, 1.0);
             let rise = smooth(k / 0.08);
@@ -142,6 +171,40 @@ impl Edge {
     }
 }
 
+/// A point's way round the screen, clockwise from the island (0..perimeter).
+fn way_round(side: Side, t: f64, w: f64, h: f64, cx: f64) -> f64 {
+    let perimeter = 2.0 * (w + h);
+    match side {
+        Side::Top if t >= cx => t - cx,
+        Side::Top => perimeter - (cx - t),
+        Side::Right => (w - cx) + t,
+        Side::Bottom => (w - cx) + h + (w - t),
+        Side::Left => (w - cx) + h + w + (h - t),
+    }
+}
+
+/// The timer's line: grown round from the island as far as its progress,
+/// brighter at the head; or a stopwatch's comet.
+fn paint_gauge(cr: &Context, w: f64, h: f64, cx: f64, g: &Gauge) -> bool {
+    let perimeter = 2.0 * (w + h);
+    let head = g.progress.clamp(0.0, 1.0) * perimeter;
+    let dim = if g.running { 1.0 } else { 0.45 };
+    paint_by(cr, w, h, g.colour, &|side, t| {
+        let s = way_round(side, t, w, h, cx);
+        let behind = if g.comet { (head - s).rem_euclid(perimeter) } else { head - s };
+        let line = if g.comet {
+            let k = 1.0 - behind / (COMET_TAIL * perimeter);
+            if (0.0..=1.0).contains(&k) { GAUGE_LINE * k.powf(1.5) } else { 0.0 }
+        } else if behind >= 0.0 {
+            GAUGE_LINE
+        } else {
+            0.0
+        };
+        let tip = if behind >= -STEP && behind <= GAUGE_HEAD_LEN { GAUGE_HEAD * (1.0 - behind.max(0.0) / GAUGE_HEAD_LEN) } else { 0.0 };
+        dim * (line + tip)
+    })
+}
+
 /// The thin strips along the four edges the light can reach.
 pub fn strips(w: f64, h: f64) -> Vec<Rect> {
     let d = DEPTH + 2.0;
@@ -166,31 +229,54 @@ fn front(at: f64, alpha: f64, tail: f64) -> Vec<(f64, f64)> {
     stops
 }
 
+/// The screen's four edges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
 /// Light the screen's edges in `colour`, its strength along the way given
-/// by `stops` (distance from the island's top centre, strength). Each edge
-/// is one composite: a gradient along it for the strength, through a
-/// precomputed falloff into the screen. Returns whether anything was lit.
+/// by `stops` (distance from the island's top centre, strength).
 fn paint(cr: &Context, w: f64, h: f64, cx: f64, colour: Rgb, stops: &[(f64, f64)]) -> bool {
     if stops.iter().all(|s| s.1 <= 0.003) {
         return false;
     }
+    paint_by(cr, w, h, colour, &|side, t| {
+        let d = match side {
+            Side::Top => (t - cx).abs(),
+            Side::Bottom => (t - cx).hypot(h),
+            Side::Left => cx.hypot(t),
+            Side::Right => (w - cx).hypot(t),
+        };
+        strength_at(stops, d)
+    })
+}
+
+/// Light the screen's edges in `colour`, its strength at a point given by
+/// `strength(side, t)` (`t` from the left or top end of that edge). Each
+/// edge is one composite: a gradient along it for the strength, through a
+/// precomputed falloff into the screen. Returns whether anything was lit.
+fn paint_by(cr: &Context, w: f64, h: f64, colour: Rgb, strength: &dyn Fn(Side, f64) -> f64) -> bool {
     let falloff = FALLOFF.with(|f| f.clone());
     let k = FALLOFF_N as f64 / DEPTH;
-    // each edge: where it runs (start, direction, length), the distance
-    // from the island of a point on it, and how its falloff is mapped (the
-    // column runs along the edge's normal; the matrix must stay invertible)
-    let edges: [(f64, f64, f64, f64, f64, Box<dyn Fn(f64) -> f64>, cairo::Matrix); 4] = [
-        (0.0, 0.0, 1.0, 0.0, w, Box::new(move |t| (t - cx).abs()), cairo::Matrix::new(1.0, 0.0, 0.0, k, 0.0, 0.0)),
-        (0.0, h, 1.0, 0.0, w, Box::new(move |t| (t - cx).hypot(h)), cairo::Matrix::new(1.0, 0.0, 0.0, -k, 0.0, k * h)),
-        (0.0, 0.0, 0.0, 1.0, h, Box::new(move |t| cx.hypot(t)), cairo::Matrix::new(0.0, k, 1.0, 0.0, 0.0, 0.0)),
-        (w, 0.0, 0.0, 1.0, h, Box::new(move |t| (w - cx).hypot(t)), cairo::Matrix::new(0.0, -k, 1.0, 0.0, 0.0, k * w)),
+    // each edge: where it runs (start, direction, length), and how its
+    // falloff is mapped (the column runs along the edge's normal; the
+    // matrix must stay invertible)
+    let edges = [
+        (Side::Top, 0.0, 0.0, 1.0, 0.0, w, cairo::Matrix::new(1.0, 0.0, 0.0, k, 0.0, 0.0)),
+        (Side::Bottom, 0.0, h, 1.0, 0.0, w, cairo::Matrix::new(1.0, 0.0, 0.0, -k, 0.0, k * h)),
+        (Side::Left, 0.0, 0.0, 0.0, 1.0, h, cairo::Matrix::new(0.0, k, 1.0, 0.0, 0.0, 0.0)),
+        (Side::Right, w, 0.0, 0.0, 1.0, h, cairo::Matrix::new(0.0, -k, 1.0, 0.0, 0.0, k * w)),
     ];
     let mut lit = false;
-    for (x0, y0, dx, dy, len, distance, matrix) in edges {
+    for (side, x0, y0, dx, dy, len, matrix) in edges {
         let n = (len / STEP).ceil() as usize;
         let samples: Vec<(f64, f64)> = (0..=n).map(|i| {
             let t = (i as f64 * STEP).min(len);
-            (t, strength_at(stops, distance(t)))
+            (t, strength(side, t))
         }).collect();
         let Some(first) = samples.iter().position(|s| s.1 > 0.003) else { continue };
         let last = samples.iter().rposition(|s| s.1 > 0.003).unwrap_or(first);
@@ -317,6 +403,41 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_grows_round_the_screen_clockwise() {
+        let mut edge = Edge::default();
+        let gauge = |progress| Some(Gauge { progress, colour: (1.0, 0.6, 0.0), running: true, comet: false });
+        // a quarter round (600x400: 2000 px): along the top right and
+        // down the right edge, nothing on the left yet
+        edge.set_gauge(gauge(0.25));
+        let (mut s, rects) = render(&mut edge, 0.0);
+        assert_eq!(rects.len(), 4);
+        assert!(!edge.is_animating(0.0), "a still line costs no frames");
+        assert!(alpha(&mut s, 500, 1) > 20 && alpha(&mut s, 598, 100) > 20);
+        assert_eq!(alpha(&mut s, 100, 1), 0);
+        assert_eq!(alpha(&mut s, 1, 200), 0);
+        // nearly done: all the way round to the island's left
+        edge.set_gauge(gauge(0.97));
+        let (mut s, _) = render(&mut edge, 0.0);
+        assert!(alpha(&mut s, 1, 200) > 20 && alpha(&mut s, 200, 1) > 20);
+        // the gap left before the line meets its own start under the island
+        assert_eq!(alpha(&mut s, 278, 1), 0);
+        edge.set_gauge(None);
+        let (_, rects) = render(&mut edge, 0.0);
+        assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn way_round_is_continuous_clockwise() {
+        let (w, h, cx) = (600.0, 400.0, 300.0);
+        assert_eq!(way_round(Side::Top, 300.0, w, h, cx), 0.0);
+        assert_eq!(way_round(Side::Top, 600.0, w, h, cx), way_round(Side::Right, 0.0, w, h, cx));
+        assert_eq!(way_round(Side::Right, 400.0, w, h, cx), way_round(Side::Bottom, 600.0, w, h, cx));
+        assert_eq!(way_round(Side::Bottom, 0.0, w, h, cx), way_round(Side::Left, 400.0, w, h, cx));
+        assert_eq!(way_round(Side::Left, 0.0, w, h, cx), way_round(Side::Top, 0.0, w, h, cx));
+        assert_eq!(way_round(Side::Top, 299.0, w, h, cx), 2.0 * (w + h) - 1.0);
+    }
+
+    #[test]
     fn touch_id_breathes_until_it_fades_out() {
         let mut edge = Edge::default();
         edge.breathe(Some(TOUCH_ID_BLUE), 0.0);
@@ -402,5 +523,43 @@ mod bench {
         let started = std::time::Instant::now();
         for i in 0..60 { edge.draw(&cr, 1504.0, 1002.0, 752.0, i as f64 / 60.0); }
         eprintln!("breath: {:.2} ms/frame", started.elapsed().as_secs_f64() * 1e3 / 60.0);
+    }
+}
+
+#[cfg(test)]
+mod gauge_gallery {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes target/gallery/edge-gauge.png; set ISLAND_GALLERY=1"]
+    fn gauge_frames() {
+        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
+        let (w, h, scale) = (1504.0, 1002.0, 0.3);
+        let shots = [(0.15, false, true), (0.5, false, true), (0.9, false, false), (0.4, true, true)];
+        let (fw, fh) = (w * scale, h * scale);
+        let out = cairo::ImageSurface::create(cairo::Format::Rgb24, (fw * 2.0 + 6.0) as i32, (fh * 2.0 + 6.0) as i32).unwrap();
+        let cr = Context::new(&out).unwrap();
+        cr.set_source_rgb(1.0, 1.0, 1.0);
+        cr.paint().unwrap();
+        for (i, (progress, comet, running)) in shots.into_iter().enumerate() {
+            let mut edge = Edge::default();
+            let colour = if i == 2 { crate::menu_style::GREEN } else { crate::menu_style::ORANGE };
+            edge.set_gauge(Some(Gauge { progress, colour, running, comet }));
+            cr.save().unwrap();
+            cr.translate((i % 2) as f64 * (fw + 6.0), (i / 2) as f64 * (fh + 6.0));
+            cr.scale(scale, scale);
+            cr.rectangle(0.0, 0.0, w, h);
+            cr.clip();
+            cr.set_source_rgb(0.10, 0.17, 0.22);
+            cr.paint().unwrap();
+            edge.draw(&cr, w, h, w / 2.0, 0.0);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.rectangle(w / 2.0 - 100.0, 0.0, 200.0, 32.0);
+            cr.fill().unwrap();
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        std::fs::create_dir_all("target/gallery").unwrap();
+        out.write_to_png(&mut std::fs::File::create("target/gallery/edge-gauge.png").unwrap()).unwrap();
     }
 }

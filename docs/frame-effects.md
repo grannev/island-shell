@@ -19,10 +19,11 @@ Status: [ ] to do, [x] done.
       waiting; a green flash on success, a red shudder from the island on a
       miss.
 
-## Stage 2 — the frame as a gauge
-- [ ] Timer / Pomodoro along the perimeter: a thin line goes round the screen
+## Stage 2 — the frame as a gauge (done)
+- [x] Timer / Pomodoro along the perimeter: a thin line goes round the screen
       as time runs (phases in different colours); at the end it closes and
-      the frame flashes.
+      the frame flashes. (A stopwatch is a comet going round once a minute;
+      a paused timer's line dims; the line is still between the 1 Hz ticks.)
 
 ## Stage 3 — screen off into the island
 - [ ] Lock / sleep from the island: the frame closes the screen into a

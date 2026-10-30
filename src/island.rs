@@ -970,6 +970,14 @@ pub struct Frame {
     pub opaque: [Option<Rect>; 2],
 }
 
+/// The timer's colour: orange, green for a Pomodoro's breaks.
+fn timer_colour(kind: timer_page::Kind) -> (f64, f64, f64) {
+    match kind {
+        timer_page::Kind::Pomodoro { phase: timer_page::Phase::ShortBreak | timer_page::Phase::LongBreak, .. } => crate::menu_style::GREEN,
+        _ => crate::menu_style::ORANGE,
+    }
+}
+
 /// Colour helpers.
 fn rgb(hex: u32) -> (f64, f64, f64) {
     (((hex >> 16) & 0xff) as f64 / 255.0, ((hex >> 8) & 0xff) as f64 / 255.0, (hex & 0xff) as f64 / 255.0)
@@ -2265,6 +2273,10 @@ impl Island {
     /// so, and a Pomodoro's next phase waiting to be started.
     fn timer_ran_out(&mut self, now: Time) {
         let Some(timer) = self.timer.take() else { return };
+        // the line has closed round the screen: the frame flashes
+        if self.config.edge_light {
+            self.edge.pulse(crate::edge::Wave::Flash, timer_colour(timer.kind), now);
+        }
         let event = match (timer.kind, self.cycle.as_mut()) {
             (timer_page::Kind::Pomodoro { phase, session, total }, Some(cycle)) => {
                 let next = cycle.plan.after(phase, session);
@@ -4818,6 +4830,14 @@ impl Island {
         // Touch ID breathes round the screen while it waits for a finger
         let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
         self.edge.breathe(waiting.then_some(crate::edge::TOUCH_ID_BLUE), now);
+        // a running timer is a line round the screen
+        let gauge = self.timer.as_ref().filter(|_| self.config.edge_light).map(|t| crate::edge::Gauge {
+            progress: if t.counts_up() { t.fraction(now) } else { 1.0 - t.fraction(now) },
+            colour: timer_colour(t.kind),
+            running: t.running,
+            comet: t.counts_up(),
+        });
+        self.edge.set_gauge(gauge);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
         self.edge.draw(cr, w, h, cx, now)
     }
