@@ -22,6 +22,7 @@ mod icons;
 mod iconload;
 mod background;
 mod bar;
+mod bar_sources;
 mod bezel;
 mod files;
 mod floating;

@@ -398,6 +398,10 @@ pub struct App {
     sound: crate::sound::Player,
     /// screen recordings report through here
     recorder_tx: channel::Sender<crate::recorder::Event>,
+    /// the bar's own workers report here
+    bar_tx: channel::Sender<crate::bar_sources::BarEvent>,
+    /// the details drawer's sampler runs while this holds
+    drawer_sampling: Arc<AtomicBool>,
     /// the notification the server was asked not to expire
     held_notice: Option<u32>,
     quick_was_open: bool,
@@ -450,6 +454,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // the island starts knowing the environment (night mode, the layout)
     let _ = controls.send(crate::control::Request::Refresh);
     let (recorder_tx, recorder_rx) = channel::channel::<crate::recorder::Event>();
+    let (bar_tx, bar_rx) = channel::channel::<crate::bar_sources::BarEvent>();
 
     let mut island = Island::new(load_config());
     island.update_clock();
@@ -539,6 +544,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         controls,
         sound: crate::sound::Player::new(),
         recorder_tx,
+        bar_tx,
+        drawer_sampling: Arc::new(AtomicBool::new(false)),
         held_notice: None,
         quick_was_open: false,
         sound_poll: None,
@@ -615,6 +622,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
+    loop_handle.insert_source(bar_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(event) = event {
+            match event {
+                crate::bar_sources::BarEvent::Details(details) => {
+                    if app.island.bar.details.as_ref() != Some(&details) {
+                        app.island.bar.details = Some(details);
+                        app.redraw();
+                    }
+                }
+            }
+        }
+    })?;
     loop_handle.insert_source(recorder_rx, |event, _, app: &mut App| {
         if let channel::Event::Msg(event) = event {
             let now = app.frame_time();
@@ -918,6 +937,10 @@ impl App {
             Command::Hide => self.island.hide(now),
             Command::Dodge => self.island.set_dodged(true, now),
             Command::Undodge => self.island.set_dodged(false, now),
+            Command::DodgeToggle if self.island.config.bar => {
+                // mod+o (details-toggle.sh): the bar's own drawer now
+                self.toggle_drawer(now);
+            }
             Command::DodgeToggle => {
                 let dodged = self.island.dodged;
                 self.island.set_dodged(!dodged, now);
@@ -1454,6 +1477,11 @@ impl App {
         let open = !self.island.bar.drawer_open();
         self.island.bar.set_drawer(open);
         self.island.set_dodged(open, now);
+        // disk, CPU and memory are read only while it is open
+        let was = self.drawer_sampling.swap(open, Ordering::Relaxed);
+        if open && !was {
+            crate::bar_sources::spawn_details(self.bar_tx.clone(), self.drawer_sampling.clone());
+        }
         self.after_change();
     }
 

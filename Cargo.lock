@@ -718,6 +718,7 @@ version = "0.1.0"
 dependencies = [
  "cairo-rs",
  "image",
+ "libc",
  "pango",
  "pangocairo",
  "resvg",

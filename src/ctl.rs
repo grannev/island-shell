@@ -92,7 +92,7 @@ impl Command {
             ["hide"] => Command::Hide,
             ["dodge"] => Command::Dodge,
             ["undodge"] => Command::Undodge,
-            ["dodge-toggle"] => Command::DodgeToggle,
+            ["dodge-toggle"] | ["details"] => Command::DodgeToggle,
             ["status"] => Command::Status,
             ["dump", path] => Command::Dump(path.to_string()),
             ["demo", app, rest @ ..] => {

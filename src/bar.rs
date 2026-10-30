@@ -270,7 +270,7 @@ impl Bar {
     fn right_cells(&self, cr: &Context, renderer: &Renderer) -> Vec<(Cell, Option<String>)> {
         let text_w = |s: &str| renderer.layout(cr, s, Font::Bar).pixel_extents().1.width() as f64;
         let mut cells = Vec::new();
-        cells.push((Cell { item: Item::Details, width: text_w(ELLIPSIS) + 2.0 * PAD_DETAILS }, Some(ELLIPSIS.to_string())));
+        // the drawer opens to the left of ⋯, which stays by the volume
         if let Some(d) = &self.details {
             for (item, text) in [
                 (Item::Disk, format!("{DISK} {}", d.disk_free)),
@@ -281,6 +281,7 @@ impl Bar {
                 cells.push((Cell { item, width }, Some(text)));
             }
         }
+        cells.push((Cell { item: Item::Details, width: text_w(ELLIPSIS) + 2.0 * PAD_DETAILS }, Some(ELLIPSIS.to_string())));
         if let Some((value, muted)) = self.volume {
             let text = volume_text(value, muted);
             cells.push((Cell { item: Item::Volume, width: text_w(&text) + 2.0 * PAD }, Some(text)));
@@ -570,7 +571,7 @@ mod tests {
         // the battery last
         let names: Vec<Item> = bar.slots.iter().map(|(i, _)| i.clone()).collect();
         assert_eq!(&names[..4], &["1", "2", "3", "10"].map(|n| Item::Workspace(n.into())));
-        assert_eq!(names[4], Item::Details);
+        assert!(names[4..].contains(&Item::Details));
         assert_eq!(names.last(), Some(&Item::Battery));
         assert!(bar.contains(5.0, 10.0) && bar.contains(1500.0, 10.0) && !bar.contains(752.0, 10.0));
     }
