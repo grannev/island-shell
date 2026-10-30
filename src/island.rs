@@ -2167,6 +2167,12 @@ impl Island {
                 }
             }
             activity::Event::BatteryLow { .. } => self.low_battery = true,
+            // the bar's battery: state only, no pill
+            activity::Event::Battery { percent, charging, remaining } => {
+                self.bar.battery = Some(crate::bar::Battery { percent, charging, remaining });
+                if charging { self.low_battery = false; }
+                return;
+            }
             _ => {}
         }
         if let activity::Event::MicInUse { apps } = event {

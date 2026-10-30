@@ -30,6 +30,9 @@ pub enum Event {
     Slider { kind: SliderKind, value: f64, muted: bool },
     Charging { percent: u8 },
     BatteryLow { percent: u8 },
+    /// the battery's state, for the bar (no pill of its own): percent,
+    /// charging, minutes to empty (or full)
+    Battery { percent: u8, charging: bool, remaining: Option<u32> },
     Bluetooth { name: String, battery: Option<u8> },
     Wifi { ssid: String },
     Screenshot { path: PathBuf },
@@ -69,6 +72,8 @@ impl Event {
     pub fn size(&self) -> (f64, f64) {
         match self {
             Event::Slider { .. } => (340.0, SLIDER_H),
+            // state for the bar, never a pill
+            Event::Battery { .. } => (270.0, PILL_H),
             Event::Charging { .. } => (270.0, PILL_H),
             Event::BatteryLow { .. } => (310.0, PILL_H),
             Event::Bluetooth { .. } => (370.0, PILL_H),
@@ -94,6 +99,7 @@ impl Event {
     pub fn hold(&self) -> f64 {
         match self {
             Event::Slider { .. } => 1.45,
+            Event::Battery { .. } => 0.0,
             Event::Charging { .. } => 2.8,
             Event::BatteryLow { .. } => 5.0,
             Event::Bluetooth { .. } | Event::Wifi { .. } => 3.2,
@@ -235,6 +241,19 @@ fn spawn_power(tx: Sender<Event>) {
         if let Some((percent, false)) = last_battery.filter(|(percent, _)| *percent <= 20) {
             let _ = tx.send(Event::BatteryLow { percent });
         }
+        // the bar's battery: sent when it changes (the minutes included)
+        let mut last_state = None;
+        let state = |path: &Path, tx: &Sender<Event>, last: &mut Option<(u8, bool, Option<u32>)>| {
+            let Some((percent, charging)) = read_battery(path) else { return };
+            let now = (percent, charging, read_remaining(path, charging));
+            if *last != Some(now) {
+                *last = Some(now);
+                let _ = tx.send(Event::Battery { percent, charging, remaining: now.2 });
+            }
+        };
+        if let Some(path) = battery.as_deref() {
+            state(path, &tx, &mut last_state);
+        }
         loop {
             thread::sleep(Duration::from_millis(80));
             if let Some(path) = backlight.as_deref() {
@@ -252,6 +271,7 @@ fn spawn_power(tx: Sender<Event>) {
                 continue;
             }
             let Some(path) = battery.as_deref() else { continue };
+            state(path, &tx, &mut last_state);
             let Some(current) = read_battery(path) else { continue };
             if let Some((old_percent, old_charging)) = last_battery {
                 if current.1 && !old_charging {
@@ -287,6 +307,19 @@ pub fn read_backlight(path: &Path) -> Option<f64> {
     let current = read_trim(&path.join("brightness"))?.parse::<f64>().ok()?;
     let max = read_trim(&path.join("max_brightness"))?.parse::<f64>().ok()?;
     (max > 0.0).then_some((current / max).clamp(0.0, 1.0))
+}
+
+/// Minutes to empty (or to full while charging), from energy and power (as
+/// Waybar's bar-battery.sh worked it out).
+fn read_remaining(path: &Path, charging: bool) -> Option<u32> {
+    let num = |name: &str| read_trim(&path.join(name))?.parse::<f64>().ok();
+    let power = num("power_now")?;
+    if power <= 0.0 {
+        return None;
+    }
+    let now = num("energy_now")?;
+    let energy = if charging { num("energy_full")? - now } else { now };
+    Some((energy * 60.0 / power).max(0.0) as u32)
 }
 
 fn read_battery(path: &Path) -> Option<(u8, bool)> {
@@ -506,6 +539,7 @@ pub fn draw_pill(
     let enter = smoothstep((now - since) / 0.35) * alpha;
     let cy = y0 + h / 2.0;
     match event {
+        Event::Battery { .. } => {}
         Event::Slider { kind, muted, value: target } => {
             let label = match kind {
                 SliderKind::Volume if *muted => "Без звука",

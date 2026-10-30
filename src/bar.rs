@@ -431,6 +431,24 @@ impl Bar {
             }
             frame.painted.push(Rect { x: w - dw - FILLET * 5.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + FILLET * 5.0 + y).max(0.0) });
             frame.input.push(Rect { x: w - dw, y: 0.0, w: dw, h: (HEIGHT + y).max(0.0) });
+            // the battery's time, in a small pill under it while it is hovered
+            let k = self.washes.get(&Item::Battery).map_or(0.0, |s| s.value(now).clamp(0.0, 1.0));
+            if let (true, Some(b), Some((_, slot))) = (k > 0.01, self.battery, self.slots.iter().find(|(i, _)| *i == Item::Battery)) {
+                let text = battery_tip(b);
+                let layout = renderer.layout(cr, &text, Font::Small);
+                let (_, ext) = layout.pixel_extents();
+                let (tw, th) = (ext.width() as f64 + 24.0, 26.0);
+                let tx = (slot.x + slot.w / 2.0 - tw / 2.0).min(w - tw - 6.0);
+                let ty = HEIGHT + 8.0 - 4.0 * (1.0 - k);
+                let tip = Rect { x: tx, y: ty, w: tw, h: th };
+                rounded(cr, tip, th / 2.0);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.92 * k);
+                let _ = cr.fill();
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.9 * k);
+                cr.move_to(renderer.snap(tx + 12.0 - ext.x() as f64), renderer.snap(ty + (th - ext.height() as f64) / 2.0 - ext.y() as f64));
+                pangocairo::functions::show_layout(cr, &layout);
+                frame.painted.push(Rect { x: tx - 2.0, y: 0.0, w: tw + 4.0, h: ty + th + 2.0 });
+            }
         }
         cr.restore().unwrap();
         frame.input.retain(|r| r.h > 0.5);
@@ -470,6 +488,17 @@ fn volume_text(value: f64, muted: bool) -> String {
 fn battery_text(b: Battery) -> String {
     let icon = if b.charging { BOLT } else { BATTERY[((b.percent as usize) * 5 / 100).min(4)] };
     format!("{icon} {}%", b.percent)
+}
+
+/// The battery's tooltip: how long it lasts, or until it is full.
+fn battery_tip(b: Battery) -> String {
+    let time = |m: u32| if m >= 60 { format!("{} ч {:02} мин", m / 60, m % 60) } else { format!("{m} мин") };
+    match (b.charging, b.remaining) {
+        (true, Some(m)) if b.percent < 100 => format!("Заряжается · до полной {}", time(m)),
+        (true, _) => format!("Заряжается · {}%", b.percent),
+        (false, Some(m)) => format!("Осталось {}", time(m)),
+        (false, None) => format!("Батарея {}%", b.percent),
+    }
 }
 
 fn rounded(cr: &Context, r: Rect, radius: f64) {
@@ -572,6 +601,13 @@ mod tests {
         assert!(open.w > closed.w + 100.0, "{} → {}", closed.w, open.w);
         assert!((open.x + open.w - 1504.0).abs() < 1e-9, "still pressed to the right edge");
         assert!(bar.slots.iter().any(|(i, r)| *i == Item::Cpu && r.w > 20.0));
+    }
+
+    #[test]
+    fn the_batterys_tip_says_how_long() {
+        assert_eq!(battery_tip(Battery { percent: 84, charging: false, remaining: Some(192) }), "Осталось 3 ч 12 мин");
+        assert_eq!(battery_tip(Battery { percent: 40, charging: true, remaining: Some(45) }), "Заряжается · до полной 45 мин");
+        assert_eq!(battery_tip(Battery { percent: 100, charging: true, remaining: None }), "Заряжается · 100%");
     }
 
     #[test]
