@@ -179,7 +179,10 @@ the arc in the corners (a radial falloff from the arc meeting the straight
 stretches). Future
 whole-screen effects belong on this surface; their staged plan is
 `docs/frame-effects.md`. Light along the edges (`src/edge.rs`, config
-`edge_light`): a notification's colour runs from the island along the top, a
+`edge_light`; light starts at the middle of the island's lower edge — the box
+as last drawn — runs round its outline to where it hangs from the edge, then
+along the frame (`edge::Way`, distances along that path); pill waves wait
+`PILL_LIGHT_DELAY` for the pill to open): a notification's colour runs along the top, a
 critical one goes round, Touch ID breathes blue / flashes green / shudders
 red; a running timer is a line growing round the screen clockwise from the
 island (orange, green for Pomodoro breaks; a stopwatch is a comet), and the

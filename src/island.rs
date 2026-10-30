@@ -141,6 +141,9 @@ const TUG_SLOP: f64 = 6.0;
 /// Let go, it jumps back like jelly.
 const TUG_RESPONSE: f64 = 0.46;
 const TUG_DAMPING: f64 = 0.42;
+/// The light round the frame waits this long for a pill to open.
+const PILL_LIGHT_DELAY: f64 = 0.25;
+
 /// How much thicker the frame is while Focus (Do Not Disturb) is on.
 const FOCUS_FRAME: f64 = 4.0;
 
@@ -890,6 +893,8 @@ pub struct Island {
     focus_frame: Spring,
     /// the surface's centre, as of the last frame drawn
     surface_cx: f64,
+    /// the box as last drawn, and its corner radius (None: above the edge)
+    box_geom: Option<(Rect, f64)>,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1155,6 +1160,7 @@ impl Island {
             membrane: crate::edge::Membrane::default(),
             focus_frame: Spring::new(0.0, 0.45, 0.8),
             surface_cx: 490.0,
+            box_geom: None,
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -2105,7 +2111,9 @@ impl Island {
             } else {
                 (crate::edge::Wave::Top, note.kind)
             };
-            self.edge.pulse(wave, icons::accent(kind), now);
+            // once the pill has opened, so the light leaves its lower edge
+            // rather than slipping out from under the growing box
+            self.edge.schedule(wave, icons::accent(kind), now + PILL_LIGHT_DELAY);
         }
         self.notice = Some(Notice { note, since: now });
         self.notice_hovered = None;
@@ -2931,6 +2939,7 @@ impl Island {
         let cx = cx - self.config.dodge * dodge.x * (1.0 - p);
         let dy = -BOX_H * hide.x * (1.0 - p);
         if dy <= -(BOX_H + FILLET) && p <= 0.0 {
+            self.box_geom = None;
             return Frame::default();
         }
         // in the hand (or wobbling back) the closed line gives a little:
@@ -3156,6 +3165,8 @@ impl Island {
             y1 = renderer.snap(y1);
         }
         let r = radius.min((x1 - x0) / 2.0).min((y1 - dy) / 2.0);
+        // the light along the frame comes out of the box as it is now
+        self.box_geom = (y1 > 0.5).then(|| (Rect { x: x0, y: edge.max(0.0), w: x1 - x0, h: y1 - edge.max(0.0) }, r));
         if pl > 0.05 && self.player.target() > 0.5 && self.song.is_some() {
             self.player_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
         }
@@ -4906,9 +4917,12 @@ impl Island {
     /// island's surface centred on `cx`; painted under the island. Returns
     /// the strips it painted.
     pub fn draw_edges(&mut self, cr: &Context, w: f64, h: f64, cx: f64, now: Time) -> Vec<Rect> {
+        // the light comes out of the island as it was last drawn
+        self.edge.set_island(self.box_geom.filter(|_| !self.hidden.any() || self.pill.state(now).x > 0.05));
         // Touch ID breathes round the screen while it waits for a finger
         let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
-        self.edge.breathe(waiting.then_some(crate::edge::TOUCH_ID_BLUE), now);
+        // the light begins once Touch ID's pill has grown
+        self.edge.breathe(waiting.then_some(crate::edge::TOUCH_ID_BLUE), (now).max(self.auth_start + PILL_LIGHT_DELAY));
         // a running timer is a line round the screen
         let gauge = self.timer.as_ref().filter(|_| self.config.edge_light).map(|t| crate::edge::Gauge {
             progress: if t.counts_up() { t.fraction(now) } else { 1.0 - t.fraction(now) },

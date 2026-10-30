@@ -104,9 +104,59 @@ pub struct Level {
     pub colour: Rgb,
 }
 
+/// The island's fillets where it hangs from the screen's edge.
+const ISLAND_FILLET: f64 = 14.0;
+
+/// Where the light comes from and the way it runs: out of the middle of the
+/// island's lower edge, along its outline (its bottom, round its lower
+/// corners, up its sides) to where it hangs from the screen's edge, then on
+/// along the frame. Distances are measured along that way.
+#[derive(Clone, Copy, Debug)]
+struct Way {
+    /// the island's centre
+    cx: f64,
+    /// how far either side of `cx` the island meets the top edge
+    attach: f64,
+    /// the way from the island's lower middle to where it meets the edge
+    lead: f64,
+    /// the island's box and corner radius (None: it is not showing)
+    island: Option<(Rect, f64)>,
+}
+
+impl Way {
+    fn new(cx: f64, island: Option<(Rect, f64)>) -> Way {
+        match island {
+            Some((b, r)) if b.w > 1.0 && b.h > 1.0 => {
+                let r = r.min(b.w / 2.0).min(b.h / 2.0).max(0.0);
+                let lead = (b.w / 2.0 - r) + std::f64::consts::FRAC_PI_2 * (r + ISLAND_FILLET) + (b.h - r);
+                Way { cx: b.x + b.w / 2.0, attach: b.w / 2.0 + ISLAND_FILLET, lead, island: Some((b, r)) }
+            }
+            _ => Way { cx, attach: 0.0, lead: 0.0, island: None },
+        }
+    }
+
+    /// How far along the way a point of the screen's edge is.
+    fn along(&self, side: Side, t: f64, w: f64, h: f64) -> Option<f64> {
+        let (left, right) = ((self.cx - self.attach).max(0.0), (w - self.cx - self.attach).max(0.0));
+        Some(self.lead + match side {
+            Side::Top => {
+                let dx = (t - self.cx).abs();
+                // under the island: it is the island's own outline there
+                if dx < self.attach { return None; }
+                dx - self.attach
+            }
+            Side::Left => left + t,
+            Side::Right => right + t,
+            Side::Bottom => (left + h + t).min(right + h + (w - t)),
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct Edge {
     pulses: Vec<Pulse>,
+    /// the island as last drawn: the light comes out of it
+    island: Option<(Rect, f64)>,
     gauge: Option<Gauge>,
     level: Option<Level>,
     /// the bottom corners smouldering red (low battery), how strongly
@@ -154,6 +204,11 @@ impl Edge {
         }
     }
 
+    /// The island's box and corner radius as drawn (None: not showing).
+    pub fn set_island(&mut self, island: Option<(Rect, f64)>) {
+        self.island = island;
+    }
+
     /// Show (or take away) the timer's line; it is still between updates.
     pub fn set_gauge(&mut self, gauge: Option<Gauge>) {
         self.gauge = gauge;
@@ -197,8 +252,12 @@ impl Edge {
             && self.ember <= 0.0 && self.border.0 <= 0.05 && self.ambient.is_none() {
             return Vec::new();
         }
-        let far = (w / 2.0 + cx.abs().min(w)).hypot(h) + SOFT;
+        let way = Way::new(cx, self.island);
+        let far = way.lead + w + h + SOFT;
+        // a notification's light runs past the corners a little way down
+        let top_reach = way.lead + (w / 2.0 - way.attach).max(0.0) + 0.25 * h;
         let mut lit = false;
+        let mut island_lit = false;
         if self.ember > 0.0 {
             let ember = self.ember;
             lit |= paint_by(cr, w, h, r, FAILURE_RED, &|side, t| {
@@ -255,7 +314,7 @@ impl Edge {
             let k = ((now - p.start) / p.wave.duration()).clamp(0.0, 1.0);
             let rise = smooth(k / 0.08);
             let stops: Vec<(f64, f64)> = match p.wave {
-                Wave::Top => front(ease_out(k) * 0.64 * w, (1.0 - k).powf(1.4) * rise, 0.18),
+                Wave::Top => front(ease_out(k) * top_reach, (1.0 - k).powf(1.4) * rise, 0.18),
                 Wave::Around => front(ease_out(k) * far, (1.0 - k).powf(1.2) * rise, 0.22),
                 Wave::Flash => vec![(0.0, rise * (1.0 - smooth((k - 0.15) / 0.85))), (far, rise * (1.0 - smooth((k - 0.15) / 0.85)))],
                 // drawn above, from the bottom corners
@@ -277,11 +336,13 @@ impl Edge {
                 }
                 Wave::Shudder => {
                     // out and back, twice, dying away
-                    let reach = 360.0 * (std::f64::consts::PI * k * 2.0).sin().abs() * (1.0 - k);
+                    let reach = (way.lead + 260.0) * (std::f64::consts::PI * k * 2.0).sin().abs() * (1.0 - k);
                     front(reach, (1.0 - k) * rise, 0.25)
                 }
             };
-            lit |= paint(cr, w, h, r, cx, p.colour, &stops);
+            let (screen, island) = paint(cr, w, h, r, &way, p.colour, &stops);
+            lit |= screen | island;
+            island_lit |= island;
         }
         if let Some((colour, since, end)) = self.breath {
             let fade_in = smooth((now - since) / BREATH_FADE);
@@ -293,7 +354,9 @@ impl Edge {
             let rim = 0.35 * strength;
             let wave: Vec<(f64, f64)> = front(ease_out(phase) * far, strength * (1.0 - phase * 0.6), 0.0)
                 .into_iter().map(|(d, a)| (d, a.max(rim))).chain([(far + SOFT, rim)]).collect();
-            lit |= paint(cr, w, h, r, cx, colour, &wave);
+            let (screen, island) = paint(cr, w, h, r, &way, colour, &wave);
+            lit |= screen | island;
+            island_lit |= island;
         }
         // the thicker frame goes over the light: the light comes out of it
         let (width, radius) = self.border;
@@ -319,7 +382,11 @@ impl Edge {
         if !lit {
             return Vec::new();
         }
-        strips(w, h)
+        let mut painted = strips(w, h);
+        if let (true, Some((b, _))) = (island_lit, way.island) {
+            painted.push(Rect { x: b.x - DEPTH - 2.0, y: b.y.max(0.0), w: b.w + 2.0 * DEPTH + 4.0, h: b.h + DEPTH + 2.0 });
+        }
+        painted
     }
 }
 
@@ -423,19 +490,91 @@ enum Side {
 
 /// Light the screen's edges in `colour`, its strength along the way given
 /// by `stops` (distance from the island's top centre, strength).
-fn paint(cr: &Context, w: f64, h: f64, r: f64, cx: f64, colour: Rgb, stops: &[(f64, f64)]) -> bool {
+/// (`stops`: distance along the way, strength.) Returns whether the
+/// screen's edges and the island's outline were lit.
+fn paint(cr: &Context, w: f64, h: f64, r: f64, way: &Way, colour: Rgb, stops: &[(f64, f64)]) -> (bool, bool) {
     if stops.iter().all(|s| s.1 <= 0.003) {
-        return false;
+        return (false, false);
     }
-    paint_by(cr, w, h, r, colour, &|side, t| {
-        let d = match side {
-            Side::Top => (t - cx).abs(),
-            Side::Bottom => (t - cx).hypot(h),
-            Side::Left => cx.hypot(t),
-            Side::Right => (w - cx).hypot(t),
-        };
-        strength_at(stops, d)
-    })
+    let screen = paint_by(cr, w, h, r, colour, &|side, t| {
+        way.along(side, t, w, h).map_or(0.0, |d| strength_at(stops, d))
+    });
+    let island = way.island.is_some_and(|(b, br)| paint_island(cr, b, br, colour, &|d| strength_at(stops, d)));
+    (screen, island)
+}
+
+/// Light round the island's outline, outside it (the island is drawn over
+/// the inner side): along its bottom from the middle, round its lower
+/// corners and up its sides; `strength(d)` at `d` along that way. The same
+/// composites as the screen's edges, with the falloff turned outwards.
+fn paint_island(cr: &Context, b: Rect, r: f64, colour: Rgb, strength: &dyn Fn(f64) -> f64) -> bool {
+    let falloff_mask = FALLOFF.with(|f| f.clone());
+    let k = FALLOFF_N as f64 / DEPTH;
+    let (x0, x1, top, bottom) = (b.x, b.x + b.w, b.y.max(0.0), b.y + b.h);
+    let cx = b.x + b.w / 2.0;
+    let straight = (b.w / 2.0 - r).max(0.0);
+    let arc = std::f64::consts::FRAC_PI_2 * r;
+    let mut lit = false;
+    // a stretch: from (sx, sy) along (dx, dy) for `len`, its distance along
+    // the way at t, its band (clip) and how its falloff is mapped
+    let mut band = |sx: f64, sy: f64, dx: f64, dy: f64, len: f64, d_at: &dyn Fn(f64) -> f64, clip: Rect, matrix: cairo::Matrix| {
+        if len <= 0.5 {
+            return;
+        }
+        let n = (len / STEP).ceil() as usize;
+        let samples: Vec<(f64, f64)> = (0..=n).map(|i| {
+            let t = (i as f64 * STEP).min(len);
+            (t, strength(d_at(t)))
+        }).collect();
+        if samples.iter().all(|s| s.1 <= 0.003) {
+            return;
+        }
+        let gradient = cairo::LinearGradient::new(sx, sy, sx + dx * len, sy + dy * len);
+        for (t, a) in &samples {
+            gradient.add_color_stop_rgba(t / len, colour.0, colour.1, colour.2, a.clamp(0.0, 1.0));
+        }
+        let mask = falloff_mask.clone();
+        mask.set_matrix(matrix);
+        cr.save().unwrap();
+        cr.rectangle(clip.x, clip.y, clip.w, clip.h);
+        cr.clip();
+        let _ = cr.set_source(&gradient);
+        let _ = cr.mask(&mask);
+        cr.restore().unwrap();
+        lit = true;
+    };
+    // the bottom, out from the middle both ways
+    band(x0 + r, bottom, 1.0, 0.0, b.w - 2.0 * r, &|t| (x0 + r + t - cx).abs(),
+        Rect { x: x0 + r, y: bottom, w: b.w - 2.0 * r, h: DEPTH }, cairo::Matrix::new(1.0, 0.0, 0.0, k, 0.0, -k * bottom));
+    // the sides, up from the lower corners to the edge
+    let side_len = bottom - r - top;
+    let up = move |t: f64| straight + arc + (side_len - t);
+    band(x0, top, 0.0, 1.0, side_len, &up, Rect { x: x0 - DEPTH, y: top, w: DEPTH, h: side_len },
+        cairo::Matrix::new(0.0, -k, 1.0, 0.0, 0.0, k * x0));
+    band(x1, top, 0.0, 1.0, side_len, &up, Rect { x: x1, y: top, w: DEPTH, h: side_len },
+        cairo::Matrix::new(0.0, k, 1.0, 0.0, 0.0, -k * x1));
+    // the lower corners: dying away outwards from the arc
+    let s = strength(straight + arc / 2.0);
+    if r > 0.5 && s > 0.003 {
+        for (ccx, clip_x) in [(x0 + r, x0 - DEPTH), (x1 - r, x1 - r)] {
+            let reach = r + DEPTH;
+            let gradient = cairo::RadialGradient::new(ccx, bottom - r, 0.0, ccx, bottom - r, reach);
+            gradient.add_color_stop_rgba(0.0, colour.0, colour.1, colour.2, s);
+            let steps = 8;
+            for i in 0..=steps {
+                let d = DEPTH * i as f64 / steps as f64;
+                gradient.add_color_stop_rgba((r + d) / reach, colour.0, colour.1, colour.2, (s * falloff(d)).clamp(0.0, 1.0));
+            }
+            cr.save().unwrap();
+            cr.rectangle(clip_x, bottom - r, reach, reach);
+            cr.clip();
+            let _ = cr.set_source(&gradient);
+            let _ = cr.paint();
+            cr.restore().unwrap();
+            lit = true;
+        }
+    }
+    lit
 }
 
 /// Light the screen's edges in `colour`, its strength at a point given by
@@ -619,6 +758,23 @@ mod tests {
         assert!(!edge.is_animating(11.3));
         let (_, rects) = render(&mut edge, 11.3);
         assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn the_light_leaves_the_middle_of_the_islands_lower_edge() {
+        let mut edge = Edge::default();
+        // a 100x40 island hanging in the middle of a 600x400 screen
+        edge.set_island(Some((Rect { x: 250.0, y: 0.0, w: 100.0, h: 40.0 }, 14.0)));
+        edge.pulse(Wave::Top, (0.2, 0.6, 1.0), 10.0);
+        // first it runs out along the island's bottom, the screen still dark
+        let (mut s, rects) = render(&mut edge, 10.06);
+        assert!(alpha(&mut s, 330, 41) > 20, "along the island's bottom: {}", alpha(&mut s, 330, 41));
+        assert_eq!(alpha(&mut s, 550, 1), 0, "not along the frame yet");
+        assert!(rects.iter().any(|r| r.x < 250.0 && r.y + r.h > 40.0), "the island's surround is damaged");
+        // then up its sides and out along the top edge
+        let (mut s, _) = render(&mut edge, 10.3);
+        assert!(alpha(&mut s, 247, 10) > 10, "up the island's side");
+        assert!(alpha(&mut s, 450, 1) > 20, "on along the frame");
     }
 
     #[test]
@@ -1061,5 +1217,48 @@ mod corner_look {
         }
         drop(cr);
         out.write_to_png(&mut std::fs::File::create("target/gallery/edge-corner.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod island_light_gallery {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/edge-from-island.png"]
+    fn from_island() {
+        let (w, h, scale) = (1504.0, 1002.0, 0.6);
+        let island = Rect { x: 542.0, y: 0.0, w: 420.0, h: 92.0 };
+        let (fw, fh) = (w * scale, 200.0 * scale);
+        let times = [0.05, 0.12, 0.2, 0.32, 0.5, 0.75];
+        let out = cairo::ImageSurface::create(cairo::Format::Rgb24, fw as i32, ((fh + 3.0) * times.len() as f64) as i32).unwrap();
+        let cr = Context::new(&out).unwrap();
+        for (i, t) in times.into_iter().enumerate() {
+            let mut edge = Edge::default();
+            edge.set_island(Some((island, 30.0)));
+            edge.pulse(Wave::Top, (0.165, 0.67, 0.93), 0.0);
+            cr.save().unwrap();
+            cr.translate(0.0, i as f64 * (fh + 3.0));
+            cr.rectangle(0.0, 0.0, fw, fh);
+            cr.clip();
+            cr.scale(scale, scale);
+            cr.set_source_rgb(0.10, 0.17, 0.22);
+            cr.paint().unwrap();
+            edge.draw(&cr, w, h, w / 2.0, 16.0, t);
+            // the island over it
+            let (x0, x1, b, r) = (island.x, island.x + island.w, island.h, 30.0);
+            cr.new_path();
+            cr.move_to(x0 - 14.0, 0.0);
+            cr.arc(x0 - 14.0, 14.0, 14.0, -0.5 * std::f64::consts::PI, 0.0);
+            cr.arc_negative(x0 + r, b - r, r, std::f64::consts::PI, 0.5 * std::f64::consts::PI);
+            cr.arc_negative(x1 - r, b - r, r, 0.5 * std::f64::consts::PI, 0.0);
+            cr.arc(x1 + 14.0, 14.0, 14.0, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            cr.close_path();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            cr.fill().unwrap();
+            crate::bezel::paint(&cr, w, h, 16.0);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        out.write_to_png(&mut std::fs::File::create("target/gallery/edge-from-island.png").unwrap()).unwrap();
     }
 }
