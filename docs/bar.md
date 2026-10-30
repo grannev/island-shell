@@ -36,6 +36,13 @@ wide as its text; width changes slide the neighbours (`width-anim.sh` +
 - `scripts/details-toggle.sh` (mod+o) signals the patched Waybar.
 - `island-player.sh` used `waybar-volume` (the old island; already retired).
 
+## Decisions (2026-10-31)
+- The drops are as tall as the island, 32 px (Waybar was 26): the bar's
+  reserved room is 32 px.
+- Everything — the island and the bar drops — on every output (each output's
+  drops show its own workspaces).
+- Tray menus are island sheets out of the right drop.
+
 ## 2. Architecture
 
 ### 2.1 One shape language: `src/drop.rs`
@@ -140,3 +147,6 @@ bar/sources.rs    environment workers feeding `BarEvent`s into the loop
    menus as island sheets.
 7. Switch-over: sway config, mod+o, lock.sh check, Waybar kept as fallback;
    README and CLAUDE.md.
+8. Every output: one surface (canvas, buffers, damage) per output; the
+   island's state drawn on each, hit rects per surface; each output's bar
+   shows its own workspaces.

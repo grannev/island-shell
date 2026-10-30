@@ -103,7 +103,7 @@ impl SideHud {
         let k = (w / (FILLET + RADIUS)).min(1.0);
         let (f, r) = (FILLET * k, RADIUS * k);
         cr.save().unwrap();
-        drop_shape(cr, w, y0, y1, f, r);
+        crate::drop::left(cr, w, y0, y1, r, f, 0.6);
         cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.fill();
         // the content comes in once it has most of its size
@@ -130,19 +130,6 @@ impl SideHud {
         cr.restore().unwrap();
         Some(Rect { x: 0.0, y: mid - HEIGHT / 2.0 - FILLET - SWELL - 4.0, w: WIDTH * 1.1 + SWELL + 4.0, h: HEIGHT + 2.0 * (FILLET + SWELL) + 8.0 })
     }
-}
-
-/// The drop hanging from the left edge: out to `w`, from `y0` to `y1`,
-/// concave fillets `f` where it meets the edge and outer corners `r`.
-fn drop_shape(cr: &Context, w: f64, y0: f64, y1: f64, f: f64, r: f64) {
-    use std::f64::consts::{FRAC_PI_2, PI};
-    cr.new_path();
-    cr.move_to(0.0, y0 - f);
-    cr.arc_negative(f, y0 - f, f, PI, FRAC_PI_2);
-    cr.arc(w - r, y0 + r, r, -FRAC_PI_2, 0.0);
-    cr.arc(w - r, y1 - r, r, 0.0, FRAC_PI_2);
-    cr.arc_negative(f, y1 + f, f, -FRAC_PI_2, -PI);
-    cr.close_path();
 }
 
 fn capsule(cr: &Context, x: f64, y: f64, w: f64, h: f64) {

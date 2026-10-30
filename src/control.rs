@@ -63,6 +63,8 @@ pub enum Request {
     AppVolume(Vec<u32>, f64),
     Mic(f64),
     MicMute,
+    /// the speakers' mute
+    ToggleMute,
     Sink(String),
     NextLayout,
     /// night mode on (at this colour temperature) or off
@@ -173,6 +175,10 @@ impl Worker {
             }
             Request::MicMute => {
                 run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]);
+                true
+            }
+            Request::ToggleMute => {
+                run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
                 true
             }
             Request::Night(kelvin) => {

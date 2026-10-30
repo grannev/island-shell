@@ -243,6 +243,16 @@ impl Damage {
     }
 }
 
+/// Keeps the bar's room at the top of the screen free of windows (as
+/// Waybar's exclusive zone did): an empty, input-less surface on the `top`
+/// layer, as tall as the bar's drops.
+struct BarReserve {
+    layer: LayerSurface,
+    viewport: WpViewport,
+    buffer: Buffer,
+    output: Option<wl_output::WlOutput>,
+}
+
 struct DismissSurface {
     layer: LayerSurface,
     viewport: WpViewport,
@@ -298,6 +308,7 @@ pub struct App {
     layer_shell: LayerShell,
     viewporter: WpViewporter,
     dismiss: Option<DismissSurface>,
+    bar_reserve: Option<BarReserve>,
     viewport: WpViewport,
     fractional: Option<WpFractionalScaleV1>,
     fractional_mgr: Option<WpFractionalScaleManagerV1>,
@@ -332,6 +343,8 @@ pub struct App {
     /// it was a click (replayed then) or a tug
     tug_click: Option<PointerEvent>,
     tug_replay: bool,
+    /// a touchpad's scroll over the bar, until it makes a step
+    bar_scroll: f64,
     /// what to do once the screen has switched off into the island
     after_off: Option<crate::control::Request>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -344,6 +357,10 @@ pub struct App {
     bezel_drawn: Option<f64>,
     /// where the last frame's light along the edges was painted
     last_edges: Vec<Rect>,
+    /// the bar's drops take the pointer here
+    bar_input: Vec<Rect>,
+    /// the input region must be rebuilt
+    input_dirty: bool,
     /// the whole picture, always up to date
     canvas: Option<cairo::ImageSurface>,
     /// shm buffers, reused once the compositor releases them; each remembers
@@ -464,6 +481,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         layer_shell,
         viewporter,
         dismiss: None,
+        bar_reserve: None,
         viewport,
         fractional,
         fractional_mgr,
@@ -486,6 +504,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         touch_tracks: false,
         tug_click: None,
         tug_replay: false,
+        bar_scroll: 0.0,
         after_off: None,
         keyboard: None,
         modifiers: Modifiers::default(),
@@ -494,6 +513,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         last_frame: None,
         bezel_drawn: None,
         last_edges: Vec::new(),
+        bar_input: Vec::new(),
+        input_dirty: false,
         canvas: None,
         buffers: Vec::new(),
         clock: FrameClock::new(),
@@ -650,6 +671,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if list.iter().any(|(_, change)| change == "xkb_layout") {
                                     app.layout_changed();
                                 }
+                                // a workspace event (type 0): the bar's buttons
+                                if list.iter().any(|(kind, _)| *kind == 0) {
+                                    app.refresh_workspaces();
+                                }
                                 Ok(PostAction::Continue)
                             }
                             Err(e) => {
@@ -660,6 +685,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 )?;
                 app.check_fullscreen();
+                app.refresh_workspaces();
             }
             Err(e) => eprintln!("island-shell: sway subscribe failed: {e}"),
         }
@@ -923,6 +949,7 @@ impl App {
                         self.island.update_clock();
                         self.arm_clock();
                     }
+                    "bar" => self.refresh_workspaces(),
                     _ => {}
                 }
             }
@@ -1369,6 +1396,67 @@ impl App {
     /// next time-driven change, and draw.
     /// The keyboard layout may have changed (sway reports it once per
     /// keyboard): the Control Center's layout button follows it.
+    /// sway's workspaces changed: the bar's buttons follow.
+    fn refresh_workspaces(&mut self) {
+        if !self.island.config.bar {
+            return;
+        }
+        let Some(list) = self.sway_query.as_mut().and_then(|q| q.workspaces().ok()) else { return };
+        let output = self.bound_output_name();
+        if self.island.bar.workspaces != list || self.island.bar.output != output {
+            self.island.bar.workspaces = list;
+            self.island.bar.output = output;
+            self.redraw();
+        }
+    }
+
+    /// Carry out what a click or scroll on the bar asked for.
+    fn bar_action(&mut self, action: crate::bar::Action) {
+        use crate::bar::Action;
+        use crate::control::Request;
+        let now = self.frame_time();
+        match action {
+            Action::Workspace(name) => self.sway_command(&format!("workspace \"{}\"", name.replace('"', "\\\""))),
+            Action::CycleWorkspace(step) => {
+                if let Some(name) = self.island.bar.cycled(step) {
+                    self.sway_command(&format!("workspace \"{}\"", name.replace('"', "\\\"")));
+                }
+            }
+            Action::ToggleDrawer => self.toggle_drawer(now),
+            Action::ToggleMute => { let _ = self.controls.send(Request::ToggleMute); }
+            Action::VolumeStep(step) => {
+                // 5 % steps, capped at 100 % (as Waybar's bar-volume.sh)
+                let v = self.island.controls.volume.unwrap_or(0.0);
+                let next = ((v * 20.0).round() + step as f64).clamp(0.0, 20.0) / 20.0;
+                let _ = self.controls.send(Request::Volume(next));
+            }
+            Action::ToggleKeyboard => {
+                let osk = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/sway/scripts/osk.sh");
+                let mut command = std::process::Command::new(osk);
+                command.arg("toggle");
+                std::thread::spawn(move || { let _ = command.status(); });
+            }
+            Action::TrayActivate(..) | Action::TraySecondary(..) | Action::TrayMenu(..) => {}
+        }
+    }
+
+    fn sway_command(&mut self, command: &str) {
+        if let Some(q) = self.sway_query.as_mut() {
+            if let Err(e) = q.command(command) {
+                eprintln!("island-shell: sway: {e}");
+            }
+        }
+    }
+
+    /// The ⋯ drawer: the right drop grows leftwards, and the island moves
+    /// out of its way.
+    fn toggle_drawer(&mut self, now: Time) {
+        let open = !self.island.bar.drawer_open();
+        self.island.bar.set_drawer(open);
+        self.island.set_dodged(open, now);
+        self.after_change();
+    }
+
     fn layout_changed(&mut self) {
         let Some(layout) = self.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) else { return };
         if self.island.controls.layout.as_deref() == Some(layout.as_str()) {
@@ -1443,6 +1531,7 @@ impl App {
             self.pointer_left();
         }
         self.sync_dismiss_surface(wants_keyboard || self.touch_sticky);
+        self.sync_bar_reserve();
         let has_song = self.island.song().is_some();
         if has_song && self.cava.is_none() && !self.cava_pending && std::time::Instant::now() >= self.cava_retry {
             self.cava_pending = self.cava_start.request(());
@@ -1614,13 +1703,22 @@ impl App {
             let edges = self.island.draw_edges(&cr, w, h, w / 2.0, t);
             let t_island = std::time::Instant::now();
             let frame = self.island.draw(&cr, &self.renderer, w / 2.0, t);
+            // the bar's drops in the top corners
+            let bar = self.island.draw_bar(&cr, &self.renderer, w, t);
             if self.clock.debug {
                 eprintln!("paint: {:.0} us (edges {:.0} us, island {:.0} us)", t_paint.elapsed().as_secs_f64() * 1e6,
                     (t_island - t_paint).as_secs_f64() * 1e6, t_island.elapsed().as_secs_f64() * 1e6);
             }
             let mut changed = stale;
-            changed.extend(&Damage::of(frame.bounds.into_iter().chain(edges.iter().copied())));
+            changed.extend(&Damage::of(frame.bounds.into_iter().chain(edges.iter().copied()).chain(bar.painted.iter().copied())));
             self.last_edges = edges;
+            self.last_edges.extend(bar.painted.iter().copied());
+            let bar_input_changed = self.bar_input != bar.input;
+            self.bar_input = bar.input;
+            if bar_input_changed {
+                // the input region is rebuilt below
+                self.input_dirty = true;
+            }
             // the frame beyond the screen, over everything drawn so far
             let _ = full;
             crate::bezel::paint(&cr, w, h, corners);
@@ -1696,9 +1794,9 @@ impl App {
         let surface = self.layer.wl_surface();
         // input only over the box (the rest of the surface is empty air),
         // opaque where the box is solid, damage where anything changed
-        if self.last_frame.map(|f| f.input) != Some(frame.input) {
+        if self.last_frame.map(|f| f.input) != Some(frame.input) || std::mem::take(&mut self.input_dirty) {
             let region = Region::new(&self.compositor).expect("wl_region");
-            if let Some(r) = frame.input {
+            for r in frame.input.iter().chain(&self.bar_input) {
                 region.add(r.x.floor() as i32, r.y.floor() as i32, r.w.ceil() as i32 + 1, r.h.ceil() as i32 + 1);
             }
             self.layer.set_input_region(Some(region.wl_region()));
@@ -1896,6 +1994,33 @@ impl App {
         self.redraw();
     }
 
+    /// The bar's room at the top: reserved while the bar is on, on the
+    /// island's output.
+    fn sync_bar_reserve(&mut self) {
+        let want = self.island.config.bar && self.bound_output.is_some();
+        if !want {
+            self.bar_reserve = None;
+            return;
+        }
+        if self.bar_reserve.as_ref().is_some_and(|r| r.output == self.bound_output) {
+            return;
+        }
+        let surface = self.compositor.create_surface(&self.qh);
+        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Top, Some("island-bar"), self.bound_output.as_ref());
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+        layer.set_size(0, crate::bar::HEIGHT as u32);
+        layer.set_exclusive_zone(crate::bar::HEIGHT as i32);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        if let Ok(empty) = Region::new(&self.compositor) {
+            layer.set_input_region(Some(empty.wl_region()));
+        }
+        let viewport = self.viewporter.get_viewport(layer.wl_surface(), &self.qh, ());
+        let Ok((buffer, pixels)) = self.pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888) else { return };
+        pixels.fill(0);
+        layer.commit();
+        self.bar_reserve = Some(BarReserve { layer, viewport, buffer, output: self.bound_output.clone() });
+    }
+
     fn sync_dismiss_surface(&mut self, want: bool) {
         if !want {
             // Destruction immediately returns input to the desktop; the
@@ -2031,11 +2156,23 @@ impl LayerShellHandler for App {
             self.outputs_changed();
         } else if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
             self.dismiss_menus();
+        } else if self.bar_reserve.as_ref().is_some_and(|r| r.layer.wl_surface() == layer.wl_surface()) {
+            self.bar_reserve = None;
         }
     }
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         if layer.wl_surface() != self.layer.wl_surface() {
+            if let Some(reserve) = self.bar_reserve.as_ref().filter(|r| r.layer.wl_surface() == layer.wl_surface()) {
+                let (w, h) = configure.new_size;
+                if w > 0 && h > 0 {
+                    reserve.viewport.set_destination(w as i32, h as i32);
+                    reserve.buffer.attach_to(reserve.layer.wl_surface()).ok();
+                    reserve.layer.wl_surface().damage_buffer(0, 0, 1, 1);
+                    reserve.layer.commit();
+                }
+                return;
+            }
             if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
                 // the free area moved (a keyboard slid in or out): where
                 // does it start now? sway has arranged it before configuring
@@ -2149,6 +2286,44 @@ impl App {
             }
             if &event.surface != self.layer.wl_surface() {
                 continue;
+            }
+            // over the bar's drops: the bar's, not the island's
+            if self.island.config.bar && self.island.bar.contains(event.position.0, event.position.1) && self.tug_click.is_none() {
+                let now = self.clock.predict(false);
+                let (x, y) = event.position;
+                if self.island.hovered {
+                    self.pointer_left();
+                }
+                match event.kind {
+                    PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                        let item = self.island.bar.item_at(x, y);
+                        changed |= self.island.bar.hover(item, now);
+                    }
+                    PointerEventKind::Press { button, .. } => {
+                        if let Some(action) = self.island.bar.press(x, y, button) {
+                            self.bar_action(action);
+                        }
+                        changed = true;
+                    }
+                    PointerEventKind::Axis { vertical, .. } => {
+                        let dy = wheel_pixels(vertical.discrete, vertical.value120, vertical.absolute);
+                        // a notch is one step; a touchpad steps every WHEEL_PX
+                        self.bar_scroll += dy;
+                        while self.bar_scroll.abs() >= WHEEL_PX * 0.999 {
+                            let step = self.bar_scroll.signum();
+                            self.bar_scroll -= step * WHEEL_PX;
+                            if let Some(action) = self.island.bar.scroll(x, y, step) {
+                                self.bar_action(action);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if self.island.config.bar && matches!(event.kind, PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } | PointerEventKind::Leave { .. }) {
+                let now = self.clock.predict(false);
+                changed |= self.island.bar.hover(None, now);
             }
             match event.kind {
                 PointerEventKind::Enter { .. } => {

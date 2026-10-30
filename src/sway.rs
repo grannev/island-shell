@@ -152,6 +152,19 @@ fn usable_from(output: &Value, workspace: &Value) -> Option<Usable> {
     })
 }
 
+impl Query {
+    /// Every workspace, for the bar: name, focus, urgency, output.
+    pub fn workspaces(&mut self) -> io::Result<Vec<crate::bar::Workspace>> {
+        let all = self.request(GET_WORKSPACES, "")?;
+        Ok(all.as_array().map(Vec::as_slice).unwrap_or_default().iter().map(|w| crate::bar::Workspace {
+            name: w["name"].as_str().unwrap_or_default().to_string(),
+            focused: w["focused"] == Value::Bool(true),
+            urgent: w["urgent"] == Value::Bool(true),
+            output: w["output"].as_str().unwrap_or_default().to_string(),
+        }).collect())
+    }
+}
+
 fn find_workspace<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
     if node["type"] == "workspace" && node["name"] == name {
         return Some(node);

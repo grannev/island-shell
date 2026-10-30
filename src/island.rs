@@ -4,7 +4,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::f64::consts::FRAC_PI_2;
 
 use cairo::Context;
 
@@ -308,6 +307,8 @@ pub struct Config {
     /// Music lights the bottom edge in the cover's colours, with the bass
     /// (it redraws the edges while music plays).
     pub ambilight: bool,
+    /// The bar (Waybar's elements) in drops of the frame in the top corners.
+    pub bar: bool,
 }
 
 /// The X1 Titanium's lid corners, measured off a photo: ~55 photo px where
@@ -336,15 +337,16 @@ impl Default for Config {
             screen_corners: SCREEN_CORNERS,
             edge_light: true,
             ambilight: false,
+            bar: false,
         }
     }
 }
 
 impl Config {
-    pub const KEYS: [&'static str; 17] = [
+    pub const KEYS: [&'static str; 18] = [
         "smoothing", "liquid", "hover", "output", "clock", "accent",
         "notice_hold", "toast_hold", "silent_after", "dodge", "night_temp", "weather", "compact", "timer_sound",
-        "screen_corners", "edge_light", "ambilight",
+        "screen_corners", "edge_light", "ambilight", "bar",
     ];
 
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -393,6 +395,7 @@ impl Config {
             "screen_corners" => self.screen_corners = number()?.clamp(0.0, 80.0),
             "edge_light" => self.edge_light = number()? != 0.0,
             "ambilight" => self.ambilight = number()? != 0.0,
+            "bar" => self.bar = number()? != 0.0,
             _ => return Err(format!("unknown setting {key:?} (known: {})", Self::KEYS.join(", "))),
         }
         Ok(())
@@ -403,10 +406,10 @@ impl Config {
         let hex = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!(
             "smoothing={} liquid={} hover={} output={} clock={:?} accent=#{:02X}{:02X}{:02X} \
-             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={} edge_light={} ambilight={}",
+             notice_hold={} toast_hold={} silent_after={} dodge={} night_temp={} weather={:?} compact={} timer_sound={} screen_corners={} edge_light={} ambilight={} bar={}",
             self.smoothing, self.liquid, self.hover as u8, self.output, self.clock,
             hex(r), hex(g), hex(b), self.notice_hold, self.toast_hold, self.silent_after, self.dodge, self.night_temp, self.weather,
-            self.compact.describe(), self.timer_sound as u8, self.screen_corners, self.edge_light as u8, self.ambilight as u8,
+            self.compact.describe(), self.timer_sound as u8, self.screen_corners, self.edge_light as u8, self.ambilight as u8, self.bar as u8,
         )
     }
 
@@ -885,6 +888,8 @@ pub struct Island {
     curtain: crate::curtain::Curtain,
     /// the volume / brightness level sliding out of the left edge
     side_hud: crate::side_hud::SideHud,
+    /// Waybar's elements in the top corners' drops
+    pub bar: crate::bar::Bar,
     /// the battery is low and not charging: the bottom corners smoulder
     low_battery: bool,
     /// the top edge as a membrane (pulled by a tug, rippling)
@@ -1157,6 +1162,7 @@ impl Island {
             edge: crate::edge::Edge::default(),
             curtain: crate::curtain::Curtain::default(),
             side_hud: crate::side_hud::SideHud::default(),
+            bar: crate::bar::Bar::default(),
             low_battery: false,
             membrane: crate::edge::Membrane::default(),
             focus_frame: Spring::new(0.0, 0.45, 0.8),
@@ -1253,6 +1259,7 @@ impl Island {
             || self.membrane.is_animating(now)
             || self.focus_frame.is_moving(now)
             || self.side_hud.is_animating(now)
+            || self.config.bar && self.bar.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -2188,6 +2195,14 @@ impl Island {
             // otherwise the level slides out of the screen's left edge, as
             // on an iPhone; the island stays as it is
             self.side_hud.show(*kind, *value, *muted, now);
+            // the bar's volume follows it
+            match kind {
+                activity::SliderKind::Volume => {
+                    self.controls.volume = Some(*value);
+                    self.controls.muted = *muted;
+                }
+                activity::SliderKind::Brightness => self.controls.brightness = Some(*value),
+            }
             return;
         }
         if self.auth.is_some() || self.launcher.is_some() || self.center.open {
@@ -5000,6 +5015,20 @@ impl Island {
         self.edge.pulse(wave, colour, now);
     }
 
+    /// The bar's drops in the top corners, on a surface `w` wide; nothing
+    /// when the bar is off.
+    pub fn draw_bar(&mut self, cr: &Context, renderer: &Renderer, w: f64, now: Time) -> crate::bar::BarFrame {
+        if !self.config.bar {
+            return crate::bar::BarFrame::default();
+        }
+        // what the Control Center's worker reads is what the bar shows
+        self.bar.volume = self.controls.volume.map(|v| (v, self.controls.muted));
+        self.bar.layout = self.controls.layout.as_deref().map(|l| l.trim_end_matches(" (US)").to_string());
+        // a fullscreen window: up into the edge with the island
+        self.bar.set_hidden(self.hidden.fullscreen, now);
+        self.bar.draw(cr, renderer, w, self.config.smoothing, now)
+    }
+
     /// Switch the screen off into the island (before locking or sleeping).
     pub fn switch_off(&mut self, now: Time) {
         self.curtain.close(now);
@@ -5025,22 +5054,7 @@ impl Island {
     /// The notch outline with fillets of radius `fillet`.
     #[allow(clippy::too_many_arguments)]
     fn trace_notch_with(&self, cr: &Context, x0: f64, x1: f64, y0: f64, y1: f64, r: f64, fillet: f64) {
-        let s = self.config.smoothing;
-        let h = y1 - y0;
-        // the vertical edge is shared by a fillet and a corner: each may
-        // smooth over at most its half
-        let fillet = Corner::new(fillet, s, h / 2.0);
-        let corner = Corner::new(r, s, (h / 2.0).min((x1 - x0) / 2.0));
-        cr.new_path();
-        cr.move_to(x0 - fillet.p, y0);
-        fillet.trace(cr, x0, y0, 0.0, false);
-        cr.line_to(x0, y1 - corner.p);
-        corner.trace(cr, x0, y1, FRAC_PI_2, true);
-        cr.line_to(x1 - corner.p, y1);
-        corner.trace(cr, x1, y1, 0.0, true);
-        cr.line_to(x1, y0 + fillet.p);
-        fillet.trace(cr, x1, y0, -FRAC_PI_2, false);
-        cr.close_path();
+        crate::drop::notch(cr, x0, x1, y0, y1, r, fillet, self.config.smoothing);
     }
 }
 
@@ -5050,65 +5064,6 @@ fn pulse_colour(t: Time) -> (f64, f64, f64) {
     let k = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * t / PULSE_PERIOD).cos();
     let (a, b, c) = (rgb(0x3A6F90), rgb(0x66D9FF), rgb(0xD9F6FF));
     if k < 0.5 { mix(a, b, k * 2.0) } else { mix(b, c, k * 2.0 - 1.0) }
-}
-
-/// A right-turn corner with continuous curvature: a circular arc of
-/// reduced sweep between two cubic Béziers that take the curvature from
-/// zero on the straight edge up to 1/r and back (Figma's corner smoothing,
-/// after "Desperately seeking squircles"). `smoothing` 0 = plain arc.
-struct Corner {
-    r: f64,
-    /// distance from the corner point along each edge where the curve begins
-    p: f64,
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    arc_len: f64,
-    arc_sweep: f64,
-}
-
-impl Corner {
-    fn new(r: f64, smoothing: f64, budget: f64) -> Corner {
-        // room for the smoothing: p = (1 + s) r must fit the edge
-        let s = smoothing.min((budget / r - 1.0).max(0.0)).clamp(0.0, 1.0);
-        let p = (1.0 + s) * r;
-        let arc_sweep = FRAC_PI_2 * (1.0 - s);
-        let arc_len = (arc_sweep / 2.0).sin() * r * std::f64::consts::SQRT_2;
-        let alpha = (FRAC_PI_2 - arc_sweep) / 2.0;
-        let p3p4 = r * (alpha / 2.0).tan();
-        let beta = FRAC_PI_2 / 2.0 * s;
-        let c = p3p4 * beta.cos();
-        let d = c * beta.tan();
-        let b = ((p - arc_len - c - d) / 3.0).max(0.0);
-        let a = 2.0 * b;
-        Corner { r, p, a, b, c, d, arc_len, arc_sweep }
-    }
-
-    /// Trace the corner whose point is (`x`, `y`); in the local frame the
-    /// path arrives along +x and leaves along +y (a right turn), `rot`
-    /// turns that frame and `mirror` flips it into a left turn.
-    fn trace(&self, cr: &Context, x: f64, y: f64, rot: f64, mirror: bool) {
-        cr.save().unwrap();
-        cr.translate(x, y);
-        cr.rotate(rot);
-        if mirror {
-            cr.scale(1.0, -1.0);
-        }
-        let (r, p) = (self.r, self.p);
-        if self.arc_sweep >= FRAC_PI_2 - 1e-9 {
-            cr.arc(-r, r, r, -FRAC_PI_2, 0.0);
-        } else {
-            let (a, b, c, d) = (self.a, self.b, self.c, self.d);
-            let x0 = -p;
-            cr.curve_to(x0 + a, 0.0, x0 + a + b, 0.0, x0 + a + b + c, d);
-            let half = self.arc_sweep / 2.0;
-            cr.arc(-r, r, r, -FRAC_PI_2 / 2.0 - half, -FRAC_PI_2 / 2.0 + half);
-            let (sx, sy) = (x0 + a + b + c + self.arc_len, d + self.arc_len);
-            cr.curve_to(sx + d, sy + c, sx + d, sy + b + c, sx + d, sy + a + b + c);
-        }
-        cr.restore().unwrap();
-    }
 }
 
 /// The local time through strftime(3), e.g. "Mon Sep 15  1:05 PM" for the
@@ -5174,15 +5129,19 @@ pub enum Font {
     Clock,
     /// the timer ruler's chosen time, Regular 28, tabular digits
     ClockSmall,
+    /// the bar's items, Medium 16 (Waybar's face)
+    Bar,
+    /// the bar's focused workspace, Black 16
+    BarBold,
 }
 
 const FONT_MEDIUM: &str = "SF Pro Text Medium";
 
 impl Font {
-    const ALL: [Font; 13] = [
+    const ALL: [Font; 15] = [
         Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query,
         Font::Title, Font::Headline, Font::Body, Font::Subhead, Font::Label, Font::Footnote,
-        Font::Clock, Font::ClockSmall,
+        Font::Clock, Font::ClockSmall, Font::Bar, Font::BarBold,
     ];
 
     fn face(self) -> (&'static str, f64) {
@@ -5200,6 +5159,8 @@ impl Font {
             Font::Footnote => (FONT_REGULAR, 12.0),
             Font::Clock => (FONT_REGULAR, 50.0),
             Font::ClockSmall => (FONT_REGULAR, 28.0),
+            Font::Bar => (FONT_MEDIUM, 16.0),
+            Font::BarBold => ("SF Pro Text Black", 16.0),
         }
     }
 }
@@ -6953,5 +6914,51 @@ mod tug_membrane_look {
         }
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/tug-membrane.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bar_look {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/bar.png"]
+    fn bar_look() {
+        let renderer = Renderer::new(1.5);
+        let (w, h) = (1504.0, 70.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * 1.5) as i32, (h * 1.5 * 2.0) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (row, drawer) in [false, true].into_iter().enumerate() {
+            let mut island = tests::gallery_island_pub();
+            island.config.bar = true;
+            island.bar.workspaces = ["1", "2", "3", "10"].iter().map(|n| crate::bar::Workspace {
+                name: n.to_string(), focused: *n == "2", urgent: *n == "10", output: "eDP-1".into(),
+            }).collect();
+            island.controls.volume = Some(0.5);
+            island.controls.layout = Some("English (US)".into());
+            island.bar.battery = Some(crate::bar::Battery { percent: 84, charging: false, remaining: None });
+            island.bar.details = Some(crate::bar::Details { disk_free: "118G".into(), cpu: 7, memory_gb: 3.4 });
+            island.bar.set_drawer(drawer);
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            sc.scale(1.5, 1.5);
+            let mut t = 10.0;
+            for _ in 0..90 { island.advance(t); island.draw(&sc, &renderer, w / 2.0, t); island.draw_bar(&sc, &renderer, w, t); t += 1.0 / 60.0; }
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * h * 1.5);
+            cr.rectangle(0.0, 0.0, w * 1.5, h * 1.5);
+            cr.clip();
+            cr.scale(1.5, 1.5);
+            let g = cairo::LinearGradient::new(0.0, 0.0, w, h);
+            g.add_color_stop_rgb(0.0, 0.10, 0.25, 0.32);
+            g.add_color_stop_rgb(1.0, 0.18, 0.35, 0.40);
+            cr.set_source(&g).unwrap();
+            cr.paint().unwrap();
+            island.draw(&cr, &renderer, w / 2.0, t);
+            island.draw_bar(&cr, &renderer, w, t);
+            crate::bezel::paint(&cr, w, 1002.0, 16.0);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar.png").unwrap()).unwrap();
     }
 }

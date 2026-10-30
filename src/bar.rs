@@ -1,0 +1,586 @@
+//! The bar, in the island: what Waybar showed along the top, now two drops
+//! of the island's black frame pressed into the top corners — the
+//! workspaces in the left one; the details drawer (⋯ with disk, CPU and
+//! memory), the volume, the keyboard layout, the battery and the tray in the
+//! right one. Every element keeps its place; widths follow their content on
+//! springs (Waybar's width-anim.sh, natively), digits roll, the focused
+//! workspace's highlight slides between buttons.
+//!
+//! The bar holds state and draws; it never does I/O. What it shows arrives
+//! from the island's workers (`set_*`), what is clicked goes back as an
+//! `Action` for the app to carry out.
+
+use std::collections::HashMap;
+
+use cairo::Context;
+
+use crate::anim::{Spring, Time};
+use crate::island::{Font, Rect, Renderer};
+
+/// The drops are as tall as the island.
+pub const HEIGHT: f64 = 32.0;
+/// Their free corner and the fillets where they leave an edge.
+const RADIUS: f64 = 14.0;
+const FILLET: f64 = 14.0;
+/// Room inside a drop before its first item and after its last (the free
+/// end also clears the rounded corner).
+const LEAD: f64 = 4.0;
+const TAIL: f64 = 10.0;
+/// Items: their side padding (Waybar's 9 px; ⋯ 12 px; workspaces 11 px
+/// with 1 px margins) and how their highlight sits in the drop.
+const PAD: f64 = 9.0;
+const PAD_DETAILS: f64 = 12.0;
+const WS_PAD: f64 = 11.0;
+const WS_MARGIN: f64 = 1.0;
+const WASH_INSET: f64 = 5.0;
+/// Widths change on this spring (no bounce: neighbours glide).
+const WIDTH_SPRING: (f64, f64) = (0.3, 1.0);
+/// The tray's icons.
+pub const TRAY_ICON: f64 = 18.0;
+const TRAY_SPACING: f64 = 6.0;
+
+/// SF Symbols (private-use glyphs of SF Pro, as the menu bar draws them).
+const ELLIPSIS: &str = "\u{100360}";
+const DISK: &str = "\u{1009D8}";
+const CPU: &str = "\u{1009D3}";
+const MEMORY: &str = "\u{1009D6}";
+const SPEAKER: [&str; 3] = ["\u{1002A5}", "\u{1002A7}", "\u{1002A9}"];
+const SPEAKER_MUTED: &str = "\u{1002A3}";
+const KEYBOARD: &str = "\u{100E91}";
+const BATTERY: [&str; 5] = ["\u{1006EA}", "\u{1006E9}", "\u{100EB6}", "\u{100EB8}", "\u{1006E8}"];
+const BOLT: &str = "\u{10088B}";
+
+const MUTED: (f64, f64, f64) = (0x8F as f64 / 255.0, 0xCD as f64 / 255.0, 0xEF as f64 / 255.0);
+const WARNING: (f64, f64, f64) = (1.0, 0xD1 as f64 / 255.0, 0x66 as f64 / 255.0);
+const CRITICAL: (f64, f64, f64) = (1.0, 0x8C as f64 / 255.0, 0x42 as f64 / 255.0);
+
+/// A workspace as sway reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub focused: bool,
+    pub urgent: bool,
+    pub output: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Battery {
+    pub percent: u8,
+    pub charging: bool,
+    /// minutes to empty (or to full when charging)
+    pub remaining: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Details {
+    pub disk_free: String,
+    pub cpu: u8,
+    pub memory_gb: f64,
+}
+
+/// A tray icon, decoded by a worker.
+#[derive(Clone)]
+pub struct TrayIcon {
+    pub id: String,
+    pub icon: Option<cairo::ImageSurface>,
+    /// for its tooltip (with the tray's menus)
+    #[allow(dead_code)]
+    pub title: String,
+}
+
+/// What can be pointed at in the bar.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Item {
+    Workspace(String),
+    Details,
+    Disk,
+    Cpu,
+    Memory,
+    Volume,
+    Layout,
+    Battery,
+    Tray(String),
+}
+
+/// What a click or scroll on the bar asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    Workspace(String),
+    /// the next (+1) or previous (-1) workspace on this output
+    CycleWorkspace(i32),
+    ToggleDrawer,
+    ToggleMute,
+    /// a volume step, +1 or -1 (5 %)
+    VolumeStep(i32),
+    ToggleKeyboard,
+    /// a tray item: activate, the secondary activation, or its menu, at
+    /// the item's place on the surface
+    TrayActivate(String, f64, f64),
+    TraySecondary(String, f64, f64),
+    TrayMenu(String, f64, f64),
+}
+
+pub struct Bar {
+    pub workspaces: Vec<Workspace>,
+    pub volume: Option<(f64, bool)>,
+    pub layout: Option<String>,
+    pub battery: Option<Battery>,
+    pub details: Option<Details>,
+    pub tray: Vec<TrayIcon>,
+    /// the output it is on (whose workspaces it shows)
+    pub output: Option<String>,
+    drawer: bool,
+    widths: HashMap<Item, Spring>,
+    /// the focused workspace's highlight: where and how wide
+    focus_x: Option<Spring>,
+    focus_w: Option<Spring>,
+    hovered: Option<Item>,
+    washes: HashMap<Item, Spring>,
+    /// drawn up into the edge (a fullscreen window): 0 shown .. 1 gone
+    hide: Spring,
+    /// where each item was drawn last, for hit testing
+    slots: Vec<(Item, Rect)>,
+    drops: [Option<Rect>; 2],
+}
+
+impl Default for Bar {
+    fn default() -> Self {
+        Bar {
+            workspaces: Vec::new(),
+            volume: None,
+            layout: None,
+            battery: None,
+            details: None,
+            tray: Vec::new(),
+            output: None,
+            drawer: false,
+            widths: HashMap::new(),
+            focus_x: None,
+            focus_w: None,
+            hovered: None,
+            washes: HashMap::new(),
+            hide: Spring::new(0.0, 0.3, 1.0),
+            slots: Vec::new(),
+            drops: [None, None],
+        }
+    }
+}
+
+/// What a frame of the bar covered and what takes the pointer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BarFrame {
+    pub painted: Vec<Rect>,
+    pub input: Vec<Rect>,
+}
+
+/// One element laid out in a row: what it is, its full (target) width, and
+/// how to paint it in its slot.
+struct Cell {
+    item: Item,
+    width: f64,
+}
+
+impl Bar {
+    pub fn drawer_open(&self) -> bool {
+        self.drawer
+    }
+
+    pub fn set_drawer(&mut self, open: bool) {
+        self.drawer = open;
+    }
+
+    /// Hide into the edge (a fullscreen window) or come back.
+    pub fn set_hidden(&mut self, hidden: bool, now: Time) {
+        self.hide.set(if hidden { 1.0 } else { 0.0 }, now);
+    }
+
+    pub fn is_animating(&self, now: Time) -> bool {
+        self.hide.is_moving(now)
+            || self.widths.values().any(|s| s.is_moving(now))
+            || self.focus_x.as_ref().is_some_and(|s| s.is_moving(now))
+            || self.focus_w.as_ref().is_some_and(|s| s.is_moving(now))
+            || self.washes.values().any(|s| s.is_moving(now))
+    }
+
+    /// The item under a point of the surface, if the bar is there.
+    pub fn item_at(&self, x: f64, y: f64) -> Option<Item> {
+        self.slots.iter().find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|(i, _)| i.clone())
+    }
+
+    /// Is the point over one of the drops?
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        self.drops.iter().flatten().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+    }
+
+    /// The pointer moved over the bar (None: it left).
+    pub fn hover(&mut self, item: Option<Item>, now: Time) -> bool {
+        if self.hovered == item {
+            return false;
+        }
+        if let Some(old) = self.hovered.take() {
+            if let Some(s) = self.washes.get_mut(&old) { s.set(0.0, now); }
+        }
+        if let Some(new) = &item {
+            self.washes.entry(new.clone()).or_insert_with(|| Spring::new(0.0, 0.18, 1.0)).set(1.0, now);
+        }
+        self.hovered = item;
+        true
+    }
+
+    /// A press on the bar: what it asks for. `button`: 0x110 left, 0x111
+    /// right, 0x112 middle.
+    pub fn press(&self, x: f64, y: f64, button: u32) -> Option<Action> {
+        let item = self.item_at(x, y)?;
+        let (cx, cy) = self.slots.iter().find(|(i, _)| *i == item).map(|(_, r)| (r.x + r.w / 2.0, r.y + r.h)).unwrap_or((x, y));
+        Some(match (item, button) {
+            (Item::Workspace(name), _) => Action::Workspace(name),
+            (Item::Details | Item::Disk | Item::Cpu | Item::Memory, _) => Action::ToggleDrawer,
+            (Item::Volume, _) => Action::ToggleMute,
+            (Item::Layout, _) => Action::ToggleKeyboard,
+            (Item::Battery, _) => return None,
+            (Item::Tray(id), 0x111) => Action::TrayMenu(id, cx, cy),
+            (Item::Tray(id), 0x112) => Action::TraySecondary(id, cx, cy),
+            (Item::Tray(id), _) => Action::TrayActivate(id, cx, cy),
+        })
+    }
+
+    /// A scroll on the bar (`dy` > 0: down).
+    pub fn scroll(&self, x: f64, y: f64, dy: f64) -> Option<Action> {
+        match self.item_at(x, y)? {
+            Item::Workspace(_) => Some(Action::CycleWorkspace(if dy > 0.0 { 1 } else { -1 })),
+            Item::Volume => Some(Action::VolumeStep(if dy > 0.0 { -1 } else { 1 })),
+            _ => None,
+        }
+    }
+
+    fn my_workspaces(&self) -> impl Iterator<Item = &Workspace> {
+        let output = self.output.clone();
+        self.workspaces.iter().filter(move |w| output.as_ref().is_none_or(|o| &w.output == o))
+    }
+
+    /// The workspace after (or before) the focused one on this output.
+    pub fn cycled(&self, step: i32) -> Option<String> {
+        let mine: Vec<&Workspace> = self.my_workspaces().collect();
+        let at = mine.iter().position(|w| w.focused)? as i32;
+        let n = mine.len() as i32;
+        mine.get((at + step).rem_euclid(n) as usize).map(|w| w.name.clone())
+    }
+
+    /// The right drop's cells, left to right.
+    fn right_cells(&self, cr: &Context, renderer: &Renderer) -> Vec<(Cell, Option<String>)> {
+        let text_w = |s: &str| renderer.layout(cr, s, Font::Bar).pixel_extents().1.width() as f64;
+        let mut cells = Vec::new();
+        cells.push((Cell { item: Item::Details, width: text_w(ELLIPSIS) + 2.0 * PAD_DETAILS }, Some(ELLIPSIS.to_string())));
+        if let Some(d) = &self.details {
+            for (item, text) in [
+                (Item::Disk, format!("{DISK} {}", d.disk_free)),
+                (Item::Cpu, format!("{CPU} {}%", d.cpu)),
+                (Item::Memory, format!("{MEMORY} {:.1}GB", d.memory_gb)),
+            ] {
+                let width = if self.drawer { text_w(&text) + 2.0 * PAD } else { 0.0 };
+                cells.push((Cell { item, width }, Some(text)));
+            }
+        }
+        if let Some((value, muted)) = self.volume {
+            let text = volume_text(value, muted);
+            cells.push((Cell { item: Item::Volume, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+        }
+        if let Some(layout) = &self.layout {
+            let text = format!("{KEYBOARD} {layout}");
+            cells.push((Cell { item: Item::Layout, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+        }
+        if let Some(b) = self.battery {
+            let text = battery_text(b);
+            cells.push((Cell { item: Item::Battery, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+        }
+        for icon in &self.tray {
+            cells.push((Cell { item: Item::Tray(icon.id.clone()), width: TRAY_ICON + TRAY_SPACING }, None));
+        }
+        if !self.tray.is_empty() {
+            // the tray module's own padding round its icons
+            if let Some(last) = cells.last_mut() { last.0.width += 2.0 * PAD - TRAY_SPACING; }
+        }
+        cells
+    }
+
+    /// The left drop's cells: the workspaces.
+    fn left_cells(&self, cr: &Context, renderer: &Renderer) -> Vec<(Cell, Option<String>)> {
+        self.my_workspaces().map(|w| {
+            let font = if w.focused { Font::BarBold } else { Font::Bar };
+            let width = renderer.layout(cr, &w.name, font).pixel_extents().1.width() as f64 + 2.0 * WS_PAD + 2.0 * WS_MARGIN;
+            (Cell { item: Item::Workspace(w.name.clone()), width }, Some(w.name.clone()))
+        }).collect()
+    }
+
+    /// Each cell's animated width now (a new one grows in from nothing).
+    fn animate(&mut self, cells: &[(Cell, Option<String>)], now: Time) -> Vec<f64> {
+        cells.iter().map(|(cell, _)| {
+            let spring = self.widths.entry(cell.item.clone()).or_insert_with(|| Spring::new(0.0, WIDTH_SPRING.0, WIDTH_SPRING.1));
+            spring.set(cell.width, now);
+            spring.value(now).max(0.0)
+        }).collect()
+    }
+
+    /// Paint both drops on a surface `w` wide.
+    pub fn draw(&mut self, cr: &Context, renderer: &Renderer, w: f64, smoothing: f64, now: Time) -> BarFrame {
+        let left = self.left_cells(cr, renderer);
+        let right = self.right_cells(cr, renderer);
+        let left_w = self.animate(&left, now);
+        let right_w = self.animate(&right, now);
+        // forget the springs of what is gone
+        let present: Vec<Item> = left.iter().chain(&right).map(|(c, _)| c.item.clone()).collect();
+        self.widths.retain(|k, _| present.contains(k));
+        self.washes.retain(|k, s| present.contains(k) && (s.target() > 0.0 || s.value(now) > 0.001));
+
+        let lift = HEIGHT * self.hide.value(now).clamp(0.0, 1.0);
+        let mut frame = BarFrame::default();
+        self.slots.clear();
+        self.drops = [None, None];
+        if lift >= HEIGHT + FILLET {
+            return frame;
+        }
+        let y = -lift;
+        cr.save().unwrap();
+        cr.translate(0.0, y);
+
+        // the left drop: the workspaces
+        let content: f64 = left_w.iter().sum();
+        if content > 0.5 {
+            let dw = LEAD + content + TAIL;
+            crate::drop::corner(cr, w, false, dw, HEIGHT, RADIUS, FILLET, smoothing);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            let _ = cr.fill();
+            self.drops[0] = Some(Rect { x: 0.0, y: 0.0, w: dw, h: HEIGHT + y });
+            let mut x = LEAD;
+            let mut focus = None;
+            for ((cell, text), slot_w) in left.iter().zip(&left_w) {
+                let ws = self.my_workspaces().find(|ws| Item::Workspace(ws.name.clone()) == cell.item).cloned();
+                let slot = Rect { x: x + WS_MARGIN, y: WASH_INSET - 1.0, w: (slot_w - 2.0 * WS_MARGIN).max(0.0), h: HEIGHT - 2.0 * (WASH_INSET - 1.0) };
+                if ws.as_ref().is_some_and(|w| w.focused) {
+                    focus = Some(slot);
+                }
+                self.wash(cr, &cell.item, slot, now);
+                if let (Some(text), Some(ws)) = (text, ws) {
+                    let font = if ws.focused { Font::BarBold } else { Font::Bar };
+                    let colour = if ws.urgent { CRITICAL } else { (1.0, 1.0, 1.0) };
+                    let alpha = if ws.focused || ws.urgent { 1.0 } else { 0.6 };
+                    // urgent: an orange wash under it
+                    if ws.urgent {
+                        rounded(cr, slot, 4.0);
+                        cr.set_source_rgba(CRITICAL.0, CRITICAL.1, CRITICAL.2, 0.18);
+                        let _ = cr.fill();
+                    }
+                    clipped(cr, Rect { x, y: 0.0, w: *slot_w, h: HEIGHT }, || {
+                        centred_text(cr, renderer, text, font, x + slot_w / 2.0, colour, alpha);
+                    });
+                }
+                self.slots.push((cell.item.clone(), Rect { x, y: y.max(0.0), w: *slot_w, h: HEIGHT + y }));
+                x += slot_w;
+            }
+            // the focused workspace's highlight slides from button to button
+            if let Some(f) = focus {
+                let fx = self.focus_x.get_or_insert_with(|| Spring::new(f.x, 0.32, 0.82));
+                fx.set(f.x, now);
+                let fw = self.focus_w.get_or_insert_with(|| Spring::new(f.w, 0.32, 0.82));
+                fw.set(f.w, now);
+                let r = Rect { x: fx.value(now), y: f.y, w: fw.value(now).max(0.0), h: f.h };
+                rounded(cr, r, 4.0);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
+                let _ = cr.fill();
+            }
+            frame.painted.push(Rect { x: 0.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + FILLET * 5.0 + y).max(0.0) });
+            frame.input.push(Rect { x: 0.0, y: 0.0, w: dw, h: (HEIGHT + y).max(0.0) });
+        }
+
+        // the right drop: details, volume, layout, battery, tray
+        let content: f64 = right_w.iter().sum();
+        if content > 0.5 {
+            let dw = TAIL + content + LEAD;
+            crate::drop::corner(cr, w, true, dw, HEIGHT, RADIUS, FILLET, smoothing);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            let _ = cr.fill();
+            self.drops[1] = Some(Rect { x: w - dw, y: 0.0, w: dw, h: HEIGHT + y });
+            let mut x = w - LEAD - content;
+            for ((cell, text), slot_w) in right.iter().zip(&right_w) {
+                let slot = Rect { x, y: WASH_INSET - 1.0, w: *slot_w, h: HEIGHT - 2.0 * (WASH_INSET - 1.0) };
+                self.wash(cr, &cell.item, slot, now);
+                clipped(cr, Rect { x, y: 0.0, w: *slot_w, h: HEIGHT }, || match (&cell.item, text) {
+                    (Item::Tray(id), _) => {
+                        if let Some(icon) = self.tray.iter().find(|t| &t.id == id).and_then(|t| t.icon.clone()) {
+                            let (ix, iy) = (x + (slot_w - TRAY_ICON) / 2.0, (HEIGHT - TRAY_ICON) / 2.0);
+                            cr.save().unwrap();
+                            cr.translate(renderer.snap(ix), renderer.snap(iy));
+                            cr.scale(TRAY_ICON / icon.width() as f64, TRAY_ICON / icon.height() as f64);
+                            let _ = cr.set_source_surface(&icon, 0.0, 0.0);
+                            let _ = cr.paint();
+                            cr.restore().unwrap();
+                        }
+                    }
+                    (item, Some(text)) => {
+                        let pad = if *item == Item::Details { PAD_DETAILS } else { PAD };
+                        let colour = self.colour_of(item);
+                        let key = format!("bar {item:?}");
+                        let lh = renderer.layout(cr, text, Font::Bar).pixel_extents().1;
+                        crate::motion::text(cr, renderer, &key, text, x + pad, (HEIGHT - lh.height() as f64) / 2.0 - lh.y() as f64,
+                            (slot_w - pad).max(4.0) + 40.0, 0.0, Font::Bar, colour, 1.0);
+                    }
+                    _ => {}
+                });
+                self.slots.push((cell.item.clone(), Rect { x, y: y.max(0.0), w: *slot_w, h: HEIGHT + y }));
+                x += slot_w;
+            }
+            frame.painted.push(Rect { x: w - dw - FILLET * 5.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + FILLET * 5.0 + y).max(0.0) });
+            frame.input.push(Rect { x: w - dw, y: 0.0, w: dw, h: (HEIGHT + y).max(0.0) });
+        }
+        cr.restore().unwrap();
+        frame.input.retain(|r| r.h > 0.5);
+        frame
+    }
+
+    fn colour_of(&self, item: &Item) -> (f64, f64, f64) {
+        match item {
+            Item::Volume if self.volume.is_some_and(|(_, m)| m) => MUTED,
+            Item::Battery => match self.battery {
+                Some(b) if !b.charging && b.percent <= 15 => CRITICAL,
+                Some(b) if !b.charging && b.percent <= 30 => WARNING,
+                _ => (1.0, 1.0, 1.0),
+            },
+            _ => (1.0, 1.0, 1.0),
+        }
+    }
+
+    /// The hover wash under an item.
+    fn wash(&self, cr: &Context, item: &Item, slot: Rect, now: Time) {
+        let k = self.washes.get(item).map_or(0.0, |s| s.value(now).clamp(0.0, 1.0));
+        if k > 0.002 && slot.w > 1.0 {
+            rounded(cr, slot, 5.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.10 * k);
+            let _ = cr.fill();
+        }
+    }
+}
+
+/// The volume as Waybar wrote it: the speaker by level, or struck through.
+fn volume_text(value: f64, muted: bool) -> String {
+    let percent = (value * 100.0).round() as u32;
+    let icon = if muted { SPEAKER_MUTED } else if percent <= 33 { SPEAKER[0] } else if percent <= 66 { SPEAKER[1] } else { SPEAKER[2] };
+    format!("{icon} {percent}%")
+}
+
+fn battery_text(b: Battery) -> String {
+    let icon = if b.charging { BOLT } else { BATTERY[((b.percent as usize) * 5 / 100).min(4)] };
+    format!("{icon} {}%", b.percent)
+}
+
+fn rounded(cr: &Context, r: Rect, radius: f64) {
+    let radius = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+    use std::f64::consts::{FRAC_PI_2, PI};
+    cr.new_sub_path();
+    cr.arc(r.x + r.w - radius, r.y + radius, radius, -FRAC_PI_2, 0.0);
+    cr.arc(r.x + r.w - radius, r.y + r.h - radius, radius, 0.0, FRAC_PI_2);
+    cr.arc(r.x + radius, r.y + r.h - radius, radius, FRAC_PI_2, PI);
+    cr.arc(r.x + radius, r.y + radius, radius, PI, 1.5 * PI);
+    cr.close_path();
+}
+
+fn clipped(cr: &Context, r: Rect, draw: impl FnOnce()) {
+    if r.w <= 0.5 {
+        return;
+    }
+    cr.save().unwrap();
+    cr.rectangle(r.x, r.y, r.w, r.h);
+    cr.clip();
+    draw();
+    cr.restore().unwrap();
+}
+
+fn centred_text(cr: &Context, renderer: &Renderer, text: &str, font: Font, cx: f64, colour: (f64, f64, f64), alpha: f64) {
+    let layout = renderer.layout(cr, text, font);
+    let (_, ext) = layout.pixel_extents();
+    cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
+    cr.move_to(renderer.snap(cx - ext.width() as f64 / 2.0 - ext.x() as f64), renderer.snap((HEIGHT - ext.height() as f64) / 2.0 - ext.y() as f64));
+    pangocairo::functions::show_layout(cr, &layout);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar() -> Bar {
+        let mut bar = Bar::default();
+        bar.workspaces = ["1", "2", "3", "10"].iter().map(|n| Workspace {
+            name: n.to_string(), focused: *n == "3", urgent: false, output: "eDP-1".into(),
+        }).collect();
+        bar.output = Some("eDP-1".into());
+        bar.volume = Some((0.5, false));
+        bar.layout = Some("English".into());
+        bar.battery = Some(Battery { percent: 84, charging: false, remaining: None });
+        bar.details = Some(Details { disk_free: "120G".into(), cpu: 7, memory_gb: 3.2 });
+        bar
+    }
+
+    fn settle(bar: &mut Bar, from: Time) -> BarFrame {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1504, 120).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let renderer = Renderer::new(1.0);
+        let mut frame = BarFrame::default();
+        for i in 0..90 { frame = bar.draw(&cr, &renderer, 1504.0, 0.6, from + i as f64 / 60.0); }
+        frame
+    }
+
+    #[test]
+    fn two_corner_drops_hold_the_left_and_right_groups() {
+        let mut bar = bar();
+        let frame = settle(&mut bar, 10.0);
+        assert_eq!(frame.input.len(), 2);
+        let (l, r) = (frame.input[0], frame.input[1]);
+        assert_eq!((l.x, l.y, l.h), (0.0, 0.0, HEIGHT));
+        assert!((r.x + r.w - 1504.0).abs() < 1e-9 && r.h == HEIGHT);
+        assert!(l.w < 300.0 && r.w < 500.0, "content-sized: {} {}", l.w, r.w);
+        // the workspaces left, in order; the right group with ⋯ first and
+        // the battery last
+        let names: Vec<Item> = bar.slots.iter().map(|(i, _)| i.clone()).collect();
+        assert_eq!(&names[..4], &["1", "2", "3", "10"].map(|n| Item::Workspace(n.into())));
+        assert_eq!(names[4], Item::Details);
+        assert_eq!(names.last(), Some(&Item::Battery));
+        assert!(bar.contains(5.0, 10.0) && bar.contains(1500.0, 10.0) && !bar.contains(752.0, 10.0));
+    }
+
+    #[test]
+    fn clicks_and_scrolls_ask_for_actions() {
+        let mut bar = bar();
+        settle(&mut bar, 10.0);
+        let at = |bar: &Bar, item: Item| bar.slots.iter().find(|(i, _)| *i == item).map(|(_, r)| (r.x + r.w / 2.0, 16.0)).unwrap();
+        let (x, y) = at(&bar, Item::Workspace("10".into()));
+        assert_eq!(bar.press(x, y, 0x110), Some(Action::Workspace("10".into())));
+        assert_eq!(bar.scroll(x, y, 1.0), Some(Action::CycleWorkspace(1)));
+        assert_eq!(bar.cycled(1).as_deref(), Some("10"));
+        assert_eq!(bar.cycled(-1).as_deref(), Some("2"));
+        let (x, y) = at(&bar, Item::Volume);
+        assert_eq!(bar.press(x, y, 0x110), Some(Action::ToggleMute));
+        assert_eq!(bar.scroll(x, y, -1.0), Some(Action::VolumeStep(1)));
+        let (x, y) = at(&bar, Item::Details);
+        assert_eq!(bar.press(x, y, 0x110), Some(Action::ToggleDrawer));
+    }
+
+    #[test]
+    fn the_drawer_grows_the_right_drop_leftwards() {
+        let mut bar = bar();
+        let closed = settle(&mut bar, 10.0).input[1];
+        bar.set_drawer(true);
+        let open = settle(&mut bar, 12.0).input[1];
+        assert!(open.w > closed.w + 100.0, "{} → {}", closed.w, open.w);
+        assert!((open.x + open.w - 1504.0).abs() < 1e-9, "still pressed to the right edge");
+        assert!(bar.slots.iter().any(|(i, r)| *i == Item::Cpu && r.w > 20.0));
+    }
+
+    #[test]
+    fn fullscreen_draws_it_up_into_the_edge() {
+        let mut bar = bar();
+        settle(&mut bar, 10.0);
+        bar.set_hidden(true, 12.0);
+        let frame = settle(&mut bar, 12.0);
+        assert!(frame.input.is_empty());
+        assert!(!bar.contains(5.0, 10.0));
+    }
+}
