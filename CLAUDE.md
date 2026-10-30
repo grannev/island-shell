@@ -185,7 +185,10 @@ wf-recorder films the overlay); the microphone in use is an orange LED in
 the frame's top-right corner (`edge::mic_led`, drawn after the bezel).
 Volume / brightness levels stand up the right / left edge while their pill
 shows; plugging in rises green from the bottom corners; a low battery (until
-the next Charging event) leaves the bottom corners glowing red.
+the next Charging event) leaves the bottom corners glowing red. The top edge
+is a membrane (`edge::Membrane`, drawn with the frame marks, over the
+island): a tug pulls it down round the island, letting go or hiding the
+island sends ripples to the corners, whose radius quivers as they arrive.
 Locking or sleeping from the island (Control
 Center, `island-shell lock|sleep`, mod+l) first switches the screen off into
 the island like an old TV (`src/curtain.rs`), then sends the request; the

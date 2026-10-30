@@ -53,11 +53,11 @@ Status: [ ] to do, [x] done.
 - [x] Low battery: the bottom corners smoulder red until the charger is
       plugged in (a still glow: no frames of its own).
 
-## Stage 6 — the frame as a material
-- [ ] Rubber edge: a hard tug bends the top edge after the island like a
+## Stage 6 — the frame as a material (done: `edge::Membrane`)
+- [x] Rubber edge: a hard tug bends the top edge after the island like a
       membrane; let go, a wave runs to the corners and they quiver.
-- [ ] Drop into water: hiding the island (mod+i) sends a ripple along the
-      top edge to the corners.
+- [x] Drop into water: hiding the island (mod+i, fullscreen) sends a ripple
+      along the top edge to the corners.
 
 ## Stage 7 — moments
 - [ ] Screenshot shutter: the frame closes in from all sides as a rounded

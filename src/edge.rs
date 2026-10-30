@@ -740,3 +740,161 @@ mod gauge_gallery {
         out.write_to_png(&mut std::fs::File::create("target/gallery/edge-gauge.png").unwrap()).unwrap();
     }
 }
+
+/// The top edge of the frame as a membrane: pulled down after a tugged
+/// island, and carrying ripples out to the corners (a let-go tug, the
+/// island dropping into the edge), whose radius quivers when they arrive.
+#[derive(Default)]
+pub struct Membrane {
+    ripples: Vec<Ripple>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Ripple {
+    cx: f64,
+    strength: f64,
+    start: Time,
+}
+
+/// How fast a ripple runs along the edge (px/s), how long it lives, its
+/// height at full strength and its width.
+const RIPPLE_SPEED: f64 = 1300.0;
+const RIPPLE_LIFE: f64 = 1.1;
+const RIPPLE_HEIGHT: f64 = 9.0;
+const RIPPLE_WIDTH: f64 = 70.0;
+/// How wide the pulled-down membrane is round the island.
+const SAG_WIDTH: f64 = 240.0;
+/// Samples along the edge.
+const MEMBRANE_STEP: f64 = 6.0;
+
+impl Membrane {
+    /// Send ripples out from `cx` (0..1 strength), starting at `at`.
+    pub fn ripple(&mut self, cx: f64, strength: f64, at: Time) {
+        if strength > 0.02 {
+            self.ripples.push(Ripple { cx, strength: strength.min(1.0), start: at });
+        }
+    }
+
+    pub fn is_animating(&self, now: Time) -> bool {
+        self.ripples.iter().any(|r| now - r.start < RIPPLE_LIFE)
+    }
+
+    /// How far the edge is pushed down at `x` by the ripples.
+    fn ripples_at(&self, x: f64, now: Time) -> f64 {
+        self.ripples.iter().map(|r| {
+            let t = now - r.start;
+            if !(0.0..RIPPLE_LIFE).contains(&t) {
+                return 0.0;
+            }
+            let d = (x - r.cx).abs();
+            let front = RIPPLE_SPEED * t;
+            // a leading crest and a smaller one after it, dying away
+            let fade = (1.0 - t / RIPPLE_LIFE).powi(2) * (1.0 - 0.4 * (d / 900.0).min(1.0));
+            let bump = |at: f64, k: f64| k * (-((d - at) / RIPPLE_WIDTH).powi(2)).exp();
+            r.strength * RIPPLE_HEIGHT * fade * (bump(front, 1.0) + bump(front - 2.6 * RIPPLE_WIDTH, 0.45))
+        }).sum()
+    }
+
+    /// How much a top corner's radius has grown: it quivers as a ripple
+    /// arrives at `corner_x`.
+    fn quiver(&self, corner_x: f64, now: Time) -> f64 {
+        self.ripples.iter().map(|r| {
+            let arrives = r.start + (corner_x - r.cx).abs() / RIPPLE_SPEED;
+            let t = now - arrives;
+            if !(0.0..0.45).contains(&t) {
+                return 0.0;
+            }
+            r.strength * 3.5 * (-t / 0.14).exp() * (std::f64::consts::TAU * t / 0.11).sin().abs()
+        }).sum()
+    }
+
+    /// Paint the membrane (black, over everything) for a screen `w` wide
+    /// whose corners have `radius`: pulled down `sag` px round `cx`, plus the
+    /// ripples. Returns what it covered.
+    pub fn draw(&mut self, cr: &Context, w: f64, radius: f64, cx: f64, sag: f64, now: Time) -> Vec<Rect> {
+        self.ripples.retain(|r| now - r.start < RIPPLE_LIFE);
+        let mut covered = Vec::new();
+        let n = (w / MEMBRANE_STEP).ceil() as usize;
+        let ys: Vec<(f64, f64)> = (0..=n).map(|i| {
+            let x = (i as f64 * MEMBRANE_STEP).min(w);
+            let pull = sag * (-((x - cx) / SAG_WIDTH).powi(2)).exp();
+            (x, pull + self.ripples_at(x, now))
+        }).collect();
+        let deepest = ys.iter().map(|p| p.1).fold(0.0, f64::max);
+        cr.save().unwrap();
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        if deepest > 0.15 {
+            cr.new_path();
+            cr.move_to(0.0, 0.0);
+            for &(x, y) in &ys {
+                cr.line_to(x, y);
+            }
+            cr.line_to(w, 0.0);
+            cr.close_path();
+            let _ = cr.fill();
+            covered.push(Rect { x: 0.0, y: 0.0, w, h: deepest + 2.0 });
+        }
+        // the top corners quiver as a ripple reaches them
+        for (corner_x, sign) in [(0.0, 1.0), (w, -1.0)] {
+            let grow = self.quiver(corner_x, now);
+            if grow < 0.05 {
+                continue;
+            }
+            let r = radius + grow;
+            let (ax, ay) = (corner_x + sign * r, r);
+            cr.new_path();
+            cr.move_to(corner_x, 0.0);
+            cr.line_to(corner_x, ay);
+            if sign > 0.0 {
+                cr.arc(ax, ay, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+            } else {
+                cr.arc_negative(ax, ay, r, 0.0, -0.5 * std::f64::consts::PI);
+            }
+            cr.close_path();
+            let _ = cr.fill();
+            covered.push(Rect { x: if sign > 0.0 { 0.0 } else { w - r - 1.0 }, y: 0.0, w: r + 1.0, h: r + 1.0 });
+        }
+        cr.restore().unwrap();
+        covered
+    }
+}
+
+#[cfg(test)]
+mod membrane_tests {
+    use super::*;
+
+    fn alpha_after(m: &mut Membrane, sag: f64, now: Time, x: usize, y: usize) -> (u8, Vec<Rect>) {
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
+        let covered = {
+            let cr = Context::new(&surface).unwrap();
+            m.draw(&cr, 600.0, 16.0, 300.0, sag, now)
+        };
+        let stride = surface.stride() as usize;
+        (surface.data().unwrap()[y * stride + x * 4 + 3], covered)
+    }
+
+    #[test]
+    fn a_pulled_edge_sags_round_the_island_only() {
+        let mut m = Membrane::default();
+        let (a, covered) = alpha_after(&mut m, 0.0, 0.0, 300, 1);
+        assert_eq!(a, 0);
+        assert!(covered.is_empty(), "at rest it is nothing");
+        assert_eq!(alpha_after(&mut m, 8.0, 0.0, 300, 5).0, 255);
+        assert_eq!(alpha_after(&mut m, 8.0, 0.0, 300, 10).0, 0);
+        assert!(alpha_after(&mut m, 8.0, 0.0, 20, 2).0 < 30, "far from the island the edge stays put");
+    }
+
+    #[test]
+    fn a_ripple_runs_out_to_the_corners_and_they_quiver() {
+        let mut m = Membrane::default();
+        m.ripple(300.0, 1.0, 0.0);
+        assert!(m.is_animating(0.5));
+        // after 0.1 s the crest is ~130 px out
+        assert!(alpha_after(&mut m, 0.0, 0.1, 430, 3).0 > 200);
+        assert!(alpha_after(&mut m, 0.0, 0.1, 300, 3).0 < 100);
+        // the corners: 300 px away, reached at ~0.23 s
+        let (_, covered) = alpha_after(&mut m, 0.0, 0.3, 0, 0);
+        assert!(covered.iter().any(|r| r.x == 0.0 && r.w > 16.0 && r.h > 16.0 && r.w < 30.0));
+        assert!(!m.is_animating(RIPPLE_LIFE + 0.01));
+    }
+}

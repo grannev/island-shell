@@ -876,6 +876,10 @@ pub struct Island {
     level_right: bool,
     /// the battery is low and not charging: the bottom corners smoulder
     low_battery: bool,
+    /// the top edge as a membrane (pulled by a tug, rippling)
+    membrane: crate::edge::Membrane,
+    /// the surface's centre, as of the last frame drawn
+    surface_cx: f64,
     tug_x: Spring,
     tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
@@ -1138,6 +1142,8 @@ impl Island {
             level_value: Spring::new(0.0, 0.25, 1.0),
             level_right: true,
             low_battery: false,
+            membrane: crate::edge::Membrane::default(),
+            surface_cx: 490.0,
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
@@ -1225,6 +1231,7 @@ impl Island {
             || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
             || self.edge.is_animating(now)
             || self.curtain.is_animating(now)
+            || self.membrane.is_animating(now)
             || self.level_shown.is_moving(now) || self.level_shown.value(now) > 0.005 && self.level_value.is_moving(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
@@ -1311,6 +1318,12 @@ impl Island {
         }
         // System events and panels rise on their own even when the compact
         // island is parked above the edge. Once they finish, it stays hidden.
+        // dropping into the edge, the island sends a ripple along it, as
+        // the drop meets the water
+        if self.is_hidden() && self.hide.target() < 0.5 && self.config.edge_light {
+            let cx = self.island_cx(now);
+            self.membrane.ripple(cx, 0.8, now + 0.12);
+        }
         self.hide.set(if self.is_hidden() { 1.0 } else { 0.0 }, now);
         self.dodge.set(if self.dodged { 1.0 } else { 0.0 }, now);
         // The compact island always breathes on ordinary hover, including
@@ -2866,6 +2879,7 @@ impl Island {
     /// centred on `cx`, for the instant `now` (when the frame will be shown).
     pub fn draw(&mut self, cr: &Context, renderer: &Renderer, cx: f64, now: Time) -> Frame {
         renderer.motion.set_time(now);
+        self.surface_cx = cx;
         // equaliser easing: quick to follow the music, slow to sink when
         // paused
         let dt = (now - self.eq_t).clamp(0.0, 0.5);
@@ -4629,6 +4643,12 @@ impl Island {
         let (vx, vy) = if fresh { tug.velocity } else { (0.0, 0.0) };
         self.tug_x.release(tug.offset.0, vx.clamp(-1500.0, 1500.0), 0.0, now);
         self.tug_y.release(tug.offset.1, vy.clamp(-1500.0, 1500.0), 0.0, now);
+        // the edge it pulled snaps back, and a ripple runs to the corners
+        if self.config.edge_light {
+            let strength = (tug.offset.1.max(0.0) / TUG_DOWN).max(tug.offset.0.abs() / TUG_SIDE * 0.5);
+            let cx = self.island_cx(now) + tug.offset.0;
+            self.membrane.ripple(cx, strength, now);
+        }
         true
     }
 
@@ -4917,7 +4937,19 @@ impl Island {
     /// Marks in the frame beyond the screen, drawn over its corners: the
     /// microphone's orange light. Returns what they cover.
     pub fn draw_frame_marks(&mut self, cr: &Context, w: f64, now: Time) -> Vec<Rect> {
-        crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)).into_iter().collect()
+        // the top edge: pulled down round a tugged island, rippling
+        let (tug_x, tug_y) = self.tug_now(now);
+        let line = (1.0 - self.pill.state(now).x).clamp(0.0, 1.0);
+        let sag = if self.config.edge_light { 0.22 * tug_y.max(0.0) * line } else { 0.0 };
+        let cx = self.island_cx(now) + tug_x * line;
+        let mut marks = self.membrane.draw(cr, w, self.config.screen_corners, cx, sag, now);
+        marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
+        marks
+    }
+
+    /// Where the island's centre is on the surface now (dodging moves it).
+    fn island_cx(&self, now: Time) -> f64 {
+        self.surface_cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x)
     }
 
     /// Switch the screen off into the island (before locking or sleeping).
