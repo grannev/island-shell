@@ -36,9 +36,15 @@ Status: [ ] to do, [x] done.
       curtain` is a demo without locking, `island-shell wake` a way out.
       Not yet: locks the island did not start (swayidle idle / before-sleep).
 
-## Stage 4 — indicators
-- [ ] Screen recording: a thin red rim around the screen, tied to the red dot.
-- [ ] Camera / microphone in use: an orange dot in a frame corner (iOS).
+## Stage 4 — indicators (done)
+- [x] Screen recording: the frame flashes red with each count of 3-2-1 (the
+      flashes end before capture starts) and a red wave leaves the island
+      when it stops. Not a steady rim: wf-recorder films the overlay too.
+- [x] Microphone in use: an orange LED in the frame's black top-right
+      corner with a glow on the screen (`edge::mic_led`), shown even while
+      the island is hidden.
+- [ ] (skipped) Camera in use: the laptop has a camera LED; detecting an
+      open /dev/video* means scanning /proc and costs idle CPU.
 
 ## Stage 5 — levels and power
 - [ ] Volume / brightness: a thin level slides out of the right edge.

@@ -98,6 +98,17 @@ impl Edge {
         self.pulses.push(Pulse { wave, colour, start: now });
     }
 
+    /// A wave that starts at `at` (later waves of the same kind may queue).
+    pub fn schedule(&mut self, wave: Wave, colour: Rgb, at: Time) {
+        self.pulses.push(Pulse { wave, colour, start: at });
+    }
+
+    /// Drop the waves that have not started yet (what they announced was
+    /// called off).
+    pub fn cancel_scheduled(&mut self, now: Time) {
+        self.pulses.retain(|p| p.start <= now);
+    }
+
     /// Keep a slow wave going round (Some), or let it fade (None).
     pub fn breathe(&mut self, colour: Option<Rgb>, now: Time) {
         match (colour, &mut self.breath) {
@@ -204,6 +215,37 @@ fn paint_gauge(cr: &Context, w: f64, h: f64, cx: f64, g: &Gauge) -> bool {
         dim * (line + tip)
     })
 }
+
+/// The microphone's light: an orange LED in the frame's top-right corner,
+/// in the black beyond the screen's rounded edge, with a little glow on
+/// the screen beside it; `k` 0..1 is how far it is on. Returns its area.
+pub fn mic_led(cr: &Context, w: f64, k: f64) -> Option<Rect> {
+    if k <= 0.01 {
+        return None;
+    }
+    let (x, y) = (w - LED_INSET, LED_INSET);
+    let (r, g, b) = MIC_ORANGE;
+    let halo = cairo::RadialGradient::new(x, y, 0.0, x, y, LED_HALO);
+    halo.add_color_stop_rgba(0.0, r, g, b, 0.45 * k.min(1.0));
+    halo.add_color_stop_rgba(1.0, r, g, b, 0.0);
+    cr.save().unwrap();
+    let _ = cr.set_source(&halo);
+    cr.rectangle(x - LED_HALO, y - LED_HALO, 2.0 * LED_HALO, 2.0 * LED_HALO);
+    let _ = cr.fill();
+    cr.new_path();
+    cr.arc(x, y, LED_R * k, 0.0, std::f64::consts::TAU);
+    cr.set_source_rgb(r, g, b);
+    let _ = cr.fill();
+    cr.restore().unwrap();
+    let left = x - LED_HALO - 1.0;
+    Some(Rect { x: left, y: 0.0, w: w - left, h: y + LED_HALO + 1.0 })
+}
+
+/// iOS's microphone orange.
+pub const MIC_ORANGE: Rgb = (1.0, 0.624, 0.039);
+const LED_INSET: f64 = 4.2;
+const LED_R: f64 = 2.6;
+const LED_HALO: f64 = 11.0;
 
 /// The thin strips along the four edges the light can reach.
 pub fn strips(w: f64, h: f64) -> Vec<Rect> {
@@ -424,6 +466,40 @@ mod tests {
         edge.set_gauge(None);
         let (_, rects) = render(&mut edge, 0.0);
         assert!(rects.is_empty());
+    }
+
+    #[test]
+    fn scheduled_waves_wait_and_can_be_called_off() {
+        let mut edge = Edge::default();
+        edge.schedule(Wave::Flash, FAILURE_RED, 10.0);
+        edge.schedule(Wave::Flash, FAILURE_RED, 11.0);
+        edge.schedule(Wave::Flash, FAILURE_RED, 12.0);
+        let (mut s, _) = render(&mut edge, 10.1);
+        assert!(alpha(&mut s, 300, 1) > 20);
+        // between the first two: dark, but still waiting for the next
+        let (mut s, _) = render(&mut edge, 10.95);
+        assert!(alpha(&mut s, 300, 1) < 10);
+        assert!(edge.is_animating(10.95));
+        edge.cancel_scheduled(11.05);
+        assert!(!edge.is_animating(12.5), "the third was called off");
+        assert!(edge.is_animating(11.5), "the started one plays out");
+    }
+
+    #[test]
+    fn the_mic_led_sits_in_the_black_corner() {
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 400).unwrap();
+        let area = {
+            let cr = Context::new(&surface).unwrap();
+            assert!(mic_led(&cr, 600.0, 0.0).is_none());
+            mic_led(&cr, 600.0, 1.0).expect("lit")
+        };
+        assert!(area.x + area.w <= 601.0 && area.y >= 0.0 && area.h < 20.0);
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let px = |x: usize, y: usize| &data[y * stride + x * 4..y * stride + x * 4 + 4];
+        // premultiplied BGRA: an opaque orange centre
+        assert_eq!(px(596, 4)[3], 255);
+        assert!(px(596, 4)[2] > 240 && px(596, 4)[0] < 30);
     }
 
     #[test]

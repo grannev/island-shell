@@ -1487,6 +1487,7 @@ impl Island {
         match self.recording {
             // Escape (or anything taking the pill) during 3-2-1 cancels it
             Some(Recording::Countdown(_)) if !self.activity.as_ref().is_some_and(|a| a.event == activity::Event::RecordCountdown) => {
+                self.edge.cancel_scheduled(now);
                 self.recording = None;
                 changed = true;
             }
@@ -2420,12 +2421,21 @@ impl Island {
                     self.recording = None;
                     return Err("busy");
                 }
+                // the frame flashes red with each count; the flashes are
+                // over before capture starts (the recorder films the
+                // overlay too, so nothing stays lit while it records)
+                if self.config.edge_light {
+                    for count in 0..3 {
+                        self.edge.schedule(crate::edge::Wave::Flash, crate::edge::FAILURE_RED, now + count as f64 * activity::RECORD_COUNTDOWN / 3.0);
+                    }
+                }
                 Ok("counting down")
             }
             Some(Recording::Countdown(_) | Recording::Starting(_)) => {
                 if self.activity.as_ref().is_some_and(|a| a.event == activity::Event::RecordCountdown) {
                     self.activity_retiring = self.activity.take();
                 }
+                self.edge.cancel_scheduled(now);
                 self.recording = None;
                 self.sync(now);
                 Ok("cancelled")
@@ -2433,6 +2443,10 @@ impl Island {
             Some(Recording::Running(_, pid)) => {
                 self.record_stop = Some(pid);
                 self.recording = Some(Recording::Stopping(now));
+                // the take is over: a red wave leaves the island
+                if self.config.edge_light {
+                    self.edge.pulse(crate::edge::Wave::Top, crate::edge::FAILURE_RED, now);
+                }
                 self.sync(now);
                 Ok("stopping")
             }
@@ -4851,6 +4865,12 @@ impl Island {
             painted.push(r);
         }
         painted
+    }
+
+    /// Marks in the frame beyond the screen, drawn over its corners: the
+    /// microphone's orange light. Returns what they cover.
+    pub fn draw_frame_marks(&mut self, cr: &Context, w: f64, now: Time) -> Vec<Rect> {
+        crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)).into_iter().collect()
     }
 
     /// Switch the screen off into the island (before locking or sleeping).

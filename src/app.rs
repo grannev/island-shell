@@ -1626,6 +1626,13 @@ impl App {
                     changed.add(s);
                 }
             }
+            // marks in the frame (the microphone's light) go over its
+            // corners; wiped with the edges next frame, so they never stack
+            let marks = self.island.draw_frame_marks(&cr, w, t);
+            for m in &marks {
+                changed.add(*m);
+            }
+            self.last_edges.extend(marks);
             (frame, changed)
         };
         canvas.flush();

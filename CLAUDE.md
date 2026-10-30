@@ -179,7 +179,11 @@ whole-screen effects belong on this surface; their staged plan is
 critical one goes round, Touch ID breathes blue / flashes green / shudders
 red; a running timer is a line growing round the screen clockwise from the
 island (orange, green for Pomodoro breaks; a stopwatch is a comet), and the
-frame flashes when it runs out. Locking or sleeping from the island (Control
+frame flashes when it runs out. Recording's 3-2-1 flashes the frame red
+(scheduled waves, cancelled with the countdown; nothing stays lit while
+wf-recorder films the overlay); the microphone in use is an orange LED in
+the frame's top-right corner (`edge::mic_led`, drawn after the bezel).
+Locking or sleeping from the island (Control
 Center, `island-shell lock|sleep`, mod+l) first switches the screen off into
 the island like an old TV (`src/curtain.rs`), then sends the request; the
 picture comes back out of the island when the locker exits
