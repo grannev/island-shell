@@ -5001,14 +5001,17 @@ impl Island {
     pub fn draw_frame_marks(&mut self, cr: &Context, renderer: &Renderer, w: f64, h: f64, now: Time) -> Vec<Rect> {
         // the top edge: pulled down round a tugged island, rippling
         let (cx, attach, sag) = self.tug_top.unwrap_or((self.island_cx(now), 0.0, 0.0));
-        // the edge's ripples run between the bar's drops (or the corners)
+        // the edge's ripples run along it and along what hangs from it —
+        // the island's and the bar's drops' lower edges — to the screen's
+        // sides
         let corners = self.config.screen_corners;
         let drops = if self.config.bar { self.bar.drop_sizes() } else { [None, None] };
-        let walls = [
-            drops[0].map_or((0.0, corners), |d| (d.w, 14.0)),
-            drops[1].map_or((w, corners), |d| (w - d.w, 14.0)),
-        ];
-        let mut marks = self.membrane.draw(cr, w, walls, cx, attach, sag, now);
+        let mut spans: Vec<(f64, f64, f64)> = Vec::new();
+        if let Some(d) = drops[0] { spans.push((0.0, d.w, d.h)); }
+        if let Some((b, _)) = self.box_geom.filter(|(b, _)| b.y + b.h > 1.0) { spans.push((b.x, b.x + b.w, b.y + b.h)); }
+        if let Some(d) = drops[1] { spans.push((w - d.w, w, d.h)); }
+        let corner = |d: Option<crate::outline::Drop>| d.is_none().then_some(corners);
+        let mut marks = self.membrane.draw(cr, w, &spans, [corner(drops[0]), corner(drops[1])], cx, attach, sag, now);
         marks.extend(crate::edge::mic_led(cr, w, self.mic_dot.value(now).clamp(0.0, 1.2)));
         marks.extend(self.side_hud.draw(cr, renderer, h, now));
         marks
@@ -7030,5 +7033,47 @@ mod light_round_drops {
         }
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/light-drops.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ripple_look {
+    use super::*;
+    #[test]
+    #[ignore = "writes target/gallery/ripple-drops.png"]
+    fn ripple_drops() {
+        let renderer = Renderer::new(1.5);
+        let (w, h) = (1504.0, 1002.0);
+        let rows = [0.12, 0.3, 0.5, 0.7];
+        let (fh, scale) = (70.0, 0.8);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * scale) as i32, ((fh * scale + 4.0) * rows.len() as f64) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (i, t) in rows.into_iter().enumerate() {
+            let mut island = tests::gallery_island_pub();
+            island.config.bar = true;
+            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into() }).collect();
+            island.controls.volume = Some(0.3);
+            island.controls.layout = Some("English".into());
+            island.bar.battery = Some(crate::bar::Battery { percent: 50, charging: false, remaining: None });
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            sc.scale(1.5, 1.5);
+            let mut now = 9.0;
+            for _ in 0..60 { island.advance(now); island.draw(&sc, &renderer, w / 2.0, now); island.draw_bar(&sc, &renderer, w, now); now += 1.0 / 60.0; }
+            island.membrane.ripple(w / 2.0, 1.0, 10.0);
+            cr.save().unwrap();
+            cr.translate(0.0, i as f64 * (fh * scale + 4.0));
+            cr.rectangle(0.0, 0.0, w * scale, fh * scale);
+            cr.clip();
+            cr.scale(scale, scale);
+            cr.set_source_rgb(0.15, 0.32, 0.38);
+            cr.paint().unwrap();
+            island.draw(&cr, &renderer, w / 2.0, 10.0 + t);
+            island.draw_bar(&cr, &renderer, w, 10.0 + t);
+            island.draw_frame_marks(&cr, &renderer, w, h, 10.0 + t);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/ripple-drops.png").unwrap()).unwrap();
     }
 }
