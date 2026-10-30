@@ -188,6 +188,15 @@ impl Spring {
         self.start = now;
     }
 
+    /// Let go of something held by hand: from `x`, moving at `v`, the
+    /// spring takes it to `to` with its own feel.
+    pub fn release(&mut self, x: f64, v: f64, to: f64, now: Time) {
+        self.x0 = x;
+        self.v0 = v;
+        self.target = to;
+        self.start = now;
+    }
+
     /// Retarget with a different feel (a quick, unbouncy way back), from
     /// wherever the motion is now.
     pub fn set_with(&mut self, to: f64, response: f64, damping: f64, now: Time) {

@@ -129,6 +129,22 @@ const FLOAT_RESPONSE: f64 = 0.38;
 const FLOAT_DAMPING: f64 = 0.88;
 const FLOAT_RETURN: f64 = 0.2;
 const FLOAT_DELAY: f64 = 0.16;
+/// Tugging the closed island: how far it gives (px) down, sideways and up
+/// before the rubber band stops it — a tight one — and Apple's rubber-band
+/// constant.
+const TUG_DOWN: f64 = 34.0;
+const TUG_SIDE: f64 = 26.0;
+const TUG_UP: f64 = 5.0;
+const TUG_RUBBER: f64 = 0.55;
+/// The pointer has to move this far before a press becomes a tug.
+const TUG_SLOP: f64 = 6.0;
+/// Let go, it jumps back like jelly.
+const TUG_RESPONSE: f64 = 0.46;
+const TUG_DAMPING: f64 = 0.42;
+/// How much of a sideways tug is a lean (the top lagging behind the
+/// bottom) rather than a slide along the edge.
+const TUG_LEAN: f64 = 0.4;
+
 /// Below this the buttons are tucked wholly behind the page's edge.
 const FLOAT_TUCKED: f64 = 0.085;
 /// The narrowest the closed island's content gets (a bare resting capsule
@@ -842,6 +858,11 @@ pub struct Island {
     /// are, which is lit, which was pressed, and the page they stand beside
     /// once they have arrived (for the pointer).
     floats: Spring,
+    /// The closed island in the hand (see `tug_press`), and the springs
+    /// that bring it back once let go.
+    tug: Option<Tug>,
+    tug_x: Spring,
+    tug_y: Spring,
     /// A page folding away waits for its floating buttons to tuck in
     /// behind it: the fold starts here.
     fold_at: Time,
@@ -880,6 +901,36 @@ pub struct Island {
     pub hovered: bool,
     pub clock: String,
     pub config: Config,
+}
+
+/// The closed island held by the pointer (or a finger).
+#[derive(Clone, Copy, Debug)]
+struct Tug {
+    /// where the press landed
+    from: (f64, f64),
+    /// past the slop: it is a tug, not a click
+    engaged: bool,
+    /// how far the island gives now, and how fast (px, px/s)
+    offset: (f64, f64),
+    velocity: (f64, f64),
+    at: Time,
+}
+
+/// Apple's rubber band: the island follows less the further it is pulled,
+/// and never past `limit`.
+fn rubber(d: f64, limit: f64) -> f64 {
+    d.signum() * (1.0 - 1.0 / (d.abs() * TUG_RUBBER / limit + 1.0)) * limit
+}
+
+/// The pull that gives `offset` (to catch the island mid-wobble).
+fn rubber_inverse(offset: f64, limit: f64) -> f64 {
+    let k = (offset.abs() / limit).min(0.95);
+    offset.signum() * limit / TUG_RUBBER * (1.0 / (1.0 - k) - 1.0)
+}
+
+/// How far the island gives for a pull of (`dx`, `dy`).
+fn tug_offset(dx: f64, dy: f64) -> (f64, f64) {
+    (rubber(dx, TUG_SIDE), rubber(dy, if dy > 0.0 { TUG_DOWN } else { TUG_UP }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1057,6 +1108,9 @@ impl Island {
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
             floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
+            tug: None,
+            tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
+            tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             fold_at: 0.0,
             float_lit: HashMap::new(),
             float_hover: None,
@@ -1139,6 +1193,7 @@ impl Island {
             || self.chip.is_moving(now)
             || self.clock_chip.is_moving(now)
             || self.floats.is_moving(now)
+            || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
             || self.float_pressed.is_some_and(|(_, t)| now - t < 0.5)
@@ -2770,6 +2825,18 @@ impl Island {
         if dy <= -(BOX_H + FILLET) && p <= 0.0 {
             return Frame::default();
         }
+        // in the hand (or wobbling back) the closed line gives a little:
+        // it slides along the edge and leans, stretches down like a drop
+        // about to fall, or squashes into the edge; any other shape the box
+        // takes shakes it off
+        let line_k = ((1.0 - q) * (1.0 - p) * (1.0 - pl) * (1.0 - ed)).clamp(0.0, 1.0);
+        let (tug_x, tug_y) = self.tug_now(now);
+        let (tug_x, tug_y) = (tug_x * line_k, tug_y * line_k);
+        let tugged = tug_x.abs() > 0.01 || tug_y.abs() > 0.01;
+        // the outline hangs from the edge; the content rides in its middle
+        let edge = dy;
+        let cx = cx + tug_x * (1.0 - TUG_LEAN / 2.0);
+        let dy = dy + tug_y / 2.0;
         let pad = PAD + (PAD_HOVER - PAD) * hover_pad + SPREAD * spread_k;
         let radius = RADIUS + (RADIUS_HIDDEN - RADIUS) * hide.x;
         if self.center.open {
@@ -2967,9 +3034,14 @@ impl Island {
             + (self.editor_height() - line_h) * ed
             + (launcher::PANEL_H - line_h) * p
             + stretch_y
-            - stretch_x * 0.15;
+            - stretch_x * 0.15
+            + tug_y / 2.0;
+        // squashed it widens; stretched it thins (a drop keeps its volume),
+        // but only its outline, into the padding: the content keeps its room
+        let bw = if tug_y < 0.0 { bw - 1.6 * tug_y } else { bw };
+        let thin = (0.22 * tug_y.max(0.0)).min(7.0);
         let (mut x0, mut x1, mut y1) = (cx - bw / 2.0, cx + bw / 2.0, dy + bh);
-        if !moving {
+        if !moving && !tugged {
             // crisp edges at rest; while moving they glide sub-pixel
             x0 = renderer.snap(x0);
             x1 = renderer.snap(x1);
@@ -2980,7 +3052,18 @@ impl Island {
             self.player_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
         }
 
-        self.trace_notch(cr, x0, x1, dy, y1, r);
+        if tugged {
+            // the top lags behind the bottom: a shear about the middle;
+            // the fillets draw out into a neck as it is pulled down
+            cr.save().unwrap();
+            let mid = (edge + y1) / 2.0;
+            let k = TUG_LEAN * tug_x / (y1 - edge).max(1.0);
+            cr.transform(cairo::Matrix::new(1.0, 0.0, k, 1.0, -k * mid, 0.0));
+            self.trace_notch_with(cr, x0 + thin, x1 - thin, edge, y1, r, FILLET + 0.45 * tug_y.max(0.0));
+            cr.restore().unwrap();
+        } else {
+            self.trace_notch(cr, x0, x1, dy, y1, r);
+        }
         cr.set_source_rgb(0.0, 0.0, 0.0);
         let _ = cr.fill();
         // Low battery is intentionally an OSD, not a system notification:
@@ -3519,8 +3602,14 @@ impl Island {
         }
         cr.restore().unwrap();
 
-        let top = dy.max(0.0);
+        let top = edge.min(dy).max(0.0);
         let mut bounds = Rect { x: x0 - FILLET, y: top, w: x1 - x0 + 2.0 * FILLET, h: y1 - top };
+        if tugged {
+            // the leaning top and the drawn-out fillets reach further out
+            let reach = TUG_LEAN * tug_x.abs() + 0.45 * tug_y.max(0.0) + 2.0;
+            bounds.x -= reach;
+            bounds.w += 2.0 * reach;
+        }
         if float_k > 0.001 {
             bounds.x -= floating::REACH;
             bounds.w += 2.0 * floating::REACH;
@@ -4404,6 +4493,75 @@ impl Island {
         true
     }
 
+    /// A press on the closed island: maybe a click, maybe a tug — the
+    /// pointer's next moves decide. Only the plain line can be tugged.
+    pub fn tug_press(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.tuggable(px, py) {
+            return false;
+        }
+        let offset = self.tug_now(now);
+        self.tug = Some(Tug { from: (px, py), engaged: false, offset, velocity: (0.0, 0.0), at: now });
+        // caught mid-wobble: it stays where it is, in the hand
+        let o = (px - rubber_inverse(offset.0, TUG_SIDE), py - rubber_inverse(offset.1, if offset.1 > 0.0 { TUG_DOWN } else { TUG_UP }));
+        if offset.0.abs() > 3.0 || offset.1.abs() > 3.0 {
+            self.tug = Some(Tug { from: o, engaged: true, offset, velocity: (0.0, 0.0), at: now });
+        }
+        true
+    }
+
+    /// Can the plain line be taken in the hand at this point?
+    pub fn tuggable(&self, px: f64, py: f64) -> bool {
+        !self.pill_open() && self.launcher.is_none() && !self.hidden.any() && self.auth.is_none()
+            && self.player.target() < 0.5 && self.editor_panel.target() < 0.5
+            && self.line_rect.is_some_and(|r| px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+    }
+
+    /// The held island follows the pointer, against the rubber band.
+    /// Returns whether it is being tugged (the press is no click then).
+    pub fn tug_to(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let Some(tug) = self.tug.as_mut() else { return false };
+        let (dx, dy) = (px - tug.from.0, py - tug.from.1);
+        if !tug.engaged {
+            if dx.hypot(dy) < TUG_SLOP {
+                return false;
+            }
+            tug.engaged = true;
+        }
+        let offset = tug_offset(dx, dy);
+        let dt = now - tug.at;
+        if dt > 0.004 {
+            // smoothed, so a last jittery event does not set the throw
+            let v = ((offset.0 - tug.offset.0) / dt, (offset.1 - tug.offset.1) / dt);
+            tug.velocity = (0.5 * tug.velocity.0 + 0.5 * v.0, 0.5 * tug.velocity.1 + 0.5 * v.1);
+            tug.at = now;
+        }
+        tug.offset = offset;
+        true
+    }
+
+    /// Let go: a tug jumps back like jelly. Returns whether it was a tug
+    /// (false: the press was a click after all).
+    pub fn tug_release(&mut self, now: Time) -> bool {
+        let Some(tug) = self.tug.take() else { return false };
+        if !tug.engaged {
+            return false;
+        }
+        // a pointer that rested before letting go throws nothing
+        let fresh = now - tug.at < 0.08;
+        let (vx, vy) = if fresh { tug.velocity } else { (0.0, 0.0) };
+        self.tug_x.release(tug.offset.0, vx.clamp(-1500.0, 1500.0), 0.0, now);
+        self.tug_y.release(tug.offset.1, vy.clamp(-1500.0, 1500.0), 0.0, now);
+        true
+    }
+
+    /// How far the island gives right now (held, or wobbling back).
+    fn tug_now(&self, now: Time) -> (f64, f64) {
+        match &self.tug {
+            Some(t) if t.engaged => t.offset,
+            _ => (self.tug_x.value(now), self.tug_y.value(now)),
+        }
+    }
+
     /// Does a finger landing here hold something to drag at once (a
     /// slider, the playhead, the timer's ruler, a notification to swipe),
     /// rather than wait to see whether it taps or scrolls?
@@ -4632,11 +4790,17 @@ impl Island {
     /// the top are right turns, the convex corners at the bottom left turns
     /// (`Corner::trace` mirrored).
     fn trace_notch(&self, cr: &Context, x0: f64, x1: f64, y0: f64, y1: f64, r: f64) {
+        self.trace_notch_with(cr, x0, x1, y0, y1, r, FILLET);
+    }
+
+    /// The notch outline with fillets of radius `fillet`.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_notch_with(&self, cr: &Context, x0: f64, x1: f64, y0: f64, y1: f64, r: f64, fillet: f64) {
         let s = self.config.smoothing;
         let h = y1 - y0;
         // the vertical edge is shared by a fillet and a corner: each may
         // smooth over at most its half
-        let fillet = Corner::new(FILLET, s, h / 2.0);
+        let fillet = Corner::new(fillet, s, h / 2.0);
         let corner = Corner::new(r, s, (h / 2.0).min((x1 - x0) / 2.0));
         cr.new_path();
         cr.move_to(x0 - fillet.p, y0);
@@ -5095,6 +5259,29 @@ mod tests {
         island.set_dnd(true, 11.0);
         island.set_layout("English (US)".into(), 11.0);
         filmstrip("motion-quick-toggle", &mut island, 11.0, 10, 0.045);
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/tug-*.png; set ISLAND_GALLERY=1"]
+    fn tug_filmstrips() {
+        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
+        let pull = |name: &str, to: (f64, f64)| {
+            let mut island = gallery_island();
+            // at rest first, with the strip's own renderer
+            filmstrip("tug-rest", &mut island, 10.0, 30, 1.0 / 60.0);
+            let line = island.line_rect.expect("the closed line");
+            let from = (line.x + line.w / 2.0, line.y + line.h / 2.0);
+            assert!(island.tug_press(from.0, from.1, 11.0));
+            for i in 1..=10 {
+                let k = i as f64 / 10.0;
+                island.tug_to(from.0 + to.0 * k, from.1 + to.1 * k, 11.0 + k * 0.15);
+            }
+            filmstrip(&format!("{name}-held"), &mut island, 11.2, 1, 0.0);
+            island.tug_release(11.2);
+            filmstrip(name, &mut island, 11.2, 14, 2.0 / 60.0);
+        };
+        pull("tug-down", (0.0, 160.0));
+        pull("tug-side", (220.0, 30.0));
     }
 
     #[test]
@@ -6159,6 +6346,46 @@ mod tests {
 
     /// Draw the island for `frames` frames from `from` (rects and the page
     /// are laid out by drawing).
+    #[test]
+    fn the_closed_island_gives_against_a_tight_rubber_band_and_jumps_back() {
+        let mut island = Island::new(Config::default());
+        settle(&mut island, 10.0, 30);
+        let line = island.line_rect.expect("the closed line");
+        let (x, y) = (line.x + line.w / 2.0, line.y + line.h / 2.0);
+        // a press that does not move is a click
+        assert!(island.tug_press(x, y, 11.0));
+        assert!(!island.tug_to(x + 3.0, y + 2.0, 11.05));
+        assert!(!island.tug_release(11.1));
+        // a long pull gives only so much, the further the less
+        assert!(island.tug_press(x, y, 12.0));
+        assert!(island.tug_to(x, y + 60.0, 12.05));
+        let near = island.tug_now(12.05).1;
+        assert!(island.tug_to(x, y + 600.0, 12.1));
+        let far = island.tug_now(12.1).1;
+        assert!(near > 10.0 && far > near && far < TUG_DOWN, "{near} {far}");
+        assert!(island.tug_to(x - 600.0, y - 600.0, 12.15));
+        let (side, up) = island.tug_now(12.15);
+        assert!(side < -15.0 && side > -TUG_SIDE && up < 0.0 && up > -TUG_UP, "{side} {up}");
+        // let go, it overshoots a little and comes to rest where it was
+        assert!(island.tug_to(x, y + 600.0, 12.2));
+        assert!(island.tug_release(12.2));
+        assert!(island.is_animating(12.25));
+        let low = (0..120).map(|i| island.tug_now(12.2 + i as f64 / 120.0).1).fold(f64::MAX, f64::min);
+        assert!(low < -1.0 && low > -0.4 * TUG_DOWN, "a jelly overshoot: {low}");
+        assert!(island.tug_now(15.0).1.abs() < 0.05 && !island.is_animating(15.0));
+        // only the plain line: an open page is not a handle
+        island.open_quick_menu(16.0);
+        settle(&mut island, 16.0, 40);
+        assert!(!island.tug_press(x, y, 17.0));
+    }
+
+    #[test]
+    fn rubber_inverse_undoes_the_band() {
+        for d in [-300.0, -40.0, 5.0, 80.0] {
+            assert!((rubber_inverse(rubber(d, TUG_DOWN), TUG_DOWN) - d).abs() < 1e-6);
+        }
+    }
+
     fn settle(island: &mut Island, from: Time, frames: usize) {
         let renderer = Renderer::new(1.5);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
@@ -6442,3 +6669,4 @@ mod command_tests {
         assert!(island.float_body.is_none() && island.floats.value(12.5) < 0.01, "they fall back in");
     }
 }
+

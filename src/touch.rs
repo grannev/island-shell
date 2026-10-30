@@ -62,6 +62,9 @@ struct Finger {
     mode: Mode,
     /// a tap only rests the pointer here (no click)
     reveal: bool,
+    /// a drag holds what is here (pressed where it landed) instead of
+    /// scrolling
+    drag: bool,
     since: Time,
     path: VecDeque<(Time, f64, f64)>,
 }
@@ -95,8 +98,10 @@ pub struct Touch {
 
 impl Touch {
     /// A finger lands. `grab`: the point holds something to drag;
-    /// `reveal`: a tap there should only rest the pointer on it.
-    pub fn down(&mut self, id: i32, x: f64, y: f64, grab: bool, reveal: bool, now: Time) -> Vec<Out> {
+    /// `reveal`: a tap there should only rest the pointer on it; `drag`:
+    /// a tap stays a tap, but a drag holds what is here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn down(&mut self, id: i32, x: f64, y: f64, grab: bool, reveal: bool, drag: bool, now: Time) -> Vec<Out> {
         // a second finger is not a gesture the island has
         if self.finger.is_some() {
             return Vec::new();
@@ -104,7 +109,7 @@ impl Touch {
         // a finger on gliding content catches it
         self.fling = None;
         let mode = if grab { Mode::Grab } else { Mode::Pending };
-        self.finger = Some(Finger { id, start: (x, y), at: (x, y), mode, reveal, since: now, path: VecDeque::from([(now, x, y)]) });
+        self.finger = Some(Finger { id, start: (x, y), at: (x, y), mode, reveal, drag, since: now, path: VecDeque::from([(now, x, y)]) });
         let mut out = vec![Out::Hover(x, y)];
         if grab {
             out.push(Out::Press(BTN_LEFT, x, y));
@@ -125,6 +130,11 @@ impl Touch {
                 let (dx, dy) = (x - f.start.0, y - f.start.1);
                 if dx.hypot(dy) < SLOP {
                     return Vec::new();
+                }
+                if f.drag {
+                    f.mode = Mode::Grab;
+                    f.at = (x, y);
+                    return vec![Out::Press(BTN_LEFT, f.start.0, f.start.1), Out::Motion(x, y)];
                 }
                 // the content starts moving from here, without a jump
                 f.mode = Mode::Pan { sideways: dx.abs() > dy.abs() };
@@ -244,7 +254,7 @@ mod tests {
     #[test]
     fn a_tap_clicks_where_it_landed() {
         let mut t = Touch::default();
-        assert_eq!(t.down(1, 100.0, 20.0, false, false, 0.0), vec![Out::Hover(100.0, 20.0)]);
+        assert_eq!(t.down(1, 100.0, 20.0, false, false, false, 0.0), vec![Out::Hover(100.0, 20.0)]);
         // a little wobble is still a tap
         assert!(t.motion(1, 104.0, 22.0, 0.05).is_empty());
         assert_eq!(t.up(1, 0.1), vec![Out::Press(BTN_LEFT, 100.0, 20.0), Out::Release(BTN_LEFT, 100.0, 20.0)]);
@@ -254,14 +264,14 @@ mod tests {
     #[test]
     fn a_reveal_tap_only_rests_the_pointer() {
         let mut t = Touch::default();
-        assert_eq!(t.down(1, 10.0, 10.0, false, true, 0.0), vec![Out::Hover(10.0, 10.0)]);
+        assert_eq!(t.down(1, 10.0, 10.0, false, true, false, 0.0), vec![Out::Hover(10.0, 10.0)]);
         assert!(t.up(1, 0.1).is_empty());
     }
 
     #[test]
     fn a_grab_presses_at_once_and_follows() {
         let mut t = Touch::default();
-        assert_eq!(t.down(1, 50.0, 50.0, true, false, 0.0), vec![Out::Hover(50.0, 50.0), Out::Press(BTN_LEFT, 50.0, 50.0)]);
+        assert_eq!(t.down(1, 50.0, 50.0, true, false, false, 0.0), vec![Out::Hover(50.0, 50.0), Out::Press(BTN_LEFT, 50.0, 50.0)]);
         assert_eq!(t.motion(1, 52.0, 50.0, 0.01), vec![Out::Motion(52.0, 50.0)]);
         assert_eq!(t.up(1, 0.02), vec![Out::Release(BTN_LEFT, 52.0, 50.0)]);
     }
@@ -269,7 +279,7 @@ mod tests {
     #[test]
     fn a_drag_scrolls_the_content_with_the_finger() {
         let mut t = Touch::default();
-        t.down(1, 100.0, 300.0, false, false, 0.0);
+        t.down(1, 100.0, 300.0, false, false, false, 0.0);
         // past the slop it locks to the vertical axis without a jump
         assert!(t.motion(1, 101.0, 280.0, 0.02).is_empty());
         // the finger goes up 30 px: the list scrolls down by as much
@@ -282,7 +292,7 @@ mod tests {
     #[test]
     fn a_flick_glides_and_slows_down() {
         let mut t = Touch::default();
-        t.down(1, 100.0, 400.0, false, false, 0.0);
+        t.down(1, 100.0, 400.0, false, false, false, 0.0);
         let mut y = 400.0;
         for i in 1..=6 {
             y -= 20.0;
@@ -305,14 +315,14 @@ mod tests {
         // a new finger catches it
         t.up(1, 0.0);
         t.fling = Some(Fling { at: (0.0, 0.0), v: 900.0, sideways: false, last: 0.0 });
-        t.down(2, 0.0, 0.0, false, false, 0.0);
+        t.down(2, 0.0, 0.0, false, false, false, 0.0);
         assert!(!t.flinging());
     }
 
     #[test]
     fn a_sideways_swipe_stops_on_lift_with_a_kick() {
         let mut t = Touch::default();
-        t.down(1, 100.0, 40.0, false, false, 0.0);
+        t.down(1, 100.0, 40.0, false, false, false, 0.0);
         t.motion(1, 120.0, 41.0, 0.016);
         assert_eq!(t.motion(1, 140.0, 42.0, 0.032), vec![Out::Scroll { x: 100.0, y: 40.0, dx: -20.0, dy: 0.0, stop: false }]);
         let out = t.up(1, 0.04);
@@ -324,13 +334,13 @@ mod tests {
     #[test]
     fn a_long_press_is_the_right_button() {
         let mut t = Touch::default();
-        t.down(1, 30.0, 12.0, false, false, 0.0);
+        t.down(1, 30.0, 12.0, false, false, false, 0.0);
         assert!(t.long_press(1, 0.2).is_empty());
         assert_eq!(t.long_press(1, LONG_PRESS), vec![Out::Press(BTN_RIGHT, 30.0, 12.0), Out::Release(BTN_RIGHT, 30.0, 12.0)]);
         assert!(t.motion(1, 90.0, 12.0, 0.6).is_empty());
         assert!(t.up(1, 0.7).is_empty());
         // a finger that moved first never long-presses
-        t.down(2, 0.0, 0.0, false, false, 1.0);
+        t.down(2, 0.0, 0.0, false, false, false, 1.0);
         t.motion(2, 0.0, 30.0, 1.1);
         assert!(t.long_press(2, 1.0 + LONG_PRESS).is_empty());
     }
@@ -338,9 +348,25 @@ mod tests {
     #[test]
     fn a_second_finger_is_ignored() {
         let mut t = Touch::default();
-        t.down(1, 0.0, 0.0, false, false, 0.0);
-        assert!(t.down(2, 50.0, 50.0, false, false, 0.01).is_empty());
+        t.down(1, 0.0, 0.0, false, false, false, 0.0);
+        assert!(t.down(2, 50.0, 50.0, false, false, false, 0.01).is_empty());
         assert!(t.up(2, 0.02).is_empty());
         assert!(t.active());
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    #[test]
+    fn a_draggable_spot_taps_or_holds() {
+        let mut t = Touch::default();
+        t.down(1, 100.0, 10.0, false, false, true, 0.0);
+        assert_eq!(t.up(1, 0.1), vec![Out::Press(BTN_LEFT, 100.0, 10.0), Out::Release(BTN_LEFT, 100.0, 10.0)]);
+        t.down(2, 100.0, 10.0, false, false, true, 1.0);
+        assert_eq!(t.motion(2, 100.0, 30.0, 1.05), vec![Out::Press(BTN_LEFT, 100.0, 10.0), Out::Motion(100.0, 30.0)]);
+        assert_eq!(t.motion(2, 100.0, 40.0, 1.1), vec![Out::Motion(100.0, 40.0)]);
+        assert_eq!(t.up(2, 1.2), vec![Out::Release(BTN_LEFT, 100.0, 40.0)]);
     }
 }

@@ -302,6 +302,11 @@ opens, moving the pointer across it keeps it open until the pointer leaves.
 Hovering the clock or another ordinary part gently widens the compact island,
 including when music or Neovim is active; the transition into either detailed
 panel continues from the current animated size.
+The closed island can be tugged with the mouse or a finger: it gives against
+a tight rubber band (at most ~34 px down, ~26 px sideways, a squash up), leans
+with its top lagging, stretches like a drop with its fillets drawn out, and
+jumps back like jelly when let go. A press that moves less than 6 px is still
+a click, decided on release.
 
 Keyboard: text, Backspace, Ctrl+U, Up/Down/Tab, Enter to launch, Escape to fold; the pointer picks rows and
 the wheel scrolls. The launcher takes the keyboard

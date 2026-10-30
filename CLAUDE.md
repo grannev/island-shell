@@ -188,6 +188,11 @@ in `assets/waybar`, installed under `~/.local/share/island-shell/icons`.
 The compact equaliser on the right (and the wings' cover) is the only hover trigger for music;
 Neovim's chip on the left is the hover trigger for editor details. An already
 open panel stays open while the pointer moves across it.
+The closed line can be tugged (`Island::tug_press/tug_to/tug_release`): a
+tight rubber band (Apple's 0.55 constant), a lean, a drop-like stretch and a
+jelly spring back; open pages cannot be tugged. Left presses on the closed
+line therefore act on release (`App::tug_click` replays the press when it was
+not a tug); a finger's drag there tugs, a tap stays a tap.
 Hovering the ordinary compact body still widens its side padding on a spring,
 even when music and Neovim are active. A panel target suppresses that padding
 while the corresponding sheet unfolds.

@@ -287,6 +287,10 @@ pub struct App {
     touch_sticky: bool,
     /// the finger landed on the music: sideways it changes tracks
     touch_tracks: bool,
+    /// a press on the closed island, kept until its release says whether
+    /// it was a click (replayed then) or a tug
+    tug_click: Option<PointerEvent>,
+    tug_replay: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     kbd_interactivity: KeyboardInteractivity,
@@ -435,6 +439,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         touch_hold: None,
         touch_sticky: false,
         touch_tracks: false,
+        tug_click: None,
+        tug_replay: false,
         keyboard: None,
         modifiers: Modifiers::default(),
         kbd_interactivity: KeyboardInteractivity::None,
@@ -1764,6 +1770,10 @@ impl App {
     /// under it was replaced).
     fn pointer_left(&mut self) {
         let now = self.clock.predict(false);
+        // the hand is gone: what it held springs back, and is no click
+        if self.tug_click.take().is_some() {
+            self.island.tug_release(now);
+        }
         self.island.hovered = false;
         self.island.clear_timer_hover(self.clock.predict(false));
         self.island.clear_network_hover(now);
@@ -2056,6 +2066,11 @@ impl App {
                 }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_at = event.position;
+                    // the closed island in the hand gives against its rubber band
+                    if self.island.tug_to(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                        continue;
+                    }
                     if self.island.set_calendar_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
@@ -2124,6 +2139,19 @@ impl App {
                     }
                 }
                 PointerEventKind::Release { button, .. } => {
+                    // a press on the closed island: let go after a tug it
+                    // springs back; without one it was a click after all
+                    if button == BTN_LEFT {
+                        if let Some(press) = self.tug_click.take() {
+                            if self.island.tug_release(self.clock.predict(false)) {
+                                changed = true;
+                                continue;
+                            }
+                            self.tug_replay = true;
+                            self.pointer_events(std::slice::from_ref(&press));
+                            self.tug_replay = false;
+                        }
+                    }
                     if button == BTN_LEFT && self.island.quick_release(self.clock.predict(false)) {
                         changed = true;
                     }
@@ -2153,6 +2181,13 @@ impl App {
                 }
                 PointerEventKind::Press { button, .. } => {
                     let now = self.clock.predict(false);
+                    // the closed island may be taken in the hand: what the
+                    // press means waits for the release
+                    if button == BTN_LEFT && !self.tug_replay && self.island.tug_press(event.position.0, event.position.1, now) {
+                        self.tug_click = Some(event.clone());
+                        changed = true;
+                        continue;
+                    }
                     // inside the launcher a click launches the row under
                     // the pointer
                     if self.island.launcher.is_some() {
@@ -2608,7 +2643,9 @@ impl TouchHandler for App {
         let grab = self.island.touch_grabs(self.width as f64 / 2.0, x, y, now);
         let reveal = !grab && self.island.touch_reveals(x, y, now);
         self.touch_tracks = !grab && self.island.touch_swipes_tracks(x, y);
-        let out = self.gesture.down(id, x, y, grab, reveal, now);
+        // the closed line: a tap is a tap, a drag tugs it
+        let tug = !grab && !reveal && self.island.tuggable(x, y);
+        let out = self.gesture.down(id, x, y, grab, reveal, tug, now);
         self.apply_touch(&out);
         if !grab && !reveal {
             self.arm_long_press(id);
