@@ -129,6 +129,8 @@ const FLOAT_RESPONSE: f64 = 0.38;
 const FLOAT_DAMPING: f64 = 0.88;
 const FLOAT_RETURN: f64 = 0.2;
 const FLOAT_DELAY: f64 = 0.16;
+/// Below this the buttons are tucked wholly behind the page's edge.
+const FLOAT_TUCKED: f64 = 0.085;
 /// The narrowest the closed island's content gets (a bare resting capsule
 /// is this plus the padding: 150 px).
 const REST_CONTENT_W: f64 = 118.0;
@@ -840,6 +842,9 @@ pub struct Island {
     /// are, which is lit, which was pressed, and the page they stand beside
     /// once they have arrived (for the pointer).
     floats: Spring,
+    /// A page folding away waits for its floating buttons to tuck in
+    /// behind it: the fold starts here.
+    fold_at: Time,
     float_lit: HashMap<floating::Button, Spring>,
     float_hover: Option<floating::Button>,
     float_pressed: Option<(floating::Button, Time)>,
@@ -1052,6 +1057,7 @@ impl Island {
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
             floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
+            fold_at: 0.0,
             float_lit: HashMap::new(),
             float_hover: None,
             float_pressed: None,
@@ -1250,13 +1256,30 @@ impl Island {
         // the editor's chip rides beside the clock while Neovim is in front
         // the floating buttons come out once a page is open, and fall back
         // in quickly (no bounce) when it closes
+        let folding = !self.pill_open() && self.launcher.is_none() && !self.want_player() && !self.want_editor_panel(now);
+        if !folding && self.fold_at > now {
+            // another sheet takes the box after all: no waiting
+            self.fold_at = now;
+            self.quick_retiring_at = self.quick_retiring_at.map(|t| t.min(now));
+        }
         if self.floats_wanted() {
             // fresh, they wait for the page to have most of its size, so
             // they leave its sides rather than the compact line's
             let wait = if self.floats.value(now) < 0.05 { FLOAT_DELAY } else { 0.0 };
             self.floats.set_with(1.0, FLOAT_RESPONSE, FLOAT_DAMPING, now + wait);
         } else {
+            // a page folding back to the line with its buttons out: they go
+            // in first, and the page folds once they are behind its edge
+            // (riding its shrinking sides they were left hanging in the air)
+            let out = self.floats.target() > 0.5 && self.floats.value(now) > FLOAT_TUCKED;
             self.floats.set_with(0.0, FLOAT_RETURN, 1.0, now);
+            if out && folding {
+                self.fold_at = (1..=60).map(|i| now + i as f64 * 0.005)
+                    .find(|t| self.floats.value(*t) <= FLOAT_TUCKED)
+                    .unwrap_or(now + 0.3);
+                // the page's content stays put until then, too
+                self.quick_retiring_at = self.quick_retiring_at.map(|t| t.max(self.fold_at));
+            }
             self.float_hover = None;
         }
         for (button, spring) in self.float_lit.iter_mut() {
@@ -1311,7 +1334,9 @@ impl Island {
         }
         self.player.set(if player { 1.0 } else { 0.0 }, now);
         self.reveal.set(if self.want_reveal(now) { 1.0 } else { 0.0 }, now);
-        self.pill.set(if self.pill_open() && !self.want_player() { 1.0 } else { 0.0 }, now);
+        let pill = self.pill_open() && !self.want_player();
+        // closing, the fold may be waiting for the floating buttons
+        self.pill.set(if pill { 1.0 } else { 0.0 }, if pill { now } else { now.max(self.fold_at) });
         self.panel.set(if self.launcher.is_some() { 1.0 } else { 0.0 }, now);
         let result = matches!(self.auth, Some(Auth::Ok(_) | Auth::Fail(_)));
         self.ring.set(if result { 1.0 } else { 0.0 }, now);
@@ -2750,7 +2775,7 @@ impl Island {
         if self.center.open {
             self.center_retiring_at = None;
         } else if self.center_was_open {
-            self.center_retiring_at = Some(now);
+            self.center_retiring_at = Some(now.max(self.fold_at));
         }
         self.center_was_open = self.center.open;
         // a sheet keeps its 30 px corners until another kind of pill takes
@@ -2978,7 +3003,10 @@ impl Island {
         let float_k = self.floats.value(now);
         let float_page = floating::Body { x0, x1, top: dy, bottom: y1 };
         self.float_body = None;
-        if float_k > 0.001 {
+        // going in, a button tucked behind the edge is gone: the page may
+        // fold shorter than the column, and a tucked drop would hang below
+        let tucked = self.floats.target() < 0.5 && float_k <= FLOAT_TUCKED;
+        if float_k > 0.001 && !tucked {
             for button in floating::ALL {
                 let look = floating::Look {
                     progress: float_k,
@@ -5105,7 +5133,7 @@ mod tests {
         island.open_quick_menu(10.0);
         filmstrip("floats-open", &mut island, 10.0, 12, 2.5 / 60.0);
         island.close_quick_menu(12.0);
-        filmstrip("floats-close", &mut island, 12.0, 8, 1.5 / 60.0);
+        filmstrip("floats-close", &mut island, 12.0, 14, 1.5 / 60.0);
 
         let mut island = gallery_island();
         island.open_notification_center(10.0);
