@@ -106,6 +106,9 @@ pub struct Edge {
     level: Option<Level>,
     /// the bottom corners smouldering red (low battery), how strongly
     ember: f64,
+    /// the frame grown this much thicker (Focus / Do Not Disturb), and the
+    /// screen's corner radius it rounds with
+    border: (f64, f64),
     /// a continuous wave (Touch ID waiting): its colour, since when, and
     /// when it began to fade out
     breath: Option<(Rgb, Time, Option<Time>)>,
@@ -154,6 +157,12 @@ impl Edge {
         self.level = level.filter(|l| l.shown > 0.005);
     }
 
+    /// Thicken the frame by `width` (0 = as usual), concentric with the
+    /// screen's corners of `radius`.
+    pub fn set_border(&mut self, width: f64, radius: f64) {
+        self.border = (width, radius);
+    }
+
     /// The bottom corners' red glow (0 = none); it stands still.
     pub fn set_ember(&mut self, strength: f64) {
         self.ember = strength;
@@ -171,7 +180,8 @@ impl Edge {
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
         }
-        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() && self.level.is_none() && self.ember <= 0.0 {
+        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none() && self.level.is_none()
+            && self.ember <= 0.0 && self.border.0 <= 0.05 {
             return Vec::new();
         }
         let far = (w / 2.0 + cx.abs().min(w)).hypot(h) + SOFT;
@@ -247,6 +257,27 @@ impl Edge {
             let wave: Vec<(f64, f64)> = front(ease_out(phase) * far, strength * (1.0 - phase * 0.6), 0.0)
                 .into_iter().map(|(d, a)| (d, a.max(rim))).chain([(far + SOFT, rim)]).collect();
             lit |= paint(cr, w, h, cx, colour, &wave);
+        }
+        // the thicker frame goes over the light: the light comes out of it
+        let (width, radius) = self.border;
+        if width > 0.05 {
+            cr.save().unwrap();
+            cr.new_path();
+            cr.set_fill_rule(cairo::FillRule::EvenOdd);
+            cr.rectangle(0.0, 0.0, w, h);
+            let inner = (radius - width).max(2.0);
+            let (x0, y0, x1, y1) = (width, width, w - width, h - width);
+            use std::f64::consts::{FRAC_PI_2, PI};
+            cr.new_sub_path();
+            cr.arc(x1 - inner, y0 + inner, inner, -FRAC_PI_2, 0.0);
+            cr.arc(x1 - inner, y1 - inner, inner, 0.0, FRAC_PI_2);
+            cr.arc(x0 + inner, y1 - inner, inner, FRAC_PI_2, PI);
+            cr.arc(x0 + inner, y0 + inner, inner, PI, 1.5 * PI);
+            cr.close_path();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            let _ = cr.fill();
+            cr.restore().unwrap();
+            lit = true;
         }
         if !lit {
             return Vec::new();
@@ -590,6 +621,19 @@ mod tests {
         assert_eq!(alpha(&mut s, 300, 399), 0);
         assert_eq!(alpha(&mut s, 0, 100), 0);
         assert!(!edge.is_animating(0.0), "a still glow costs no frames");
+    }
+
+    #[test]
+    fn focus_thickens_the_frame_evenly() {
+        let mut edge = Edge::default();
+        edge.set_border(4.0, 16.0);
+        let (mut s, rects) = render(&mut edge, 0.0);
+        assert_eq!(rects.len(), 4);
+        for (x, y) in [(300, 2), (300, 397), (1, 200), (598, 200)] {
+            assert_eq!(alpha(&mut s, x, y), 255, "{x},{y}");
+        }
+        assert_eq!(alpha(&mut s, 300, 6), 0);
+        assert_eq!(alpha(&mut s, 6, 200), 0);
     }
 
     #[test]

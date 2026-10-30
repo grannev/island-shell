@@ -24,7 +24,14 @@ enum State {
 #[derive(Default)]
 pub struct Curtain {
     state: Option<State>,
+    /// a screenshot's shutter: the frame closing in from every side as a
+    /// rounded iris and opening again (since)
+    shutter: Option<Time>,
 }
+
+/// The shutter's length and how far in it closes.
+const SHUTTER: f64 = 0.42;
+const SHUTTER_DEPTH: f64 = 90.0;
 
 impl Curtain {
     /// Switch the screen off into the island.
@@ -50,7 +57,45 @@ impl Curtain {
         }
     }
 
+    /// A screenshot was taken: the shutter blinks.
+    pub fn shutter(&mut self, now: Time) {
+        self.shutter = Some(now);
+    }
+
+    /// The shutter for `now`: black closing in from every side of a screen
+    /// `w`×`h` with corners of `radius`. Returns the strips it covered.
+    pub fn draw_shutter(&mut self, cr: &Context, w: f64, h: f64, radius: f64, now: Time) -> Vec<Rect> {
+        let Some(since) = self.shutter else { return Vec::new() };
+        let k = (now - since) / SHUTTER;
+        if k >= 1.0 {
+            self.shutter = None;
+            return Vec::new();
+        }
+        // quick in, a touch slower out
+        let close = if k < 0.4 { min_jerk(k / 0.4) } else { 1.0 - min_jerk((k - 0.4) / 0.6) };
+        let d = SHUTTER_DEPTH * close;
+        cr.save().unwrap();
+        cr.new_path();
+        cr.set_fill_rule(cairo::FillRule::EvenOdd);
+        cr.rectangle(0.0, 0.0, w, h);
+        rounded(cr, Rect { x: d, y: d, w: w - 2.0 * d, h: h - 2.0 * d }, radius + 0.8 * d);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        let _ = cr.fill();
+        cr.restore().unwrap();
+        // the whole band the iris can reach, every frame of it
+        let band = SHUTTER_DEPTH + radius + 2.0;
+        vec![
+            Rect { x: 0.0, y: 0.0, w, h: band },
+            Rect { x: 0.0, y: h - band, w, h: band },
+            Rect { x: 0.0, y: 0.0, w: band, h },
+            Rect { x: w - band, y: 0.0, w: band, h },
+        ]
+    }
+
     pub fn is_animating(&self, now: Time) -> bool {
+        if self.shutter.is_some_and(|since| now - since < SHUTTER + 0.05) {
+            return true;
+        }
         match self.state {
             Some(State::Closing(since)) => now - since < CLOSE + 0.05,
             Some(State::Opening(since)) => now - since < OPEN + 0.05,
@@ -154,6 +199,28 @@ fn rounded(cr: &Context, r: Rect, radius: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shutter_closes_in_from_every_side_and_opens() {
+        let mut c = Curtain::default();
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 400).unwrap();
+        let alpha = |surface: &mut cairo::ImageSurface, x: usize, y: usize| {
+            let stride = surface.stride() as usize;
+            surface.data().unwrap()[y * stride + x * 4 + 3]
+        };
+        c.shutter(0.0);
+        {
+            let cr = Context::new(&surface).unwrap();
+            assert_eq!(c.draw_shutter(&cr, 600.0, 400.0, 16.0, 0.4 * SHUTTER).len(), 4);
+        }
+        assert_eq!(alpha(&mut surface, 40, 200), 255);
+        assert_eq!(alpha(&mut surface, 300, 40), 255);
+        assert_eq!(alpha(&mut surface, 300, 200), 0, "the middle stays open");
+        let cr = Context::new(&surface).unwrap();
+        assert!(c.is_animating(0.3));
+        assert!(c.draw_shutter(&cr, 600.0, 400.0, 16.0, SHUTTER + 0.01).is_empty());
+        assert!(!c.is_animating(SHUTTER + 0.1));
+    }
 
     const ISLAND: Rect = Rect { x: 250.0, y: 0.0, w: 100.0, h: 32.0 };
 

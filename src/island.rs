@@ -141,6 +141,9 @@ const TUG_SLOP: f64 = 6.0;
 /// Let go, it jumps back like jelly.
 const TUG_RESPONSE: f64 = 0.46;
 const TUG_DAMPING: f64 = 0.42;
+/// How much thicker the frame is while Focus (Do Not Disturb) is on.
+const FOCUS_FRAME: f64 = 4.0;
+
 /// How much of a sideways tug is a lean (the top lagging behind the
 /// bottom) rather than a slide along the edge.
 const TUG_LEAN: f64 = 0.4;
@@ -878,6 +881,8 @@ pub struct Island {
     low_battery: bool,
     /// the top edge as a membrane (pulled by a tug, rippling)
     membrane: crate::edge::Membrane,
+    /// the frame thickened for Focus / Do Not Disturb, 0..1
+    focus_frame: Spring,
     /// the surface's centre, as of the last frame drawn
     surface_cx: f64,
     tug_x: Spring,
@@ -1143,6 +1148,7 @@ impl Island {
             level_right: true,
             low_battery: false,
             membrane: crate::edge::Membrane::default(),
+            focus_frame: Spring::new(0.0, 0.45, 0.8),
             surface_cx: 490.0,
             tug_x: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
             tug_y: Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING),
@@ -1232,6 +1238,7 @@ impl Island {
             || self.edge.is_animating(now)
             || self.curtain.is_animating(now)
             || self.membrane.is_animating(now)
+            || self.focus_frame.is_moving(now)
             || self.level_shown.is_moving(now) || self.level_shown.value(now) > 0.005 && self.level_value.is_moving(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
             || self.float_lit.values().any(|s| s.is_moving(now))
@@ -2191,6 +2198,11 @@ impl Island {
                 self.sync(now);
                 return;
             }
+        }
+        // the shutter blinks as the shot lands (after the capture: it is
+        // never in the picture)
+        if matches!(event, activity::Event::Screenshot { .. }) && self.config.edge_light {
+            self.curtain.shutter(now);
         }
         if matches!(event, activity::Event::Screenshot { .. }) {
             self.activity_art.clear();
@@ -4923,8 +4935,12 @@ impl Island {
             colour: if self.level_right { (0.95, 0.97, 1.0) } else { warm },
         }));
         self.edge.set_ember(if self.low_battery && self.config.edge_light { 0.55 } else { 0.0 });
+        // Focus: the frame gathers the screen in a little
+        self.focus_frame.set(if self.dnd && self.config.edge_light { 1.0 } else { 0.0 }, now);
+        self.edge.set_border(FOCUS_FRAME * self.focus_frame.value(now).max(0.0), self.config.screen_corners);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
         let mut painted = self.edge.draw(cr, w, h, cx, now);
+        painted.extend(self.curtain.draw_shutter(cr, w, h, self.config.screen_corners, now));
         // the screen closing into the island (or coming out of it): over
         // the light, under the island
         let island = self.line_rect.unwrap_or(Rect { x: cx - 75.0, y: 0.0, w: 150.0, h: BOX_H });

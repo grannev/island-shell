@@ -59,12 +59,14 @@ Status: [ ] to do, [x] done.
 - [x] Drop into water: hiding the island (mod+i, fullscreen) sends a ripple
       along the top edge to the corners.
 
-## Stage 7 — moments
-- [ ] Screenshot shutter: the frame closes in from all sides as a rounded
-      iris and opens again.
-- [ ] Focus / Do Not Disturb: the frame thickens by 6–8 px while it is on.
-- [ ] Hot corners: a pointer pressed into a corner bulges it like rubber
-      (the frame never takes input).
+## Stage 7 — moments (done)
+- [x] Screenshot shutter: the frame closes in from all sides as a rounded
+      iris and opens again, as the shot lands (never in the picture).
+- [x] Focus / Do Not Disturb: the frame thickens by 4 px, concentric with
+      the screen's corners, while it is on.
+- [ ] (skipped) Hot corners: bulging a corner under the pointer needs an
+      input region there, which would steal the corner clicks people throw
+      the mouse at (waybar's first workspace button).
 
 ## Stage 8 — music (optional, config)
 - [ ] Ambilight: a faint glow along the bottom edge in the cover's colours,
