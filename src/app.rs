@@ -345,6 +345,9 @@ pub struct App {
     tug_replay: bool,
     /// a touchpad's scroll over the bar, until it makes a step
     bar_scroll: f64,
+    /// a left press on a bar drop, waiting to be a pull or a click
+    bar_click: Option<PointerEvent>,
+    bar_replay: bool,
     /// what to do once the screen has switched off into the island
     after_off: Option<crate::control::Request>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -512,6 +515,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         tug_click: None,
         tug_replay: false,
         bar_scroll: 0.0,
+        bar_click: None,
+        bar_replay: false,
         after_off: None,
         keyboard: None,
         modifiers: Modifiers::default(),
@@ -2379,23 +2384,43 @@ impl App {
                 continue;
             }
             // over the bar's drops: the bar's, not the island's
-            if self.island.config.bar && self.island.bar.contains(event.position.0, event.position.1) && self.tug_click.is_none() {
+            // (and a drop in the hand keeps the pointer until let go)
+            if self.island.config.bar && (self.island.bar.tugging() || self.island.bar.contains(event.position.0, event.position.1)) && self.tug_click.is_none() {
                 let now = self.clock.predict(false);
                 let (x, y) = event.position;
                 if self.island.hovered {
                     self.pointer_left();
                 }
                 match event.kind {
+                    PointerEventKind::Motion { .. } if self.island.bar.tug_to(x, y, now) => {
+                        changed = true;
+                    }
                     PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                         let item = self.island.bar.item_at(x, y);
                         changed |= self.island.bar.hover(item, now);
                         changed |= self.island.bar.menu_hover(x, y);
+                    }
+                    // a drop may be taken in the hand: what a left press
+                    // means waits for the release
+                    PointerEventKind::Press { button, .. } if button == BTN_LEFT && !self.bar_replay && self.island.bar.tug_press(x, y, now) => {
+                        self.bar_click = Some(event.clone());
                     }
                     PointerEventKind::Press { button, .. } => {
                         if let Some(action) = self.island.bar.press(x, y, button, now) {
                             self.bar_action(action);
                         }
                         changed = true;
+                    }
+                    PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                        if let Some(press) = self.bar_click.take() {
+                            if self.island.bar.tug_release(now) {
+                                changed = true;
+                            } else {
+                                self.bar_replay = true;
+                                self.pointer_events(std::slice::from_ref(&press));
+                                self.bar_replay = false;
+                            }
+                        }
                     }
                     PointerEventKind::Axis { vertical, .. } => {
                         let dy = wheel_pixels(vertical.discrete, vertical.value120, vertical.absolute);

@@ -183,7 +183,28 @@ pub struct Bar {
     splash: Option<(f64, f64)>,
     /// the focused workspace as last drawn
     focused: Option<String>,
+    /// a drop in the hand, and how far each one is stretched down as it
+    /// jumps back
+    tug: Option<DropTug>,
+    stretch: [Spring; 2],
 }
+
+/// A drop held by the pointer: pulled down against a rubber band.
+struct DropTug {
+    side: usize,
+    from: (f64, f64),
+    engaged: bool,
+    pull: f64,
+    velocity: f64,
+    at: Time,
+}
+
+/// How far a drop gives (it never reaches this), the pointer's travel
+/// before a press becomes a pull, and the jelly it springs back on.
+const TUG_DOWN: f64 = 26.0;
+const TUG_SLOP: f64 = 6.0;
+const TUG_RESPONSE: f64 = 0.46;
+const TUG_DAMPING: f64 = 0.42;
 
 impl Default for Bar {
     fn default() -> Self {
@@ -208,6 +229,8 @@ impl Default for Bar {
             glyphs: Default::default(),
             splash: None,
             focused: None,
+            tug: None,
+            stretch: [0; 2].map(|_| Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING)),
         }
     }
 }
@@ -298,6 +321,67 @@ impl Bar {
             || self.focus_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.washes.values().any(|s| s.is_moving(now))
             || self.glyphs.is_animating(now)
+            || self.tug.is_some()
+            || self.stretch.iter().any(|s| s.is_moving(now))
+    }
+
+    /// Take a drop in the hand (a left press on it, no menu open). What
+    /// the press means waits: a pull, or a click on release.
+    pub fn tug_press(&mut self, x: f64, y: f64, now: Time) -> bool {
+        if self.menu.is_some() {
+            return false;
+        }
+        let Some(side) = self.drops.iter().position(|d| d.is_some_and(|d| inside(Rect { h: HEIGHT, ..d }, x, y))) else { return false };
+        self.tug = Some(DropTug { side, from: (x, y), engaged: false, pull: 0.0, velocity: 0.0, at: now });
+        true
+    }
+
+    /// Whether a drop is held (the pointer belongs to the bar until let go).
+    pub fn tugging(&self) -> bool {
+        self.tug.is_some()
+    }
+
+    /// The held drop follows the pointer down. Returns whether it is a pull.
+    pub fn tug_to(&mut self, x: f64, y: f64, now: Time) -> bool {
+        let Some(t) = self.tug.as_mut() else { return false };
+        let dy = y - t.from.1;
+        if !t.engaged {
+            if (x - t.from.0).hypot(dy) < TUG_SLOP {
+                return false;
+            }
+            t.engaged = true;
+        }
+        let pull = crate::island::rubber(dy.max(0.0), TUG_DOWN);
+        let dt = now - t.at;
+        if dt > 0.004 {
+            t.velocity = 0.5 * t.velocity + 0.5 * (pull - t.pull) / dt;
+            t.at = now;
+        }
+        t.pull = pull;
+        true
+    }
+
+    /// Let go: a pulled drop jumps back and ripples the edge from under
+    /// it. Returns whether it was a pull (false: a click after all).
+    pub fn tug_release(&mut self, now: Time) -> bool {
+        let Some(t) = self.tug.take() else { return false };
+        if !t.engaged {
+            return false;
+        }
+        let v = if now - t.at < 0.08 { t.velocity.clamp(-1500.0, 1500.0) } else { 0.0 };
+        self.stretch[t.side].release(t.pull, v, 0.0, now);
+        if let Some(d) = self.drops[t.side] {
+            self.splash = Some((d.x + d.w / 2.0, (t.pull / TUG_DOWN).min(1.0)));
+        }
+        true
+    }
+
+    /// How far a drop is stretched down now.
+    fn stretched(&self, side: usize, now: Time) -> f64 {
+        match &self.tug {
+            Some(t) if t.engaged && t.side == side => t.pull,
+            _ => self.stretch[side].value(now).max(-4.0),
+        }
     }
 
     /// The item under a point of the surface, if the bar is there.
@@ -486,10 +570,14 @@ impl Bar {
         let content: f64 = left_w.iter().sum();
         if content > 0.5 {
             let dw = LEAD + content + TAIL;
-            crate::drop::corner(cr, w, false, dw, HEIGHT, RADIUS, FILLET, smoothing);
+            // pulled down it stretches, its buttons riding half way
+            let pull = self.stretched(0, now);
+            crate::drop::corner(cr, w, false, dw, HEIGHT + pull, RADIUS, FILLET, smoothing);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             let _ = cr.fill();
-            self.drops[0] = Some(Rect { x: 0.0, y: 0.0, w: dw, h: HEIGHT + y });
+            self.drops[0] = Some(Rect { x: 0.0, y: 0.0, w: dw, h: HEIGHT + pull + y });
+            cr.save().unwrap();
+            cr.translate(0.0, pull / 2.0);
             let mut x = LEAD;
             let mut focus = None;
             for ((cell, text), slot_w) in left.iter().zip(&left_w) {
@@ -533,18 +621,22 @@ impl Bar {
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
                 let _ = cr.fill();
             }
-            frame.painted.push(Rect { x: 0.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + FILLET * 5.0 + y).max(0.0) });
-            frame.input.push(Rect { x: 0.0, y: 0.0, w: dw, h: (HEIGHT + y).max(0.0) });
+            cr.restore().unwrap();
+            frame.painted.push(Rect { x: 0.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + TUG_DOWN + FILLET * 5.0 + y).max(0.0) });
+            frame.input.push(Rect { x: 0.0, y: 0.0, w: dw, h: (HEIGHT + pull.max(0.0) + y).max(0.0) });
         }
 
         // the right drop: details, volume, layout, battery, tray
         let content: f64 = right_w.iter().sum();
         if content > 0.5 {
             let dw = TAIL + content + LEAD;
-            crate::drop::corner(cr, w, true, dw, HEIGHT, RADIUS, FILLET, smoothing);
+            let pull = self.stretched(1, now);
+            crate::drop::corner(cr, w, true, dw, HEIGHT + pull, RADIUS, FILLET, smoothing);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             let _ = cr.fill();
-            self.drops[1] = Some(Rect { x: w - dw, y: 0.0, w: dw, h: HEIGHT + y });
+            self.drops[1] = Some(Rect { x: w - dw, y: 0.0, w: dw, h: HEIGHT + pull + y });
+            cr.save().unwrap();
+            cr.translate(0.0, pull / 2.0);
             let mut x = w - LEAD - content;
             for ((cell, text), slot_w) in right.iter().zip(&right_w) {
                 let slot = Rect { x, y: WASH_INSET - 1.0, w: *slot_w, h: HEIGHT - 2.0 * (WASH_INSET - 1.0) };
@@ -595,8 +687,9 @@ impl Bar {
                 self.slots.push((cell.item.clone(), Rect { x, y: y.max(0.0), w: *slot_w, h: HEIGHT + y }));
                 x += slot_w;
             }
-            frame.painted.push(Rect { x: w - dw - FILLET * 5.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + FILLET * 5.0 + y).max(0.0) });
-            frame.input.push(Rect { x: w - dw, y: 0.0, w: dw, h: (HEIGHT + y).max(0.0) });
+            cr.restore().unwrap();
+            frame.painted.push(Rect { x: w - dw - FILLET * 5.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + TUG_DOWN + FILLET * 5.0 + y).max(0.0) });
+            frame.input.push(Rect { x: w - dw, y: 0.0, w: dw, h: (HEIGHT + pull.max(0.0) + y).max(0.0) });
             // the battery's time, in a small pill under it while it is hovered
             let k = self.washes.get(&Item::Battery).map_or(0.0, |s| s.value(now).clamp(0.0, 1.0));
             if let (true, Some(b), Some((_, slot))) = (k > 0.01, self.battery, self.slots.iter().find(|(i, _)| *i == Item::Battery)) {
@@ -901,6 +994,35 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_pulled_down_stretches_and_jumps_back() {
+        let mut bar = bar();
+        settle(&mut bar, 10.0);
+        let (x, y) = bar.slots.iter().find(|(i, _)| *i == Item::Volume).map(|(_, r)| (r.x + r.w / 2.0, 16.0)).unwrap();
+        // a press and release in place is a click after all
+        assert!(bar.tug_press(x, y, 11.0));
+        assert!(!bar.tug_release(11.05));
+        // pulled down it gives against its band, never past it
+        assert!(bar.tug_press(x, y, 12.0));
+        assert!(bar.tug_to(x, y + 200.0, 12.1));
+        let frame = settle_once(&mut bar, 12.1);
+        let d = bar.drop_sizes()[1].unwrap();
+        assert!(d.h > HEIGHT + 10.0 && d.h < HEIGHT + TUG_DOWN, "{}", d.h);
+        assert!(frame.input.iter().any(|r| r.h > HEIGHT + 10.0));
+        // let go: back, and a ripple from under it
+        assert!(bar.tug_release(12.2));
+        assert!(bar.take_splash().is_some());
+        settle(&mut bar, 13.0);
+        assert!((bar.drop_sizes()[1].unwrap().h - HEIGHT).abs() < 0.5);
+        assert!(!bar.is_animating(15.0));
+    }
+
+    fn settle_once(bar: &mut Bar, now: Time) -> BarFrame {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1504, 120).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        bar.draw(&cr, &Renderer::new(1.0), 1504.0, 0.6, now)
+    }
+
+    #[test]
     fn the_batterys_tip_says_how_long() {
         assert_eq!(battery_tip(Battery { percent: 84, charging: false, remaining: Some(192) }), "Осталось 3 ч 12 мин");
         assert_eq!(battery_tip(Battery { percent: 40, charging: true, remaining: Some(45) }), "Заряжается · до полной 45 мин");
@@ -956,5 +1078,46 @@ mod symbols_look {
         drop(cr);
         std::fs::create_dir_all("target/gallery").unwrap();
         surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-symbols.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tug_look {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-tug.png"]
+    fn pulled_drop() {
+        let renderer = Renderer::new(1.5);
+        let (w, h, zoom) = (420.0, 70.0, 2.0);
+        let pulls = [0.0, 30.0, 90.0, 400.0];
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom * pulls.len() as f64) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (row, pull) in pulls.into_iter().enumerate() {
+            let mut bar = Bar::default();
+            bar.volume = Some((0.6, false));
+            bar.layout = Some("English".into());
+            bar.battery = Some(Battery { percent: 72, charging: false, remaining: None });
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            let mut t = 10.0;
+            for _ in 0..90 { bar.draw(&sc, &renderer, w, 0.6, t); t += 1.0 / 60.0; }
+            if pull > 0.0 {
+                let x = w - 60.0;
+                bar.tug_press(x, 16.0, t);
+                bar.tug_to(x, 16.0 + pull, t + 0.05);
+            }
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * h * zoom);
+            cr.rectangle(0.0, 0.0, w * zoom, h * zoom - 2.0);
+            cr.clip();
+            cr.scale(zoom, zoom);
+            cr.set_source_rgb(0.18, 0.35, 0.40);
+            cr.paint().unwrap();
+            bar.draw(&cr, &renderer, w, 0.6, t + 0.05);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-tug.png").unwrap()).unwrap();
     }
 }

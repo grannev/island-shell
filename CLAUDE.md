@@ -258,7 +258,9 @@ left; the drawer (disk / CPU / memory sampled only while open,
 battery (tooltip with the time left) and the tray right; the speaker, keyboard
 and battery are vectors (`src/bar_icons.rs`: waves lit by the level, a mute
 slash, iOS's battery with the percentage cut out of its fill, red ≤ 20 %,
-green and a bolt while charging). The bar holds state
+green and a bolt while charging). A drop can be pulled down like the island
+(`Bar::tug_press/tug_to/tug_release`, left presses on it act on release; a
+pull jumps back on jelly and ripples the edge). The bar holds state
 and returns `bar::Action`s; it does no I/O. The tray (`src/tray.rs`): the
 island owns `org.kde.StatusNotifierWatcher` (same properties/signals as
 Waybar's, lock.sh counts items) and hosts the items on threads; menus

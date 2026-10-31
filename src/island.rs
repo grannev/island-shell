@@ -962,7 +962,7 @@ struct Tug {
 
 /// Apple's rubber band: the island follows less the further it is pulled,
 /// and never past `limit`.
-fn rubber(d: f64, limit: f64) -> f64 {
+pub(crate) fn rubber(d: f64, limit: f64) -> f64 {
     d.signum() * (1.0 - 1.0 / (d.abs() * TUG_RUBBER / limit + 1.0)) * limit
 }
 
