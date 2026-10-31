@@ -8089,3 +8089,27 @@ mod halo_look {
         crate::golden::check("halo", &halo_image());
     }
 }
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    /// The companion blinks and glances about, but the island must still
+    /// rest most of the time: a spring's long tail on its gaze once kept it
+    /// drawing a third of every second.
+    #[test]
+    fn an_idle_island_with_its_companion_rests_most_of_the_time() {
+        let mut island = Island::new(Config::default());
+        island.sync(0.0);
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1470, 960).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let (mut busy, mut t) = (0, 1.0);
+        while t < 61.0 {
+            island.advance(t);
+            island.draw(&cr, &renderer, 490.0, t);
+            if island.is_animating(t) { busy += 1; }
+            t += 1.0 / 60.0;
+        }
+        assert!(busy < 60 * 60 / 8, "{busy} busy frames in a quiet minute");
+    }
+}

@@ -16,7 +16,7 @@
 
 use cairo::Context;
 
-use crate::anim::{Spring, Time};
+use crate::anim::{Quintic, Spring, Time};
 
 /// Room the companion takes on the line, and the gap after it.
 pub const WIDTH: f64 = 20.0;
@@ -31,6 +31,7 @@ pub const COLOUR: (f64, f64, f64) = (0.965, 0.580, 0.495);
 const INK: (f64, f64, f64) = (0.086, 0.078, 0.082);
 
 const BLINK: f64 = 0.16;
+const LOOK: f64 = 0.32;
 /// Asleep, a "z" floats up now and then for this long, then it just sleeps.
 const DREAM_FOR: f64 = 90.0;
 const Z_EVERY: f64 = 4.5;
@@ -96,8 +97,10 @@ pub struct Pose {
 }
 
 pub struct Mascot {
-    look_x: Spring,
-    look_y: Spring,
+    /// where the eyes look: minimum-jerk moves, done in a third of a
+    /// second (a spring's long tail kept the island drawing)
+    look_x: Quintic,
+    look_y: Quintic,
     asleep: Spring,
     rng: u64,
     next_blink: Time,
@@ -137,13 +140,13 @@ impl Mascot {
     pub fn new(now: Time) -> Self {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64);
         let mut m = Mascot {
-            look_x: Spring::new(0.0, 0.32, 0.72),
-            look_y: Spring::new(0.0, 0.32, 0.72),
+            look_x: Quintic::at_rest(0.0, LOOK),
+            look_y: Quintic::at_rest(0.0, LOOK),
             asleep: Spring::new(0.0, 0.9, 1.0),
             rng: seed | 1,
             next_blink: now + 2.0,
             blink: None,
-            next_glance: now + 5.0,
+            next_glance: now + 12.0,
             reaction: None,
             pointer: false,
             idle: false,
@@ -256,7 +259,7 @@ impl Mascot {
                 changed = true;
             }
             let back = self.look_x.target().abs() > 0.1 || self.look_y.target().abs() > 0.1;
-            self.next_glance = now + if back { self.uniform(0.9, 2.2) } else { self.uniform(5.0, 11.0) };
+            self.next_glance = now + if back { self.uniform(1.0, 2.4) } else { self.uniform(12.0, 30.0) };
         }
         changed
     }
@@ -299,8 +302,8 @@ impl Mascot {
             lift: 0.0,
             scale_x: 1.0,
             scale_y: 1.0,
-            lean: 0.07 * self.look_x.value(now),
-            look: (self.look_x.value(now), self.look_y.value(now)),
+            lean: 0.07 * self.look_x.state(now).x,
+            look: (self.look_x.state(now).x, self.look_y.state(now).x),
             open: 1.0,
             smile: 0.0,
             eye_scale: 1.0,
