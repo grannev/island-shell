@@ -7021,7 +7021,7 @@ mod bar_look {
             island.bar.battery = Some(crate::bar::Battery { percent: 84, charging: false, remaining: None });
             island.bar.details = Some(crate::bar::Details { disk_free: "118G".into(), cpu: 7, memory_gb: 3.4, memory_total_gb: 16.0 });
             island.bar.set_drawer(drawer);
-            island.bar.tray = vec![crate::bar::TrayIcon { id: "vpn".into(), icon: None, has_menu: true, item_is_menu: false, title: "VPN".into() }];
+            island.bar.tray = vec![crate::bar::TrayIcon { id: "vpn".into(), icon: Some(cairo::ImageSurface::create(cairo::Format::ARgb32, 27, 27).unwrap()), has_menu: true, item_is_menu: false, title: "VPN".into() }];
             if drawer {
                 use crate::tray::MenuEntry;
                 let e = |id, label: &str, enabled| MenuEntry { id, label: label.into(), enabled, ..MenuEntry::default() };

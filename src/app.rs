@@ -2418,6 +2418,12 @@ impl App {
                     PointerEventKind::Motion { .. } if self.island.bar.tug_to(x, y, now) => {
                         changed = true;
                     }
+                    // gone off the surface (its last place was over the
+                    // bar): nothing stays lit
+                    PointerEventKind::Leave { .. } => {
+                        changed |= self.island.bar.hover(None, now);
+                        changed |= self.island.bar.menu_hover(-1.0, -1.0);
+                    }
                     PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                         let item = self.island.bar.item_at(x, y);
                         changed |= self.island.bar.hover(item, now);
@@ -3074,10 +3080,17 @@ impl TouchHandler for App {
         let reveal = !grab && self.island.touch_reveals(x, y, now);
         self.touch_tracks = !grab && self.island.touch_swipes_tracks(x, y);
         // the closed line: a tap is a tap, a drag tugs it
-        let tug = !grab && !reveal && self.island.tuggable(x, y);
+        // (and so are the bar's drops: a finger held and pulled stretches
+        // one, rather than scrolling the workspaces)
+        let tug = !grab && !reveal && (self.island.tuggable(x, y)
+            || self.island.config.bar && self.island.bar.tuggable(x, y).is_some());
         let out = self.gesture.down(id, x, y, grab, reveal, tug, now);
         self.apply_touch(&out);
-        if !grab && !reveal {
+        // a finger resting on a drop may still pull it: no right click comes
+        // of holding it there (but a tray icon's hold is its menu)
+        let on_drop = self.island.config.bar && self.island.bar.tuggable(x, y).is_some()
+            && !matches!(self.island.bar.item_at(x, y), Some(crate::bar::Item::Tray(_)));
+        if !grab && !reveal && !on_drop {
             self.arm_long_press(id);
         }
     }

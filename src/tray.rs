@@ -171,6 +171,9 @@ fn listen(conn: &Connection, host: mpsc::Sender<HostMsg>) {
     }).expect("spawn tray-signals");
 }
 
+/// How often items are checked for a process that has gone.
+const SWEEP: Duration = Duration::from_secs(10);
+
 struct Known {
     bus: String,
     path: String,
@@ -197,11 +200,35 @@ fn host(conn: Connection, items: Arc<Mutex<Vec<String>>>, rx: mpsc::Receiver<Hos
         }).collect();
         let _ = ui.send(BarEvent::Tray(list));
     };
-    for msg in rx {
+    let has_owner = |conn: &Connection, name: &str| {
+        zbus::blocking::fdo::DBusProxy::new(conn).ok()
+            .and_then(|d| d.name_has_owner(name.try_into().ok()?).ok())
+            .unwrap_or(true)
+    };
+    loop {
+        // now and then, items whose process is gone without a word (it
+        // registered and died before its owner change was seen) leave
+        let msg = match rx.recv_timeout(SWEEP) {
+            Ok(msg) => msg,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let dead: Vec<String> = known.iter().filter(|(_, k)| !has_owner(&conn, &k.owner)).map(|(id, _)| id.clone()).collect();
+                if !dead.is_empty() {
+                    for id in dead {
+                        known.retain(|(k, _)| *k != id);
+                        cache.remove(&id);
+                        if let Ok(mut list) = items.lock() { list.retain(|k| *k != id); }
+                        emit(&conn, "StatusNotifierItemUnregistered", &id);
+                    }
+                    publish(&known, &mut cache, &ui);
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
         match msg {
             HostMsg::Registered(bus, path) => {
                 let id = format!("{bus}{path}");
-                if known.iter().any(|(k, _)| *k == id) {
+                if known.iter().any(|(k, _)| *k == id) || !has_owner(&conn, &bus) {
                     continue;
                 }
                 let owner = if bus.starts_with(':') { bus.clone() } else {
@@ -268,7 +295,18 @@ fn read_item(conn: &Connection, id: &str, known: &mut [(String, Known)], loader:
     let theme_path: String = p.get_property("IconThemePath").unwrap_or_default();
     let name: String = p.get_property(if status == "NeedsAttention" { "AttentionIconName" } else { "IconName" }).unwrap_or_default();
     let pixmaps: Vec<(i32, i32, Vec<u8>)> = p.get_property(if status == "NeedsAttention" { "AttentionIconPixmap" } else { "IconPixmap" }).unwrap_or_default();
-    let icon = icon_by_name(loader, &name, &theme_path, px).or_else(|| icon_from_pixmaps(&pixmaps, px)).and_then(Pixels::from_surface);
+    // a pixmap much smaller than the bar draws icons is a blur when grown:
+    // the application's own icon (by its id, as /usr/share/pixmaps keeps
+    // them) is sharper
+    let largest = pixmaps.iter().map(|(w, h, _)| (*w).max(*h)).max().unwrap_or(0);
+    let item_id: String = p.get_property("Id").unwrap_or_default();
+    let by_id = || (!item_id.is_empty() && (largest as f64) < px as f64 * 0.8)
+        .then(|| loader.get_scaled(&item_id, px).or_else(|| loader.get_scaled(&item_id.to_lowercase(), px)))
+        .flatten();
+    let icon = icon_by_name(loader, &name, &theme_path, px)
+        .or_else(by_id)
+        .or_else(|| icon_from_pixmaps(&pixmaps, px))
+        .and_then(Pixels::from_surface);
     Some(TrayItem { id: id.to_string(), title, icon, has_menu: k.menu.is_some(), item_is_menu: k.item_is_menu })
 }
 
@@ -322,13 +360,19 @@ fn argb_surface(w: i32, h: i32, data: &[u8]) -> Option<cairo::ImageSurface> {
     Some(surface)
 }
 
+/// `source` in a `px` square: shrunk to fit with the best filter, never
+/// grown (a small one sits in the middle at its own size, on whole pixels,
+/// sharp rather than blurred).
 fn scaled(source: &cairo::ImageSurface, px: i32) -> Option<cairo::ImageSurface> {
     let target = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
     let cr = cairo::Context::new(&target).ok()?;
-    let k = px as f64 / source.width().max(source.height()).max(1) as f64;
-    cr.translate((px as f64 - source.width() as f64 * k) / 2.0, (px as f64 - source.height() as f64 * k) / 2.0);
+    let k = (px as f64 / source.width().max(source.height()).max(1) as f64).min(1.0);
+    let (w, h) = (source.width() as f64 * k, source.height() as f64 * k);
+    let (x, y) = ((px as f64 - w) / 2.0, (px as f64 - h) / 2.0);
+    cr.translate(if k < 1.0 { x } else { x.floor() }, if k < 1.0 { y } else { y.floor() });
     cr.scale(k, k);
     cr.set_source_surface(source, 0.0, 0.0).ok()?;
+    cr.source().set_filter(cairo::Filter::Best);
     cr.paint().ok()?;
     drop(cr);
     target.flush();

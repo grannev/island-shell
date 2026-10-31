@@ -434,13 +434,19 @@ impl Bar {
             || self.stretch.iter().any(|s| s.is_moving(now))
     }
 
+    /// Which drop a press here would take in the hand (none while a menu
+    /// is up).
+    pub fn tuggable(&self, x: f64, y: f64) -> Option<usize> {
+        if self.menu.is_some() {
+            return None;
+        }
+        self.drops.iter().position(|d| d.is_some_and(|d| inside(Rect { h: HEIGHT, ..d }, x, y)))
+    }
+
     /// Take a drop in the hand (a left press on it, no menu open). What
     /// the press means waits: a pull, or a click on release.
     pub fn tug_press(&mut self, x: f64, y: f64, now: Time) -> bool {
-        if self.menu.is_some() {
-            return false;
-        }
-        let Some(side) = self.drops.iter().position(|d| d.is_some_and(|d| inside(Rect { h: HEIGHT, ..d }, x, y))) else { return false };
+        let Some(side) = self.tuggable(x, y) else { return false };
         self.tug = Some(DropTug { side, from: (x, y), engaged: false, pull: 0.0, velocity: 0.0, at: now });
         true
     }
@@ -599,10 +605,12 @@ impl Bar {
             let width = self.glyphs.battery_target_w() + 2.0 * PAD;
             cells.push((Cell { item: Item::Battery, width }, Some(String::new())));
         }
-        for icon in &self.tray {
+        // (an item with nothing to show takes no room)
+        let tray: Vec<&TrayIcon> = self.tray.iter().filter(|t| t.icon.is_some()).collect();
+        for icon in &tray {
             cells.push((Cell { item: Item::Tray(icon.id.clone()), width: TRAY_ICON + TRAY_SPACING }, None));
         }
-        if !self.tray.is_empty() {
+        if !tray.is_empty() {
             // the tray module's own padding round its icons
             if let Some(last) = cells.last_mut() { last.0.width += 2.0 * PAD - TRAY_SPACING; }
         }
@@ -1157,7 +1165,7 @@ mod tests {
     fn a_tray_menu_hangs_from_the_right_drop_and_chooses() {
         use crate::tray::MenuEntry;
         let mut bar = bar();
-        bar.tray = vec![TrayIcon { id: ":1.5/StatusNotifierItem".into(), icon: None, has_menu: true, item_is_menu: false, title: "T".into() }];
+        bar.tray = vec![TrayIcon { id: ":1.5/StatusNotifierItem".into(), icon: Some(cairo::ImageSurface::create(cairo::Format::ARgb32, 27, 27).unwrap()), has_menu: true, item_is_menu: false, title: "T".into() }];
         settle(&mut bar, 10.0);
         let entry = |id, label: &str| MenuEntry { id, label: label.into(), enabled: true, ..MenuEntry::default() };
         let mut sub = entry(3, "More");
@@ -1182,7 +1190,7 @@ mod tests {
     #[test]
     fn a_workspace_switch_and_a_tray_menu_ripple_the_edge() {
         let mut bar = bar();
-        bar.tray = vec![TrayIcon { id: "vpn".into(), icon: None, has_menu: true, item_is_menu: false, title: "VPN".into() }];
+        bar.tray = vec![TrayIcon { id: "vpn".into(), icon: Some(cairo::ImageSurface::create(cairo::Format::ARgb32, 27, 27).unwrap()), has_menu: true, item_is_menu: false, title: "VPN".into() }];
         settle(&mut bar, 10.0);
         assert_eq!(bar.take_splash(), None, "showing up is not a splash");
         for ws in &mut bar.workspaces { ws.focused = ws.name == "1"; }
