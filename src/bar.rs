@@ -44,6 +44,10 @@ const ELLIPSIS: &str = "\u{100360}";
 const DISK: &str = "\u{1009D8}";
 const CPU: &str = "\u{1009D3}";
 const MEMORY: &str = "\u{1009D6}";
+/// How strongly a switch of workspace and an opening tray menu ripple the
+/// frame's edge (a tugged island's full ripple is 1).
+const SPLASH_WORKSPACE: f64 = 0.35;
+const SPLASH_MENU: f64 = 0.3;
 /// Between a drawn symbol and its text.
 const SYMBOL_GAP: f64 = 5.0;
 
@@ -174,6 +178,11 @@ pub struct Bar {
     menu: Option<Menu>,
     /// the speaker's, keyboard's and battery's symbols
     glyphs: crate::bar_icons::Glyphs,
+    /// something moved in a drop that should ripple the frame's edge: from
+    /// where along it (x) and how strongly
+    splash: Option<(f64, f64)>,
+    /// the focused workspace as last drawn
+    focused: Option<String>,
 }
 
 impl Default for Bar {
@@ -197,6 +206,8 @@ impl Default for Bar {
             drops: [None, None],
             menu: None,
             glyphs: Default::default(),
+            splash: None,
+            focused: None,
         }
     }
 }
@@ -235,7 +246,18 @@ impl Bar {
     }
 
     /// A tray item's menu arrived: open it as a sheet under the item.
+    /// A ripple the bar asks for since it was last asked: (x, strength).
+    pub fn take_splash(&mut self) -> Option<(f64, f64)> {
+        self.splash.take()
+    }
+
     pub fn open_menu(&mut self, id: String, entries: Vec<crate::tray::MenuEntry>, now: Time) {
+        // the menu drops out of the item: a light ripple runs from there
+        if self.menu.is_none() {
+            if let Some((_, r)) = self.slots.iter().find(|(i, _)| *i == Item::Tray(id.clone())) {
+                self.splash = Some((r.x + r.w / 2.0, SPLASH_MENU));
+            }
+        }
         if entries.is_empty() {
             return;
         }
@@ -498,6 +520,12 @@ impl Bar {
             if let Some(f) = focus {
                 let fx = self.focus_x.get_or_insert_with(|| Spring::new(f.x, 0.32, 0.82));
                 fx.set(f.x, now);
+                // another workspace: the pill's arrival ripples the edge
+                let name = self.workspaces.iter().find(|w| w.focused).map(|w| w.name.clone());
+                if self.focused.is_some() && name != self.focused {
+                    self.splash = Some((f.x + f.w / 2.0, SPLASH_WORKSPACE));
+                }
+                self.focused = name;
                 let fw = self.focus_w.get_or_insert_with(|| Spring::new(f.w, 0.32, 0.82));
                 fw.set(f.w, now);
                 let r = Rect { x: fx.value(now), y: f.y, w: fw.value(now).max(0.0), h: f.h };
@@ -853,6 +881,23 @@ mod tests {
         assert!(!bar.menu_open());
         settle(&mut bar, 14.0);
         assert!(bar.menu.is_none(), "folded away");
+    }
+
+    #[test]
+    fn a_workspace_switch_and_a_tray_menu_ripple_the_edge() {
+        let mut bar = bar();
+        bar.tray = vec![TrayIcon { id: "vpn".into(), icon: None, has_menu: true, item_is_menu: false, title: "VPN".into() }];
+        settle(&mut bar, 10.0);
+        assert_eq!(bar.take_splash(), None, "showing up is not a splash");
+        for ws in &mut bar.workspaces { ws.focused = ws.name == "1"; }
+        settle(&mut bar, 12.0);
+        let (x, k) = bar.take_splash().expect("the pill moved");
+        let one = bar.slots.iter().find(|(i, _)| *i == Item::Workspace("1".into())).unwrap().1;
+        assert!(x > one.x && x < one.x + one.w && k > 0.0 && k < 1.0);
+        assert_eq!(bar.take_splash(), None, "once");
+        bar.open_menu("vpn".into(), Vec::new(), 14.0);
+        let (x, _) = bar.take_splash().expect("the menu opened");
+        assert!(x > 1504.0 - 60.0);
     }
 
     #[test]

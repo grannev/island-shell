@@ -30,6 +30,8 @@ const RADIUS: f64 = 14.0;
 const RADIUS_HIDDEN: f64 = 22.0;
 /// The concave fillets where the box meets the top edge of the screen.
 pub const FILLET: f64 = 14.0;
+/// How strongly a new notification ripples the frame's edge.
+const SPLASH_NOTICE: f64 = 0.45;
 const PAD: f64 = 16.0;
 const PAD_HOVER: f64 = 34.0;
 /// Extra horizontal padding when the box has fully sunk into the edge ("drop
@@ -2108,12 +2110,18 @@ impl Island {
                 return;
             }
         }
+        let fresh = self.notice.is_none();
         if self.notice.is_some() {
             // a newer one while the pill is up: the old rolls out through
             // the top, the new one in from below
             self.notice_prev = self.notice.take();
             self.roll.set_at(0.0, now);
             self.roll.set(1.0, now);
+        }
+        // the island swells out of the edge as a drop falls into water: a
+        // ripple runs from it as the pill opens
+        if fresh && self.config.edge_light {
+            self.membrane.ripple(self.island_cx(now), SPLASH_NOTICE, now + PILL_LIGHT_DELAY * 0.5);
         }
         self.notice_progress = Spring::new(note.progress.unwrap_or(0.0), 0.35, 1.0);
         // its colour runs out of the island along the edge; a critical
@@ -5043,7 +5051,14 @@ impl Island {
         self.bar.layout = self.controls.layout.as_deref().map(|l| l.trim_end_matches(" (US)").to_string());
         // a fullscreen window: up into the edge with the island
         self.bar.set_hidden(self.hidden.fullscreen, now);
-        self.bar.draw(cr, renderer, w, self.config.smoothing, now)
+        let frame = self.bar.draw(cr, renderer, w, self.config.smoothing, now);
+        // a workspace switched or a tray menu opened: a ripple from there
+        if let Some((x, strength)) = self.bar.take_splash() {
+            if self.config.edge_light && !self.hidden.fullscreen {
+                self.membrane.ripple(x, strength, now);
+            }
+        }
+        frame
     }
 
     /// Switch the screen off into the island (before locking or sleeping).
