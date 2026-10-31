@@ -1049,6 +1049,8 @@ pub struct Island {
     /// the rim light's shape as last drawn: for which outline, the mask,
     /// and where it sits
     rim_cache: Option<([i64; 9], cairo::ImageSurface, (f64, f64))>,
+    /// the rim light shown (only on the closed line), 0..1
+    rim_shown: Spring,
     /// the surface's centre, as of the last frame drawn
     surface_cx: f64,
     /// the box as last drawn, and its corner radius (None: above the edge)
@@ -1321,6 +1323,7 @@ impl Island {
             membrane: crate::edge::Membrane::default(),
             unread_halo: Spring::new(0.0, 0.45, 1.0),
             rim_cache: None,
+            rim_shown: Spring::new(0.0, 0.18, 1.0),
             surface_cx: 490.0,
             box_geom: None,
             tug_top: None,
@@ -1413,6 +1416,7 @@ impl Island {
             || self.curtain.is_animating(now)
             || self.membrane.is_animating(now)
             || self.unread_halo.is_moving(now)
+            || self.rim_shown.is_moving(now)
             || self.side_hud.is_animating(now)
             || self.config.bar && self.bar.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
@@ -3369,8 +3373,14 @@ impl Island {
         // the rim's light (Do Not Disturb, unread notifications): round the
         // outline exactly as it is filled below — leaning and drawn out
         // while tugged — and under the black
-        let halo = self.halo(now);
-        if !halo.is_empty() {
+        // only on the closed line (tugged too): anything opening puts it
+        // out quickly, its mask kept as it was rather than rebuilt for a
+        // growing sheet
+        let line_only = self.collapsed() && (tugged || y1 - dy <= line_h + 0.5);
+        self.rim_shown.set(if line_only { 1.0 } else { 0.0 }, now);
+        let shown = self.rim_shown.value(now).clamp(0.0, 1.0);
+        let halo: Vec<_> = self.halo(now).into_iter().map(|(c, k)| (c, k * shown)).filter(|h| h.1 > 0.004).collect();
+        if !halo.is_empty() && (line_only || self.rim_cache.is_some()) {
             let (shear, gx0, gx1, gtop, gfillet) = if tugged {
                 let mid = (edge + y1) / 2.0;
                 let k = TUG_LEAN * tug_x / (y1 - edge).max(1.0);
@@ -3379,7 +3389,7 @@ impl Island {
             } else {
                 (None, x0, x1, dy, FILLET)
             };
-            self.draw_rim(cr, renderer.scale(), shear, (gx0, gx1, gtop, y1), r, gfillet, &halo);
+            self.draw_rim(cr, renderer.scale(), shear, (gx0, gx1, gtop, y1), r, gfillet, &halo, line_only);
         }
 
         self.tug_top = None;
@@ -5135,14 +5145,6 @@ impl Island {
         let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
         // the light begins once Touch ID's pill has grown
         self.edge.breathe(waiting.then_some(crate::edge::TOUCH_ID_BLUE), (now).max(self.auth_start + PILL_LIGHT_DELAY));
-        // a running timer is a line round the screen
-        let gauge = self.timer.as_ref().filter(|_| self.config.edge_light).map(|t| crate::edge::Gauge {
-            progress: if t.counts_up() { t.fraction(now) } else { 1.0 - t.fraction(now) },
-            colour: timer_colour(t.kind),
-            running: t.running,
-            comet: t.counts_up(),
-        });
-        self.edge.set_gauge(gauge);
         self.edge.set_ember(if self.low_battery && self.config.edge_light { 0.55 } else { 0.0 });
         // music: the bottom edge in the cover's colour, breathing with the bass
         let ambient = self.song.as_ref().filter(|s| s.playing() && self.config.ambilight).map(|song| {
@@ -5261,6 +5263,12 @@ impl Island {
         self.trace_notch_with(cr, x0, x1, y0, y1, r, FILLET);
     }
 
+    /// Is the island its closed line (no pill, sheet, panel or launcher)?
+    fn collapsed(&self) -> bool {
+        !self.pill_open() && self.launcher.is_none() && self.player.target() < 0.5 && self.editor_panel.target() < 0.5
+            && !self.calendar_open() && self.network_panel.is_none() && !self.timer_page_open()
+    }
+
     /// The rim's lights now: purple for Do Not Disturb, blue for unread
     /// notifications (purple over blue when both); none while it hides.
     fn halo(&self, now: Time) -> Vec<((f64, f64, f64), f64)> {
@@ -5279,10 +5287,12 @@ impl Island {
     /// pixels) while the outline stands still: then a frame of it is one
     /// composite per colour.
     #[allow(clippy::too_many_arguments)]
-    fn draw_rim(&mut self, cr: &Context, scale: f64, shear: Option<cairo::Matrix>, (x0, x1, top, y1): (f64, f64, f64, f64), r: f64, fillet: f64, halo: &[((f64, f64, f64), f64)]) {
+    fn draw_rim(&mut self, cr: &Context, scale: f64, shear: Option<cairo::Matrix>, (x0, x1, top, y1): (f64, f64, f64, f64), r: f64, fillet: f64, halo: &[((f64, f64, f64), f64)], rebuild: bool) {
         let key = [x0, x1, top, y1, r, fillet, shear.map_or(0.0, |m| m.xy()), shear.map_or(0.0, |m| m.x0()), scale]
             .map(|v| (v * 100.0).round() as i64);
-        if self.rim_cache.as_ref().is_none_or(|c| c.0 != key) {
+        // (fading out as a sheet opens: the line's mask as it was, under
+        // the growing black)
+        if rebuild && self.rim_cache.as_ref().is_none_or(|c| c.0 != key) {
             self.rim_cache = rim_mask(scale, shear, (x0, x1, top, y1), r, fillet, self.config.smoothing, |cr| {
                 self.trace_notch_with(cr, x0, x1, top, y1, r, fillet);
             }).map(|m| (key, m.0, m.1));
@@ -7440,6 +7450,8 @@ mod quick_cost {
         let mut island = tests::gallery_island_pub();
         island.controls.volume = Some(0.5);
         island.controls.layout = Some("English (US)".into());
+        // with the rim lit (Do Not Disturb): it must cost nothing as it opens
+        island.set_dnd(std::env::var_os("RIM").is_some(), 0.0);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 1000).unwrap();
         let cr = Context::new(&surface).unwrap();
         cr.scale(1.5, 1.5);
@@ -7522,6 +7534,28 @@ mod halo_look {
     fn halo() {
         std::fs::create_dir_all("target/gallery").unwrap();
         halo_image().write_to_png(&mut std::fs::File::create("target/gallery/halo.png").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_rim_goes_out_while_a_sheet_is_open() {
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 1000).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let mut island = tests::gallery_island_pub();
+        island.set_dnd(true, 0.0);
+        let mut now = 1.0;
+        let mut run = |island: &mut Island, secs: f64, now: &mut f64| {
+            for _ in 0..(secs * 60.0) as usize { island.advance(*now); island.draw(&cr, &renderer, 752.0, *now); *now += 1.0 / 60.0; }
+        };
+        run(&mut island, 1.0, &mut now);
+        assert!(island.rim_shown.value(now) > 0.99, "lit on the closed line");
+        island.open_quick_menu_shortcut(now);
+        run(&mut island, 0.6, &mut now);
+        assert!(island.rim_shown.value(now) < 0.01, "out while the Control Center is open");
+        island.close_quick_menu(now);
+        run(&mut island, 1.5, &mut now);
+        assert!(island.rim_shown.value(now) > 0.99, "back when it has folded");
     }
 
     #[test]

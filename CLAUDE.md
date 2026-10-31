@@ -151,8 +151,9 @@ The timer opens from the island's shortcut menu as Vorssaint's timer page
 scrolls and clicks, iOS round Cancel/Pause while running, Pomodoro phases that
 wait for their start); a running session appears beside the clock; left click
 pauses/resumes, right click opens the page, and Escape closes it.
-`island-shell timer` opens the same page. The ruler's ticks and the alarm are
-sounds (`src/sound.rs`, `pw-play` on a worker; config `timer_sound`): the
+`island-shell timer` opens the same page. The ruler's ticks and the timer's end
+are sounds synthesized in `src/sound.rs` (the end: one soft low chime, G4 then
+D5, played once; `pw-play` on a worker; config `timer_sound`): the
 X1 Titanium's Sensel touchpad has no HID haptics page, so Vorssaint's haptic
 ticks cannot be reproduced on it. The main Waybar has no timer, Wi-Fi or Bluetooth buttons, and its
 ⋯ drawer contains only disk, CPU and memory. `src/connections.rs` owns native connection sheets and their
@@ -193,9 +194,7 @@ by slamming into the screen's sides: the crest piles up,
 the corner there (a drop's fillet or the screen's) swells and shudders; pill waves wait
 `PILL_LIGHT_DELAY` for the pill to open): a notification's colour runs along the top, a
 critical one goes round, Touch ID breathes blue / flashes green / shudders
-red; a running timer is a line growing round the screen clockwise from the
-island (orange, green for Pomodoro breaks; a stopwatch is a comet), and the
-frame flashes when it runs out. Recording's 3-2-1 flashes the frame red
+red; a timer draws nothing round the frame while it runs, and the frame flashes when it runs out. Recording's 3-2-1 flashes the frame red
 (scheduled waves, cancelled with the countdown; nothing stays lit while
 wf-recorder films the overlay); the microphone in use is an orange LED in
 the frame's top-right corner (`edge::mic_led`, drawn after the bezel).
@@ -216,7 +215,9 @@ unread notifications light it blue (`Island::draw_rim`: drawn with the island
 round its very outline — leaning and drawn out while tugged — from an exact
 distance field of its shape through `outline::falloff`, kept as an A8 mask
 while the shape stands still; compact keys `dnd` / `unread` switch them),
-instead of a moon and a dot on its line. Frame light at corners is a cairo
+instead of a moon and a dot on its line; only on the closed line (tugged
+too): anything opening puts it out in ~0.2 s, its mask not rebuilt for a
+growing sheet. Frame light at corners is a cairo
 mesh (slices along the arc × rings into the picture) so its strength changes
 smoothly round a turn; while the island is tugged the frame light runs along
 the top under it instead of round its box. Skipping a

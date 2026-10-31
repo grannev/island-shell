@@ -70,28 +70,8 @@ struct Pulse {
     start: Time,
 }
 
-/// A timer drawn as a line round the screen, clockwise from the island.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Gauge {
-    /// how far round, 0..1 (a countdown's time gone; a stopwatch's sweep
-    /// through the minute)
-    pub progress: f64,
-    pub colour: Rgb,
-    /// paused: the line dims
-    pub running: bool,
-    /// a stopwatch: a comet with a fading tail instead of a growing line
-    pub comet: bool,
-}
-
 /// How far along the edges a low battery's red reaches from the corners.
 const EMBER_REACH: f64 = 70.0;
-
-/// How bright the gauge's line is, and its head.
-const GAUGE_LINE: f64 = 0.5;
-const GAUGE_HEAD: f64 = 0.5;
-const GAUGE_HEAD_LEN: f64 = 48.0;
-/// A comet's tail, as a share of the way round.
-const COMET_TAIL: f64 = 0.22;
 
 /// The island's fillets where it hangs from the screen's edge.
 const ISLAND_FILLET: f64 = 14.0;
@@ -104,7 +84,6 @@ pub struct Edge {
     /// the bar's drops in the top corners (left, right): the light rounds
     /// them
     drops: [Option<crate::outline::Drop>; 2],
-    gauge: Option<Gauge>,
     /// the bottom corners smouldering red (low battery), how strongly
     ember: f64,
     /// music's light along the bottom edge: the cover's colour, how bright
@@ -157,11 +136,6 @@ impl Edge {
         self.drops = drops;
     }
 
-    /// Show (or take away) the timer's line; it is still between updates.
-    pub fn set_gauge(&mut self, gauge: Option<Gauge>) {
-        self.gauge = gauge;
-    }
-
     /// Light the bottom edge in the cover's colour (None: dark).
     pub fn set_ambient(&mut self, ambient: Option<(Rgb, f64)>) {
         self.ambient = ambient.filter(|a| a.1 > 0.005);
@@ -185,7 +159,7 @@ impl Edge {
         if self.breath.is_some_and(|(_, _, end)| end.is_some_and(|e| now - e >= BREATH_FADE)) {
             self.breath = None;
         }
-        if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none()
+        if self.pulses.is_empty() && self.breath.is_none()
             && self.ember <= 0.0 && self.ambient.is_none() {
             return Vec::new();
         }
@@ -221,9 +195,6 @@ impl Edge {
                 Side::Left | Side::Right => strength * 0.55 * ((t - 0.6 * h) / (0.4 * h)).clamp(0.0, 1.0),
                 Side::Top => 0.0,
             });
-        }
-        if let Some(g) = self.gauge {
-            painted.extend(paint_gauge(cr, &outline, &g));
         }
         for p in &self.pulses {
             if p.wave == Wave::Rise {
@@ -294,27 +265,6 @@ impl Edge {
         }
         painted
     }
-}
-
-/// The timer's line along the loop, clockwise from the island as far as its
-/// progress, brighter at the head; or a stopwatch's comet.
-fn paint_gauge(cr: &Context, outline: &crate::outline::Outline, g: &Gauge) -> Vec<Rect> {
-    let len = outline.len;
-    let head = g.progress.clamp(0.0, 1.0) * len;
-    let dim = if g.running { 1.0 } else { 0.45 };
-    outline.paint(cr, g.colour, &|s| {
-        let behind = if g.comet { (head - s).rem_euclid(len) } else { head - s };
-        let line = if g.comet {
-            let k = 1.0 - behind / (COMET_TAIL * len);
-            if (0.0..=1.0).contains(&k) { GAUGE_LINE * k.powf(1.5) } else { 0.0 }
-        } else if behind >= 0.0 {
-            GAUGE_LINE
-        } else {
-            0.0
-        };
-        let tip = if behind >= -STEP && behind <= GAUGE_HEAD_LEN { GAUGE_HEAD * (1.0 - behind.max(0.0) / GAUGE_HEAD_LEN) } else { 0.0 };
-        dim * (line + tip)
-    })
 }
 
 /// The microphone's light: an orange LED in the frame's top-right corner,
@@ -592,30 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn a_timer_grows_round_the_screen_clockwise() {
-        let mut edge = Edge::default();
-        let gauge = |progress| Some(Gauge { progress, colour: (1.0, 0.6, 0.0), running: true, comet: false });
-        // a quarter round (600x400: 2000 px): along the top right and
-        // down the right edge, nothing on the left yet
-        edge.set_gauge(gauge(0.25));
-        let (mut s, rects) = render(&mut edge, 0.0);
-        assert!(!rects.is_empty());
-        assert!(!edge.is_animating(0.0), "a still line costs no frames");
-        assert!(alpha(&mut s, 500, 1) > 20 && alpha(&mut s, 598, 100) > 20);
-        assert_eq!(alpha(&mut s, 100, 1), 0);
-        assert_eq!(alpha(&mut s, 1, 200), 0);
-        // nearly done: all the way round to the island's left
-        edge.set_gauge(gauge(0.97));
-        let (mut s, _) = render(&mut edge, 0.0);
-        assert!(alpha(&mut s, 1, 200) > 20 && alpha(&mut s, 200, 1) > 20);
-        // the gap left before the line meets its own start under the island
-        assert_eq!(alpha(&mut s, 278, 1), 0);
-        edge.set_gauge(None);
-        let (_, rects) = render(&mut edge, 0.0);
-        assert!(rects.is_empty());
-    }
-
-    #[test]
     fn scheduled_waves_wait_and_can_be_called_off() {
         let mut edge = Edge::default();
         edge.schedule(Wave::Flash, FAILURE_RED, 10.0);
@@ -772,43 +698,6 @@ mod bench {
     }
 }
 
-#[cfg(test)]
-mod gauge_gallery {
-    use super::*;
-
-    #[test]
-    #[ignore = "writes target/gallery/edge-gauge.png; set ISLAND_GALLERY=1"]
-    fn gauge_frames() {
-        if std::env::var_os("ISLAND_GALLERY").is_none() { return; }
-        let (w, h, scale) = (1504.0, 1002.0, 0.3);
-        let shots = [(0.15, false, true), (0.5, false, true), (0.9, false, false), (0.4, true, true)];
-        let (fw, fh) = (w * scale, h * scale);
-        let out = cairo::ImageSurface::create(cairo::Format::Rgb24, (fw * 2.0 + 6.0) as i32, (fh * 2.0 + 6.0) as i32).unwrap();
-        let cr = Context::new(&out).unwrap();
-        cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.paint().unwrap();
-        for (i, (progress, comet, running)) in shots.into_iter().enumerate() {
-            let mut edge = Edge::default();
-            let colour = if i == 2 { crate::menu_style::GREEN } else { crate::menu_style::ORANGE };
-            edge.set_gauge(Some(Gauge { progress, colour, running, comet }));
-            cr.save().unwrap();
-            cr.translate((i % 2) as f64 * (fw + 6.0), (i / 2) as f64 * (fh + 6.0));
-            cr.scale(scale, scale);
-            cr.rectangle(0.0, 0.0, w, h);
-            cr.clip();
-            cr.set_source_rgb(0.10, 0.17, 0.22);
-            cr.paint().unwrap();
-            edge.draw(&cr, w, h, w / 2.0, 16.0, 0.0);
-            cr.set_source_rgb(0.0, 0.0, 0.0);
-            cr.rectangle(w / 2.0 - 100.0, 0.0, 200.0, 32.0);
-            cr.fill().unwrap();
-            cr.restore().unwrap();
-        }
-        drop(cr);
-        std::fs::create_dir_all("target/gallery").unwrap();
-        out.write_to_png(&mut std::fs::File::create("target/gallery/edge-gauge.png").unwrap()).unwrap();
-    }
-}
 
 /// The top edge of the frame as a membrane: pulled down after a tugged
 /// island, and carrying ripples out to the corners (a let-go tug, the
