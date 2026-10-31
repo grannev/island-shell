@@ -298,9 +298,12 @@ fn read_item(conn: &Connection, id: &str, known: &mut [(String, Known)], loader:
     // a pixmap much smaller than the bar draws icons is a blur when grown:
     // the application's own icon (by its id, as /usr/share/pixmaps keeps
     // them) is sharper
+    // and a colourless pixmap (a white sign, as AmneziaVPN's) gives way to
+    // the application's own coloured icon when it has one
     let largest = pixmaps.iter().map(|(w, h, _)| (*w).max(*h)).max().unwrap_or(0);
     let item_id: String = p.get_property("Id").unwrap_or_default();
-    let by_id = || (!item_id.is_empty() && (largest as f64) < px as f64 * 0.8)
+    let prefer_app = (largest as f64) < px as f64 * 0.8 || (!pixmaps.is_empty() && pixmaps.iter().all(|(_, _, d)| colourless(d)));
+    let by_id = || (!item_id.is_empty() && prefer_app)
         .then(|| loader.get_scaled(&item_id, px).or_else(|| loader.get_scaled(&item_id.to_lowercase(), px)))
         .flatten();
     let icon = icon_by_name(loader, &name, &theme_path, px)
@@ -335,6 +338,15 @@ fn icon_from_pixmaps(pixmaps: &[(i32, i32, Vec<u8>)], px: i32) -> Option<cairo::
         .min_by_key(|(w, _, _)| if *w >= px { (*w - px, 0) } else { (px - *w, 1) })?;
     let (w, h, data) = best;
     scaled(&argb_surface(*w, *h, data)?, px)
+}
+
+/// Whether a pixmap (ARGB, network byte order) has no colour: every
+/// visible pixel grey.
+fn colourless(data: &[u8]) -> bool {
+    data.chunks_exact(4).filter(|p| p[0] > 24).all(|p| {
+        let (r, g, b) = (p[1] as i32, p[2] as i32, p[3] as i32);
+        (r - g).abs() < 24 && (g - b).abs() < 24 && (r - b).abs() < 24
+    })
 }
 
 /// Pixels in the protocol's ARGB (network byte order) as a cairo surface.
@@ -461,6 +473,13 @@ fn parse_entry(id: i32, props: &HashMap<String, OwnedValue>, children: &[OwnedVa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_white_sign_is_colourless_and_a_coloured_icon_is_not() {
+        let white = [255u8, 250, 250, 250, 0, 9, 200, 30, 120, 230, 230, 228];
+        assert!(colourless(&white), "a transparent pixel's colour does not count");
+        assert!(!colourless(&[255u8, 40, 120, 255]));
+    }
 
     #[test]
     fn pixmaps_become_premultiplied_cairo_pixels() {

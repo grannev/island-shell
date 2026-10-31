@@ -20,7 +20,7 @@ use crate::island::Rect;
 
 /// How far light reaches into the picture, and how it dies away.
 pub const DEPTH: f64 = 18.0;
-const STEP: f64 = 16.0;
+const STEP: f64 = 8.0;
 
 #[derive(Clone, Copy, Debug)]
 enum Piece {
@@ -173,9 +173,8 @@ impl Outline {
                     }
                 }
                 Piece::Arc { cx, cy, r, a0, sweep, outside } => {
-                    let s = strength(s0 + r * sweep.abs() / 2.0);
-                    if s > 0.003 {
-                        lit.push(paint_arc(cr, cx, cy, r, a0, sweep, outside, colour, s));
+                    if let Some(rect) = paint_arc(cr, cx, cy, r, a0, sweep, outside, s0, colour, strength) {
+                        lit.push(rect);
                     }
                 }
             }
@@ -229,25 +228,53 @@ fn paint_line(cr: &Context, x: f64, y: f64, dx: f64, dy: f64, len: f64, s0: f64,
 }
 
 /// A corner: the light dying away from the arc, outside it (convex) or
-/// inside it (concave), in the corner's quarter.
+/// inside it (concave), its strength following `strength` along the arc
+/// (from `s0`) as smoothly as along a straight stretch: a mesh of small
+/// patches, slices along the arc by rings away from it, each corner of a
+/// patch at its own alpha.
 #[allow(clippy::too_many_arguments)]
-fn paint_arc(cr: &Context, cx: f64, cy: f64, r: f64, a0: f64, sweep: f64, outside: bool, colour: (f64, f64, f64), s: f64) -> Rect {
-    let reach = if outside { r + DEPTH } else { r };
-    let gradient = cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, reach);
-    let steps = 10;
-    if outside {
-        gradient.add_color_stop_rgba(0.0, colour.0, colour.1, colour.2, s * falloff(0.0));
-        for i in 0..=steps {
-            let d = DEPTH * i as f64 / steps as f64;
-            gradient.add_color_stop_rgba((r + d) / reach, colour.0, colour.1, colour.2, (s * falloff(d)).clamp(0.0, 1.0));
+fn paint_arc(cr: &Context, cx: f64, cy: f64, r: f64, a0: f64, sweep: f64, outside: bool, s0: f64, colour: (f64, f64, f64), strength: &dyn Fn(f64) -> f64) -> Option<Rect> {
+    let len = r * sweep.abs();
+    let slices = (len / ARC_SLICE).ceil().max(2.0) as usize;
+    let along: Vec<f64> = (0..=slices).map(|j| strength(s0 + len * j as f64 / slices as f64).clamp(0.0, 1.0)).collect();
+    if along.iter().all(|a| *a <= 0.003) {
+        return None;
+    }
+    // rings: distance from the arc into the picture, and the falloff there
+    let depth = if outside { DEPTH } else { r.min(DEPTH) };
+    let rings: Vec<(f64, f64)> = (0..=ARC_RINGS).map(|i| {
+        // finer near the arc, where the light is brightest
+        let d = depth * (i as f64 / ARC_RINGS as f64).powi(2);
+        (if outside { r + d } else { r - d }, falloff(d))
+    }).collect();
+    let mesh = cairo::Mesh::new();
+    let point = |radius: f64, angle: f64| (cx + radius * angle.cos(), cy + radius * angle.sin());
+    for j in 0..slices {
+        let (b0, b1) = (a0 + sweep * j as f64 / slices as f64, a0 + sweep * (j + 1) as f64 / slices as f64);
+        let (s_a, s_b) = (along[j], along[j + 1]);
+        if s_a <= 0.003 && s_b <= 0.003 {
+            continue;
         }
-    } else {
-        for i in (0..=steps).rev() {
-            let d = r * i as f64 / steps as f64;
-            gradient.add_color_stop_rgba((r - d) / reach.max(1e-6), colour.0, colour.1, colour.2, (s * falloff(d)).clamp(0.0, 1.0));
+        for w in rings.windows(2) {
+            let ((r_in, f_in), (r_out, f_out)) = (w[0], w[1]);
+            if s_a.max(s_b) * f_in.max(f_out) < 0.002 {
+                continue;
+            }
+            mesh.begin_patch();
+            let p = [point(r_in, b0), point(r_out, b0), point(r_out, b1), point(r_in, b1)];
+            mesh.move_to(p[0].0, p[0].1);
+            for q in &p[1..] {
+                mesh.line_to(q.0, q.1);
+            }
+            use cairo::MeshCorner::{MeshCorner0, MeshCorner1, MeshCorner2, MeshCorner3};
+            for (corner, alpha) in [(MeshCorner0, s_a * f_in), (MeshCorner1, s_a * f_out), (MeshCorner2, s_b * f_out), (MeshCorner3, s_b * f_in)] {
+                mesh.set_corner_color_rgba(corner, colour.0, colour.1, colour.2, alpha.clamp(0.0, 1.0));
+            }
+            mesh.end_patch();
         }
     }
-    // the quarter the corner turns through
+    // what it covers: the corner's quarter
+    let reach = if outside { r + DEPTH } else { r };
     let mid = a0 + sweep / 2.0;
     let (sx, sy) = (mid.cos().signum(), mid.sin().signum());
     let quarter = Rect {
@@ -258,13 +285,17 @@ fn paint_arc(cr: &Context, cx: f64, cy: f64, r: f64, a0: f64, sweep: f64, outsid
     };
     let _ = FRAC_PI_2;
     cr.save().unwrap();
+    let _ = cr.set_source(&mesh);
     cr.rectangle(quarter.x, quarter.y, quarter.w, quarter.h);
-    cr.clip();
-    let _ = cr.set_source(&gradient);
-    let _ = cr.paint();
+    let _ = cr.fill();
     cr.restore().unwrap();
-    quarter
+    Some(quarter)
 }
+
+/// The corners' mesh: a slice per this much of the arc, and rings into
+/// the picture.
+const ARC_SLICE: f64 = 4.0;
+const ARC_RINGS: usize = 8;
 
 /// Rows of the falloff image (over `DEPTH`).
 const FALLOFF_N: usize = 48;

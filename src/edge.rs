@@ -93,9 +93,6 @@ const GAUGE_HEAD_LEN: f64 = 48.0;
 /// A comet's tail, as a share of the way round.
 const COMET_TAIL: f64 = 0.22;
 
-/// Over how much of the edge the island's rim light fades out past its
-/// fillets.
-const HALO_FADE: f64 = 22.0;
 /// The island's fillets where it hangs from the screen's edge.
 const ISLAND_FILLET: f64 = 14.0;
 
@@ -110,9 +107,6 @@ pub struct Edge {
     gauge: Option<Gauge>,
     /// the bottom corners smouldering red (low battery), how strongly
     ember: f64,
-    /// the island's own rim lit (Do Not Disturb purple, unread blue): each
-    /// colour and how strongly
-    halo: Vec<(Rgb, f64)>,
     /// music's light along the bottom edge: the cover's colour, how bright
     ambient: Option<(Rgb, f64)>,
     /// a continuous wave (Touch ID waiting): its colour, since when, and
@@ -173,12 +167,6 @@ impl Edge {
         self.ambient = ambient.filter(|a| a.1 > 0.005);
     }
 
-    /// Light the island's own rim — round its lower edge, up its sides and
-    /// its fillets, and no further — in each colour as strongly as given.
-    pub fn set_halo(&mut self, halo: Vec<(Rgb, f64)>) {
-        self.halo = halo.into_iter().filter(|h| h.1 > 0.004).collect();
-    }
-
     /// The bottom corners' red glow (0 = none); it stands still.
     pub fn set_ember(&mut self, strength: f64) {
         self.ember = strength;
@@ -198,7 +186,7 @@ impl Edge {
             self.breath = None;
         }
         if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none()
-            && self.ember <= 0.0 && self.halo.is_empty() && self.ambient.is_none() {
+            && self.ember <= 0.0 && self.ambient.is_none() {
             return Vec::new();
         }
         // the frame's inner edge, round the island and the bar's drops
@@ -300,17 +288,6 @@ impl Edge {
             let wave: Vec<(f64, f64)> = front(ease_out(phase) * far, strength * (1.0 - phase * 0.6), 0.0)
                 .into_iter().map(|(d, a)| (d, a.max(rim))).chain([(far + SOFT, rim)]).collect();
             painted.extend(outline.paint(cr, colour, &|s| strength_at(&wave, both_ways(s))));
-        }
-        // the island's rim: as far round as the island itself goes (half
-        // its lower edge, a corner, a side and a fillet each way), fading
-        // out where its fillet meets the top
-        if let Some(i) = island.filter(|_| !self.halo.is_empty()) {
-            use std::f64::consts::FRAC_PI_2;
-            let r = i.radius.min(i.rect.w / 2.0).min(i.rect.h / 2.0);
-            let end = (i.rect.w / 2.0 - r) + FRAC_PI_2 * r + (i.rect.h - r - i.fillet).max(0.0) + FRAC_PI_2 * i.fillet;
-            for &(colour, k) in &self.halo {
-                painted.extend(outline.paint(cr, colour, &|s| k * (1.0 - smooth((both_ways(s) - end + HALO_FADE) / HALO_FADE))));
-            }
         }
         if lit {
             painted.extend(strips(w, h));
@@ -693,23 +670,6 @@ mod tests {
         edge.set_ambient(Some(((1.0, 0.2, 0.2), 0.5)));
         let (mut s, _) = render(&mut edge, 1.0);
         assert!(alpha(&mut s, 300, 399) > 20 && alpha(&mut s, 300, 0) == 0);
-    }
-
-    #[test]
-    fn the_halo_lights_the_islands_rim_only() {
-        let mut edge = Edge::default();
-        edge.set_island(Some((Rect { x: 250.0, y: 0.0, w: 100.0, h: 32.0 }, 14.0)));
-        edge.set_halo(vec![((0.75, 0.35, 0.95), 1.0)]);
-        let (mut s, rects) = render(&mut edge, 0.0);
-        assert!(!rects.is_empty());
-        // under the island and beside it, lit; along the top far from it,
-        // and the rest of the frame, dark
-        assert!(alpha(&mut s, 300, 36) > 40, "under it");
-        assert!(alpha(&mut s, 354, 16) > 40, "beside it");
-        assert_eq!(alpha(&mut s, 450, 2), 0, "the top further on");
-        assert_eq!(alpha(&mut s, 2, 200), 0, "the sides");
-        edge.set_halo(Vec::new());
-        assert!(render(&mut edge, 1.0).1.is_empty());
     }
 
     #[test]
@@ -1376,5 +1336,73 @@ mod membrane_cost {
         }
         times.sort_by(f64::total_cmp);
         println!("membrane frame: median={:.3}ms p95={:.3}ms max={:.3}ms", times[times.len() / 2], times[times.len() * 95 / 100], times[times.len() - 1]);
+    }
+}
+
+#[cfg(test)]
+mod edge_cost {
+    use super::*;
+
+    /// What a frame of light round the whole screen costs at 1.5×
+    /// (`cargo test --release edge_frame_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn edge_frame_cost() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 1504).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let mut edge = Edge::default();
+        edge.set_island(Some((Rect { x: 640.0, y: 0.0, w: 224.0, h: 32.0 }, 14.0)));
+        edge.set_drops([Some(crate::outline::Drop { w: 140.0, h: 32.0 }), Some(crate::outline::Drop { w: 420.0, h: 32.0 })]);
+        edge.breathe(Some(TOUCH_ID_BLUE), 0.0);
+        let mut times = Vec::new();
+        for i in 0..60 {
+            let now = 1.0 + i as f64 / 60.0;
+            let t = std::time::Instant::now();
+            edge.draw(&cr, 1504.0, 1002.0, 752.0, 16.0, now);
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!("edge frame: median={:.3}ms p95={:.3}ms max={:.3}ms", times[30], times[57], times[59]);
+    }
+}
+
+#[cfg(test)]
+mod wave_tail_look {
+    use super::*;
+
+    /// A notification's wave dying away round the island's and the right
+    /// drop's turns, close up.
+    #[test]
+    #[ignore = "writes target/gallery/wave-tail.png"]
+    fn wave_tail() {
+        let (w, h) = (1504.0, 1002.0);
+        let times = [0.25, 0.55, 0.85, 1.1];
+        let (cw, ch, zoom) = (300.0, 60.0, 3.0);
+        let out = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom) as i32, (ch * zoom * times.len() as f64) as i32).unwrap();
+        let cr = Context::new(&out).unwrap();
+        for (row, t) in times.into_iter().enumerate() {
+            let mut edge = Edge::default();
+            edge.set_island(Some((Rect { x: 640.0, y: 0.0, w: 224.0, h: 32.0 }, 14.0)));
+            edge.set_drops([None, Some(crate::outline::Drop { w: 420.0, h: 32.0 })]);
+            edge.pulse(Wave::Top, TOUCH_ID_BLUE, 0.0);
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * ch * zoom);
+            cr.rectangle(0.0, 0.0, cw * zoom, ch * zoom - 3.0);
+            cr.clip();
+            cr.scale(zoom, zoom);
+            cr.translate(-(864.0 - 40.0), 0.0);
+            cr.set_source_rgb(0.10, 0.17, 0.22);
+            cr.paint().unwrap();
+            edge.draw(&cr, w, h, 752.0, 16.0, t);
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            crate::drop::notch(&cr, 640.0, 864.0, 0.0, 32.0, 14.0, 14.0, 0.0);
+            let _ = cr.fill();
+            crate::drop::corner(&cr, w, true, 420.0, 32.0, 14.0, 14.0, 0.0);
+            let _ = cr.fill();
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        out.write_to_png(&mut std::fs::File::create("target/gallery/wave-tail.png").unwrap()).unwrap();
     }
 }

@@ -150,6 +150,147 @@ const PILL_LIGHT_DELAY: f64 = 0.25;
 const HALO_DND: (f64, f64, f64) = (0xBF as f64 / 255.0, 0x5A as f64 / 255.0, 0xF2 as f64 / 255.0);
 const HALO_UNREAD: (f64, f64, f64) = (0.40, 0.82, 1.0);
 const HALO_STRENGTH: f64 = 0.85;
+/// Over how much of the top edge the rim's light fades out past a fillet.
+const RIM_FEATHER: f64 = 8.0;
+
+/// The rim light's shape for an outline traced by `trace` (box `x0..x1`,
+/// `top..y1`, fillets `fillet` with `smoothing`, under `shear`): an A8
+/// image on whole device pixels at `scale`, and where its corner sits
+/// (logical).
+#[allow(clippy::too_many_arguments)]
+fn rim_mask(scale: f64, shear: Option<cairo::Matrix>, (x0, x1, top, y1): (f64, f64, f64, f64), _r: f64, fillet: f64, smoothing: f64,
+    trace: impl Fn(&Context)) -> Option<(cairo::ImageSurface, (f64, f64))>
+{
+    let reach = crate::outline::DEPTH;
+    // where the fillets begin on the top edge (with their smoothing)
+    let p = (1.0 + smoothing) * fillet;
+    let lean = shear.map_or(0.0, |m| m.xy() * (y1 - top)).abs();
+    let (left, up) = (((x0 - p - reach - lean - 2.0) * scale).floor(), (top.max(0.0) * scale).floor());
+    let (right, down) = (((x1 + p + reach + lean + 2.0) * scale).ceil(), ((y1 + reach + 2.0) * scale).ceil());
+    if right - left < 1.0 || down - up < 1.0 {
+        return None;
+    }
+    let (w, h) = ((right - left) as usize, (down - up) as usize);
+    let mut image = cairo::ImageSurface::create(cairo::Format::A8, w as i32, h as i32).ok()?;
+    // the island's shape, then each pixel's distance from it (exact, in
+    // two passes), then the frame light's falloff over that distance:
+    // smooth at every pixel, and cheap enough to redo as it changes shape
+    {
+        let cr = Context::new(&image).ok()?;
+        cr.scale(scale, scale);
+        cr.translate(-left / scale, -up / scale);
+        if let Some(m) = shear { cr.transform(m); }
+        trace(&cr);
+        cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+        let _ = cr.fill();
+    }
+    image.flush();
+    {
+        let stride = image.stride() as usize;
+        let mut data = image.data().ok()?;
+        let mut inside = vec![false; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                inside[y * w + x] = data[y * stride + x] >= 128;
+            }
+        }
+        let dist = distance_field(&inside, w, h);
+        // the falloff for each (whole) squared distance it reaches: from the
+        // pixel's centre to the outline, half a pixel in
+        let reach = ((crate::outline::DEPTH * scale + 1.0).powi(2)).ceil() as usize;
+        let table: Vec<u8> = (0..=reach).map(|d2| {
+            let d = ((d2 as f64).sqrt() - 0.5).max(0.0) / scale;
+            (255.0 * crate::outline::falloff(d)).round() as u8
+        }).collect();
+        for y in 0..h {
+            for x in 0..w {
+                let d2 = dist[y * w + x] as usize;
+                data[y * stride + x] = table.get(d2).copied().unwrap_or(0);
+            }
+        }
+    }
+    image.mark_dirty();
+    {
+        let cr = Context::new(&image).ok()?;
+        cr.scale(scale, scale);
+        cr.translate(-left / scale, -up / scale);
+        // nothing on the top edge beyond the fillets, rising to full where
+        // the fillets end below it
+        if let Some(m) = shear { cr.transform(m); }
+        cr.set_operator(cairo::Operator::DestIn);
+        let (l, rr) = (x0 - p - RIM_FEATHER, x1 + p + RIM_FEATHER);
+        let across = cairo::LinearGradient::new(l, 0.0, rr, 0.0);
+        let f = RIM_FEATHER / (rr - l);
+        for (at, a) in [(0.0, 0.0), (f, 1.0), (1.0 - f, 1.0), (1.0, 0.0)] {
+            across.add_color_stop_rgba(at, 0.0, 0.0, 0.0, a);
+        }
+        let _ = cr.set_source(&across);
+        let _ = cr.paint();
+        let down_ramp = cairo::LinearGradient::new(0.0, top, 0.0, top + p);
+        down_ramp.add_color_stop_rgba(0.0, 0.0, 0.0, 0.0, 0.0);
+        down_ramp.add_color_stop_rgba(1.0, 0.0, 0.0, 0.0, 1.0);
+        let _ = cr.set_source(&down_ramp);
+        let _ = cr.paint();
+    }
+    image.flush();
+    Some((image, (left / scale, up / scale)))
+}
+
+/// Squared distances from each pixel of a `w` × `h` grid to the nearest
+/// `inside` one (Felzenszwalb and Huttenlocher's exact transform: a pass
+/// down the columns, then along the rows).
+fn distance_field(inside: &[bool], w: usize, h: usize) -> Vec<f32> {
+    const FAR: f32 = 1e9;
+    let mut grid: Vec<f32> = inside.iter().map(|i| if *i { 0.0 } else { FAR }).collect();
+    let n = w.max(h);
+    let (mut f, mut out) = (vec![0.0f32; n], vec![0.0f32; n]);
+    let (mut v, mut z) = (vec![0usize; n], vec![0.0f32; n + 1]);
+    for x in 0..w {
+        for y in 0..h { f[y] = grid[y * w + x]; }
+        lower_envelope(&f[..h], &mut out[..h], &mut v, &mut z);
+        for y in 0..h { grid[y * w + x] = out[y]; }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&grid[y * w..(y + 1) * w]);
+        lower_envelope(&f[..w], &mut out[..w], &mut v, &mut z);
+        grid[y * w..(y + 1) * w].copy_from_slice(&out[..w]);
+    }
+    grid
+}
+
+/// One dimension of the distance transform: `out[q]` = min over p of
+/// (q − p)² + `f[p]`, from the lower envelope of those parabolas.
+fn lower_envelope(f: &[f32], out: &mut [f32], v: &mut [usize], z: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    for q in 1..n {
+        let fq = f[q] + (q * q) as f32;
+        let mut s;
+        loop {
+            let p = v[k];
+            s = (fq - (f[p] + (p * p) as f32)) / (2.0 * (q - p) as f32);
+            if s <= z[k] && k > 0 { k -= 1 } else { break }
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f32::INFINITY;
+    }
+    k = 0;
+    for (q, o) in out.iter_mut().enumerate() {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let d = q as f32 - v[k] as f32;
+        *o = d * d + f[v[k]];
+    }
+}
 
 /// How far a downward tug pulls the frame's top edge down with it.
 const TUG_SAG: f64 = 0.22;
@@ -905,6 +1046,9 @@ pub struct Island {
     /// the frame thickened for Focus / Do Not Disturb, 0..1
     /// the island's rim lit blue while notifications wait unread
     unread_halo: Spring,
+    /// the rim light's shape as last drawn: for which outline, the mask,
+    /// and where it sits
+    rim_cache: Option<([i64; 9], cairo::ImageSurface, (f64, f64))>,
     /// the surface's centre, as of the last frame drawn
     surface_cx: f64,
     /// the box as last drawn, and its corner radius (None: above the edge)
@@ -1176,6 +1320,7 @@ impl Island {
             low_battery: false,
             membrane: crate::edge::Membrane::default(),
             unread_halo: Spring::new(0.0, 0.45, 1.0),
+            rim_cache: None,
             surface_cx: 490.0,
             box_geom: None,
             tug_top: None,
@@ -3221,6 +3366,22 @@ impl Island {
             self.player_rect = Some(Rect { x: x0, y: dy, w: x1 - x0, h: y1 - dy });
         }
 
+        // the rim's light (Do Not Disturb, unread notifications): round the
+        // outline exactly as it is filled below — leaning and drawn out
+        // while tugged — and under the black
+        let halo = self.halo(now);
+        if !halo.is_empty() {
+            let (shear, gx0, gx1, gtop, gfillet) = if tugged {
+                let mid = (edge + y1) / 2.0;
+                let k = TUG_LEAN * tug_x / (y1 - edge).max(1.0);
+                let sag = if self.config.edge_light { TUG_SAG * tug_y.max(0.0) } else { 0.0 };
+                (Some(cairo::Matrix::new(1.0, 0.0, k, 1.0, -k * mid, 0.0)), x0 + thin, x1 - thin, edge + sag, FILLET + 0.45 * tug_y.max(0.0))
+            } else {
+                (None, x0, x1, dy, FILLET)
+            };
+            self.draw_rim(cr, renderer.scale(), shear, (gx0, gx1, gtop, y1), r, gfillet, &halo);
+        }
+
         self.tug_top = None;
         if tugged {
             // the top lags behind the bottom: a shear about the middle;
@@ -3763,6 +3924,13 @@ impl Island {
 
         let top = edge.min(dy).max(0.0);
         let mut bounds = Rect { x: x0 - FILLET, y: top, w: x1 - x0 + 2.0 * FILLET, h: y1 - top };
+        if !halo.is_empty() {
+            // the rim's light reaches out round it
+            let reach = crate::outline::DEPTH + (self.config.smoothing + 1.0) * FILLET + 4.0;
+            bounds.x -= reach;
+            bounds.w += 2.0 * reach;
+            bounds.h += crate::outline::DEPTH + 4.0;
+        }
         if tugged {
             // the leaning top and the drawn-out fillets reach further out
             let reach = TUG_LEAN * tug_x.abs() + 0.45 * tug_y.max(0.0) + 2.0;
@@ -4959,7 +5127,9 @@ impl Island {
     pub fn draw_edges(&mut self, cr: &Context, w: f64, h: f64, cx: f64, now: Time) -> Vec<Rect> {
         // the light comes out of the island as it was last drawn, and rounds
         // the bar's drops
-        self.edge.set_island(self.box_geom.filter(|_| !self.hidden.any() || self.pill.state(now).x > 0.05));
+        // (not while tugged: leaning and drawn out, it is no box; the light
+        // then runs along the top under it, and the black covers it)
+        self.edge.set_island(self.box_geom.filter(|_| (!self.hidden.any() || self.pill.state(now).x > 0.05) && self.tug_top.is_none()));
         self.edge.set_drops(if self.config.bar { self.bar.drop_sizes() } else { [None, None] });
         // Touch ID breathes round the screen while it waits for a finger
         let waiting = matches!(self.auth, Some(Auth::Waiting(_))) && self.config.edge_light;
@@ -4984,12 +5154,9 @@ impl Island {
         // Focus: the frame gathers the screen in a little
         // the island's own rim: purple for Do Not Disturb, blue for unread
         // notifications (purple over blue when both); not while it hides
+        // (drawn with the island itself, round its very outline)
         let shown = self.config.compact;
-        let up = self.config.edge_light && !self.is_hidden();
-        self.unread_halo.set(if up && shown.unread && self.center.unread() > 0 { 1.0 } else { 0.0 }, now);
-        let dnd = if up && shown.dnd { self.dnd_glow.value(now).clamp(0.0, 1.0) } else { 0.0 };
-        let unread = self.unread_halo.value(now).clamp(0.0, 1.0) * (1.0 - dnd);
-        self.edge.set_halo(vec![(HALO_DND, HALO_STRENGTH * dnd), (HALO_UNREAD, HALO_STRENGTH * unread)]);
+        self.unread_halo.set(if shown.unread && self.center.unread() > 0 { 1.0 } else { 0.0 }, now);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
         let mut painted = self.edge.draw(cr, w, h, cx, self.config.screen_corners, now);
         painted.extend(self.curtain.draw_shutter(cr, w, h, self.config.screen_corners, now));
@@ -5092,6 +5259,43 @@ impl Island {
     /// (`Corner::trace` mirrored).
     fn trace_notch(&self, cr: &Context, x0: f64, x1: f64, y0: f64, y1: f64, r: f64) {
         self.trace_notch_with(cr, x0, x1, y0, y1, r, FILLET);
+    }
+
+    /// The rim's lights now: purple for Do Not Disturb, blue for unread
+    /// notifications (purple over blue when both); none while it hides.
+    fn halo(&self, now: Time) -> Vec<((f64, f64, f64), f64)> {
+        let shown = self.config.compact;
+        let up = self.config.edge_light && !self.is_hidden();
+        let dnd = if up && shown.dnd { self.dnd_glow.value(now).clamp(0.0, 1.0) } else { 0.0 };
+        let unread = if up { self.unread_halo.value(now).clamp(0.0, 1.0) * (1.0 - dnd) } else { 0.0 };
+        [(HALO_DND, HALO_STRENGTH * dnd), (HALO_UNREAD, HALO_STRENGTH * unread)].into_iter().filter(|h| h.1 > 0.004).collect()
+    }
+
+    /// Light the island's rim: its outline (box `x0..x1`, `top..y1`, corners
+    /// `r`, fillets `fillet`, under `shear`) stroked in layers that together
+    /// die away from it as the frame's light does, fading out up its
+    /// fillets to the top edge. Drawn under the black, which covers the
+    /// inner half. The light's shape is kept (an A8 mask on whole device
+    /// pixels) while the outline stands still: then a frame of it is one
+    /// composite per colour.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_rim(&mut self, cr: &Context, scale: f64, shear: Option<cairo::Matrix>, (x0, x1, top, y1): (f64, f64, f64, f64), r: f64, fillet: f64, halo: &[((f64, f64, f64), f64)]) {
+        let key = [x0, x1, top, y1, r, fillet, shear.map_or(0.0, |m| m.xy()), shear.map_or(0.0, |m| m.x0()), scale]
+            .map(|v| (v * 100.0).round() as i64);
+        if self.rim_cache.as_ref().is_none_or(|c| c.0 != key) {
+            self.rim_cache = rim_mask(scale, shear, (x0, x1, top, y1), r, fillet, self.config.smoothing, |cr| {
+                self.trace_notch_with(cr, x0, x1, top, y1, r, fillet);
+            }).map(|m| (key, m.0, m.1));
+        }
+        let Some((_, mask, (dx, dy))) = &self.rim_cache else { return };
+        cr.save().unwrap();
+        cr.translate(*dx, *dy);
+        cr.scale(1.0 / scale, 1.0 / scale);
+        for &(colour, k) in halo {
+            cr.set_source_rgba(colour.0, colour.1, colour.2, k);
+            let _ = cr.mask_surface(mask, 0.0, 0.0);
+        }
+        cr.restore().unwrap();
     }
 
     /// The notch outline with fillets of radius `fillet`.
@@ -7185,6 +7389,48 @@ mod ripple_look {
 mod quick_cost {
     use super::*;
 
+    /// The rim's mask rebuilt (the island changing shape under it).
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn rim_rebuild_cost() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+        let _ = surface;
+        let mut times = Vec::new();
+        for i in 0..40 {
+            let t = std::time::Instant::now();
+            let _ = rim_mask(1.5, None, (640.0 + i as f64 * 0.3, 864.0, 0.0, 32.0), 14.0, 14.0, 0.6, |cr| crate::drop::notch(cr, 640.0 + i as f64 * 0.3, 864.0, 0.0, 32.0, 14.0, 14.0, 0.6));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!("rim rebuild: median={:.3}ms max={:.3}ms", times[20], times[39]);
+    }
+
+    /// A compact island's frame with and without its rim lit
+    /// (`cargo test --release rim_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn rim_cost() {
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        for dnd in [false, true, false, true] {
+            let mut island = tests::gallery_island_pub();
+            island.set_dnd(dnd, 0.0);
+            let mut now = 10.0;
+            for _ in 0..30 { island.advance(now); island.draw(&cr, &renderer, 752.0, now); now += 1.0 / 60.0; }
+            let mut times = Vec::new();
+            for _ in 0..60 {
+                let t = std::time::Instant::now();
+                island.draw(&cr, &renderer, 752.0, now);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                now += 1.0 / 60.0;
+            }
+            times.sort_by(f64::total_cmp);
+            println!("island frame rim={dnd}: median={:.3}ms max={:.3}ms", times[30], times[59]);
+        }
+    }
+
     /// The Control Center's first opening against later ones, at 1.5×
     /// (`cargo test --release quick_first_open_cost -- --ignored --nocapture`).
     #[test]
@@ -7228,9 +7474,10 @@ mod halo_look {
     fn halo_image() -> cairo::ImageSurface {
         let (w, h) = (1504.0, 1002.0);
         let (cw, ch, zoom) = (420.0, 70.0, 2.0);
-        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom) as i32, (2.0 * ch * zoom) as i32).unwrap();
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom) as i32, (3.0 * ch * zoom) as i32).unwrap();
         let cr = Context::new(&surface).unwrap();
-        for (row, dnd) in [true, false].into_iter().enumerate() {
+        // the third: pulled down and to the side, the light round it as drawn
+        for (row, (dnd, tug)) in [(true, false), (false, false), (true, true)].into_iter().enumerate() {
             let renderer = Renderer::new(1.5);
             let mut island = tests::gallery_island_pub();
             island.set_dnd(dnd, 9.0);
@@ -7242,6 +7489,17 @@ mod halo_look {
             sc.scale(1.5, 1.5);
             let mut t = 9.0;
             for _ in 0..90 { island.advance(t); island.draw(&sc, &renderer, w / 2.0, t); island.draw_edges(&sc, w, h, w / 2.0, t); t += 1.0 / 60.0; }
+            if tug {
+                let line = island.line_rect.unwrap();
+                let (px, py) = (line.x + line.w / 2.0, line.y + line.h / 2.0);
+                assert!(island.tug_press(px, py, t));
+                for i in 1..=10 {
+                    island.tug_to(px + 6.0 * i as f64, py + 9.0 * i as f64, t + i as f64 / 60.0);
+                }
+                t += 10.0 / 60.0;
+                island.advance(t);
+                island.draw(&sc, &renderer, w / 2.0, t);
+            }
             cr.save().unwrap();
             cr.translate(0.0, row as f64 * ch * zoom);
             cr.rectangle(0.0, 0.0, cw * zoom, ch * zoom - 2.0);
@@ -7252,6 +7510,7 @@ mod halo_look {
             cr.paint().unwrap();
             island.draw_edges(&cr, w, h, w / 2.0, t);
             island.draw(&cr, &renderer, w / 2.0, t);
+            island.draw_frame_marks(&cr, &renderer, w, h, t);
             cr.restore().unwrap();
         }
         drop(cr);
