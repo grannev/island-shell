@@ -307,6 +307,15 @@ a tight rubber band (at most ~34 px down, ~26 px sideways, a squash up), leans
 with its top lagging, stretches like a drop with its fillets drawn out, and
 jumps back like jelly when let go. A press that moves less than 6 px is still
 a click, decided on release.
+**Touchscreen gestures on windows** (niri, patched: branch
+`island-touch-gestures` in `~/.local/src/niri`, installed as
+`~/.local/bin/niri`): two fingers moving together resize a window from the
+nearest corner (a pinch stays the application's zoom); three fingers drawn
+together toggle it floating — it shrinks to 75 % going floating, so the
+switch shows; three fingers moving off at once swipe like three on the
+touchpad (columns sideways, workspaces up and down); three fingers resting a
+moment, then moving, drag the window.
+
 Under niri the bar's left drop (the workspaces) is the overview's handle:
 pulled down with a finger or the mouse it gives further than the right one,
 the overview's four tiles come up beneath the workspaces, bounce as the pull
@@ -318,7 +327,7 @@ folding the screen back starts `~/.config/niri/scripts/tablet-mode.sh on` —
 the screen follows the accelerometer (`monitor-sensor`, niri's transform)
 and lisgd turns touchscreen swipes into niri actions (one finger in from the
 left / right edge: that column; up from the bottom edge: the overview; three
-fingers sideways: columns, up / down: workspaces); folding it back stops
+fingers are niri's own, see below); folding it back stops
 both and stands the screen upright. The on-screen keyboard is not shown on
 its own. The touchscreen and the pen are mapped to eDP-1. Root step:
 `sudo sh scripts/04-install-tablet-tools.sh` (lisgd, libinput-tools, and a

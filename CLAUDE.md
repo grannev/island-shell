@@ -314,8 +314,12 @@ the left drop gives to 44 px and a pull past 20 px asks for niri's overview,
 ~/.local/src/niri on v26.04, `src/input/touch_gesture_grab.rs`, built into
 ~/.local/bin/niri which shadows /usr/local/bin): two fingers on a window
 moving together resize it from the nearest corner (a pinch stays the
-client's), four fingers drawn together toggle floating — carried over from
-the SwayFX patch's touch_resize.c. Rebase the branch when niri updates.
+client's; carried over from the SwayFX patch's touch_resize.c); three
+fingers drawn together toggle floating, moving off at once swipe columns /
+workspaces like the touchpad, resting 300 ms then moving drag the window;
+a window going floating shrinks to 75 % of its tiled size. The gesture grab
+replaces smithay's implicit TouchDownGrab (a finger down always leaves one).
+Rebase the branch when niri updates (its floating tests carry the new sizes).
 Tablet mode under niri: switch-events run
 ~/.config/niri/scripts/tablet-mode.sh (autorotate + lisgd; no automatic
 on-screen keyboard), root step scripts/04-install-tablet-tools.sh. The bar holds state
