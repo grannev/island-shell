@@ -1319,7 +1319,9 @@ impl App {
             KeyboardInteractivity::None
         } else if self.island.launcher.is_some() {
             KeyboardInteractivity::Exclusive
-        } else if self.island.keyboard_panel_open() {
+        } else if self.island.keyboard_panel_open() || self.island.bar.menu_open() {
+            // (a tray menu opens after the click, so on-demand focus
+            // would never arrive)
             KeyboardInteractivity::Exclusive
         } else {
             KeyboardInteractivity::OnDemand
@@ -1336,6 +1338,25 @@ impl App {
     fn launcher_key(&mut self, event: &KeyEvent) {
         let now = self.frame_time();
         let ctrl = self.modifiers.ctrl;
+        // a tray menu hanging from the bar takes the keys first
+        if self.island.bar.menu_open() {
+            let key = match event.keysym {
+                Keysym::Down | Keysym::Tab => "next",
+                Keysym::Up | Keysym::ISO_Left_Tab => "prev",
+                Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Right => "enter",
+                Keysym::Left | Keysym::BackSpace => "back",
+                Keysym::Escape => "escape",
+                _ => "",
+            };
+            let (changed, action) = self.island.bar.menu_key(key, now);
+            if let Some(action) = action {
+                self.bar_action(action);
+            }
+            if changed {
+                self.after_change();
+            }
+            return;
+        }
         if self.island.launcher.is_none() {
             if event.keysym == Keysym::Escape {
                 if self.island.close_activity_panel(now) { self.after_change(); }
@@ -1601,7 +1622,8 @@ impl App {
         // a reply takes the keyboard even over a fullscreen window
         let wants_keyboard = self.island.launcher.is_some() || self.island.replying()
             || (!self.island.is_hidden() && self.island.keyboard_panel_open());
-        self.set_keyboard_focus(wants_keyboard);
+        // a tray menu takes the keys too (arrows, Enter, Escape)
+        self.set_keyboard_focus(wants_keyboard || self.island.bar.menu_open());
         // the panel a finger opened has closed by itself
         if self.touch_sticky && !self.gesture.active() && !self.island.touch_revealed(self.clock.predict(false)) {
             self.touch_sticky = false;

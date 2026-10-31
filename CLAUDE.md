@@ -265,7 +265,9 @@ and returns `bar::Action`s; it does no I/O. The tray (`src/tray.rs`): the
 island owns `org.kde.StatusNotifierWatcher` (same properties/signals as
 Waybar's, lock.sh counts items) and hosts the items on threads; menus
 (dbusmenu, variant-wrapped a{sv} values unwrapped) open as sheets hanging from
-the right drop (`drop::notch` under its edge), closed by an outside click (the
+the right drop (`drop::notch` under its edge), driven by keys too (arrows /
+Tab, Enter / Space / →, ← / Backspace back, Escape; exclusive keyboard focus
+while open), closed by an outside click (the
 dismiss catcher has holes for the bar).
 Performance: the surface is the whole screen, so a full repaint and copy is
 a 10–17 ms frame: only a new size (or the first configure) resets the canvas

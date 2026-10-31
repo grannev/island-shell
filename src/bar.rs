@@ -301,6 +301,70 @@ impl Bar {
         self.menu.as_ref().is_some_and(|m| !m.closing)
     }
 
+    /// A row of the open menu chosen (`keyed`: from the keyboard, which lights
+    /// the first row of a submenu it enters).
+    fn choose_row(&mut self, row: Row, keyed: bool, now: Time) -> Option<Action> {
+        let m = self.menu.as_mut()?;
+        match row {
+            Row::Back => {
+                m.pages.pop();
+                m.hovered = if keyed { first_row(m) } else { None };
+                None
+            }
+            Row::Entry(i) => {
+                let entry = m.pages.last()?.get(i)?.clone();
+                if entry.separator || !entry.enabled {
+                    return None;
+                }
+                if !entry.children.is_empty() {
+                    m.pages.push(entry.children);
+                    m.hovered = if keyed { first_row(m) } else { None };
+                    return None;
+                }
+                let id = m.id.clone();
+                self.close_menu(now);
+                Some(Action::MenuChoose(id, entry.id))
+            }
+        }
+    }
+
+    /// A key while a menu is up: "next" / "prev" move the lit row,
+    /// "enter" chooses it (or enters its submenu), "back" leaves a submenu,
+    /// "escape" closes. Returns whether anything changed, and what was
+    /// chosen.
+    pub fn menu_key(&mut self, key: &str, now: Time) -> (bool, Option<Action>) {
+        let Some(m) = self.menu.as_mut().filter(|m| !m.closing) else { return (false, None) };
+        match key {
+            "next" | "prev" => {
+                let rows = selectable_rows(m);
+                if rows.is_empty() {
+                    return (false, None);
+                }
+                let at = m.hovered.and_then(|h| rows.iter().position(|r| *r == h));
+                let n = rows.len();
+                let next = match (at, key) {
+                    (None, "next") => 0,
+                    (None, _) => n - 1,
+                    (Some(i), "next") => (i + 1) % n,
+                    (Some(i), _) => (i + n - 1) % n,
+                };
+                m.hovered = Some(rows[next]);
+                (true, None)
+            }
+            "enter" => {
+                let Some(row) = m.hovered.and_then(|h| row_at(m, h)) else { return (false, None) };
+                let action = self.choose_row(row, true, now);
+                (true, action)
+            }
+            "back" if m.pages.len() > 1 => (true, self.choose_row(Row::Back, true, now)),
+            "back" | "escape" => {
+                self.close_menu(now);
+                (true, None)
+            }
+            _ => (false, None),
+        }
+    }
+
     /// The pointer over the menu: which row is lit.
     pub fn menu_hover(&mut self, x: f64, y: f64) -> bool {
         let Some(m) = self.menu.as_mut() else { return false };
@@ -417,28 +481,7 @@ impl Bar {
         if let Some(m) = self.menu.as_mut().filter(|m| !m.closing) {
             if m.rect.is_some_and(|r| inside(r, x, y)) {
                 let row = m.rows.iter().find(|(r, _)| inside(*r, x, y)).map(|(_, row)| row.clone());
-                match row {
-                    Some(Row::Back) => {
-                        m.pages.pop();
-                        m.hovered = None;
-                    }
-                    Some(Row::Entry(i)) => {
-                        let entry = m.pages.last()?.get(i)?.clone();
-                        if entry.separator || !entry.enabled {
-                            return None;
-                        }
-                        if !entry.children.is_empty() {
-                            m.pages.push(entry.children);
-                            m.hovered = None;
-                            return None;
-                        }
-                        let id = m.id.clone();
-                        self.close_menu(now);
-                        return Some(Action::MenuChoose(id, entry.id));
-                    }
-                    None => {}
-                }
-                return None;
+                return row.and_then(|row| self.choose_row(row, false, now));
             }
             // anywhere else on the bar: the menu folds first
             self.close_menu(now);
@@ -835,6 +878,34 @@ fn battery_tip(b: Battery) -> String {
     }
 }
 
+/// The open page's row at index `k` as the menu lays them out: the way
+/// back first (in a submenu), then its entries.
+fn row_at(m: &Menu, k: usize) -> Option<Row> {
+    let back = m.pages.len() > 1;
+    match (back, k) {
+        (true, 0) => Some(Row::Back),
+        (true, k) => Some(Row::Entry(k - 1)),
+        (false, k) => Some(Row::Entry(k)),
+    }.filter(|r| match r {
+        Row::Entry(i) => m.pages.last().is_some_and(|p| *i < p.len()),
+        Row::Back => true,
+    })
+}
+
+/// The rows a key can light: the way back, and enabled entries.
+fn selectable_rows(m: &Menu) -> Vec<usize> {
+    let back = m.pages.len() > 1;
+    let entries = m.pages.last().map_or(&[][..], |p| &p[..]);
+    let offset = back as usize;
+    (back.then_some(0).into_iter()).chain(entries.iter().enumerate()
+        .filter(|(_, e)| e.enabled && !e.separator).map(|(i, _)| i + offset)).collect()
+}
+
+/// A page's first entry a key can light (not the way back).
+fn first_row(m: &Menu) -> Option<usize> {
+    selectable_rows(m).into_iter().find(|k| *k > 0 || m.pages.len() == 1)
+}
+
 fn inside(r: Rect, x: f64, y: f64) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
@@ -1020,6 +1091,40 @@ mod tests {
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1504, 120).unwrap();
         let cr = Context::new(&surface).unwrap();
         bar.draw(&cr, &Renderer::new(1.0), 1504.0, 0.6, now)
+    }
+
+    #[test]
+    fn a_tray_menu_follows_the_keys() {
+        use crate::tray::MenuEntry;
+        let mut bar = bar();
+        let e = |id, label: &str, enabled| MenuEntry { id, label: label.into(), enabled, ..MenuEntry::default() };
+        let mut sub = e(3, "More", true);
+        sub.children = vec![e(4, "Inner", true)];
+        let sep = MenuEntry { separator: true, ..MenuEntry::default() };
+        bar.open_menu("vpn".into(), vec![e(1, "Open", true), sep, e(2, "Off", false), sub], 10.0);
+        // down skips the separator and the disabled row, and wraps
+        assert!(bar.menu_key("next", 10.1).0);
+        assert_eq!(bar.menu.as_ref().unwrap().hovered, Some(0));
+        bar.menu_key("next", 10.1);
+        assert_eq!(bar.menu.as_ref().unwrap().hovered, Some(3));
+        bar.menu_key("next", 10.1);
+        assert_eq!(bar.menu.as_ref().unwrap().hovered, Some(0));
+        bar.menu_key("prev", 10.1);
+        // enter on a submenu goes in, its first entry lit (after the way back)
+        assert_eq!(bar.menu_key("enter", 10.2), (true, None));
+        assert_eq!(bar.menu.as_ref().unwrap().pages.len(), 2);
+        assert_eq!(bar.menu.as_ref().unwrap().hovered, Some(1));
+        // back comes out; enter on an entry chooses it and folds the menu
+        bar.menu_key("back", 10.3);
+        assert_eq!(bar.menu.as_ref().unwrap().pages.len(), 1);
+        bar.menu_key("next", 10.3);
+        bar.menu_key("next", 10.3);
+        assert_eq!(bar.menu_key("enter", 10.4), (true, Some(Action::MenuChoose("vpn".into(), 1))));
+        assert!(!bar.menu_open());
+        // escape closes
+        bar.open_menu("vpn".into(), vec![e(1, "Open", true)], 11.0);
+        bar.menu_key("escape", 11.1);
+        assert!(!bar.menu_open());
     }
 
     #[test]
