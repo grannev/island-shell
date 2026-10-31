@@ -1129,6 +1129,7 @@ impl App {
                     activity::Event::WifiOpen => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
                     activity::Event::BluetoothOpen => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
                     activity::Event::CalendarOpen => self.island.open_calendar(now),
+                    activity::Event::NotesOpen => self.island.open_notes(now),
                     _ => self.island.live_activity(event, now),
                 }
                 self.after_change();
@@ -1382,6 +1383,31 @@ impl App {
                     let _ = self.notification_commands.send(crate::notification_server::Command::Reply { id, text });
                 }
                 self.after_change();
+            } else if self.island.notes_open() {
+                let shift = self.modifiers.shift;
+                let key = match event.keysym {
+                    Keysym::Left => "Left",
+                    Keysym::Right => "Right",
+                    Keysym::Up => "Up",
+                    Keysym::Down => "Down",
+                    Keysym::Home => "Home",
+                    Keysym::End => "End",
+                    Keysym::Page_Up => "PageUp",
+                    Keysym::Page_Down => "PageDown",
+                    Keysym::Return | Keysym::KP_Enter => "Return",
+                    Keysym::BackSpace => "BackSpace",
+                    Keysym::Delete | Keysym::KP_Delete => "Delete",
+                    Keysym::Tab => "Tab",
+                    Keysym::ISO_Left_Tab => "ISO_Left_Tab",
+                    Keysym::a | Keysym::A if ctrl => "a",
+                    Keysym::c | Keysym::C if ctrl => "c",
+                    Keysym::x | Keysym::X if ctrl => "x",
+                    Keysym::v | Keysym::V if ctrl => "v",
+                    Keysym::t | Keysym::T if ctrl => "t",
+                    Keysym::n | Keysym::N if ctrl => "n",
+                    _ => "",
+                };
+                if self.island.notes_key(key, event.utf8.as_deref(), ctrl, shift, now) { self.after_change(); }
             } else if self.island.calendar_open() {
                 let key = match event.keysym {
                     Keysym::Left => "Left",
@@ -2527,6 +2553,9 @@ impl App {
                     if self.island.set_calendar_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
+                    if self.island.set_notes_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
                     self.island.hold_tasks_hover(event.position.0, event.position.1, self.clock.predict(false));
                     if self.island.set_timer_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
@@ -2609,6 +2638,9 @@ impl App {
                         }
                     }
                     if button == BTN_LEFT && self.island.quick_release(self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if button == BTN_LEFT && self.island.release_notes() {
                         changed = true;
                     }
                     if button == BTN_LEFT && self.island.timer_release(event.position.0, self.clock.predict(false)) {
@@ -2711,6 +2743,13 @@ impl App {
                         continue;
                     }
                     if self.island.click_calendar(event.position.0, event.position.1, button == BTN_LEFT, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if self.island.notes_open() {
+                        if button == BTN_LEFT {
+                            self.island.press_notes(event.position.0, event.position.1, self.modifiers.shift, now);
+                        }
                         changed = true;
                         continue;
                     }
@@ -2831,6 +2870,9 @@ impl App {
                         continue;
                     }
                     if self.island.scroll_calendar(px, now) {
+                        continue;
+                    }
+                    if self.island.scroll_notes(px, now) {
                         continue;
                     }
                     if self.island.scroll_timer(event.position.0, event.position.1, px, vertical.discrete != 0, now) {
@@ -2977,6 +3019,7 @@ impl App {
                         self.island.close_quick_menu(now);
                         match section {
                             Section::Calendar => { self.island.open_calendar(now); }
+                            Section::Notes => { self.island.open_notes(now); }
                             Section::Notifications => { self.island.open_notification_center(now); }
                             Section::Timer => { let _ = self.island.timer_command("menu", now); }
                             Section::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),

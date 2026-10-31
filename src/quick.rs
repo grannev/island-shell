@@ -135,12 +135,14 @@ pub enum Section {
     Search,
     Files,
     Clipboard,
+    Notes,
 }
 
 /// The gallery, in reading (and keyboard) order.
-pub const SECTIONS: [Section; 10] = [
+pub const SECTIONS: [Section; 11] = [
     Section::Control, Section::Sound, Section::Calendar, Section::Notifications, Section::Timer,
     Section::Wifi, Section::Bluetooth, Section::Search, Section::Files, Section::Clipboard,
+    Section::Notes,
 ];
 
 impl Section {
@@ -156,6 +158,7 @@ impl Section {
             Section::Search => "Поиск",
             Section::Files => "Файлы",
             Section::Clipboard => "Буфер",
+            Section::Notes => "Заметки",
         }
     }
 
@@ -165,6 +168,7 @@ impl Section {
         match self {
             Section::Calendar => (menu_style::RED.0, menu_style::RED.1, menu_style::RED.2, 1.0),
             Section::Timer => (menu_style::ORANGE.0, menu_style::ORANGE.1, menu_style::ORANGE.2, 1.0),
+            Section::Notes => (1.0, 0.84, 0.04, 1.0),
             _ => (1.0, 1.0, 1.0, 0.85),
         }
     }
@@ -926,6 +930,10 @@ fn section_symbol(cr: &Context, section: Section, cx: f64, cy: f64) {
         Section::Search => icon(cr, Action::Launcher, cx, cy, 1.0, 0.8),
         Section::Files => glyph(cr, "folder", cx, cy, 1.0, white),
         Section::Clipboard => glyph(cr, "clipboard", cx, cy, 1.0, white),
+        Section::Notes => {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            crate::notes::symbol(cr, cx, cy);
+        }
     }
 }
 

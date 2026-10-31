@@ -276,6 +276,10 @@ entrance timestamps are separate from last-update timestamps: key repeat only
 extends the hold. Cairo icon helpers start fresh paths so text positions never
 become stray stroked lines.
 
+Notes (`src/notes.rs`, activity `NotesOpen`, section «Заметки», `island-shell
+notes`): pads are ~/Documents/notes/*.md, read / written / trashed on the
+page's own worker; saved 0.6 s after a change and on any close (`sync`
+notices the page going).
 The companion (`src/mascot.rs`, compact key `mascot`, the Control Center's
 «Друг» tile) lives at the line's left end: blinks / glances on deadlines
 only, reactions queued in `Island::mascot_react` until a pill leaves the

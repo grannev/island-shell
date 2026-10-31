@@ -142,6 +142,7 @@ impl Command {
             ["timer", "start", duration] => Command::Timer(duration.to_string()),
             ["wifi"] => Command::Activity(crate::activity::Event::WifiOpen),
             ["calendar"] => Command::Activity(crate::activity::Event::CalendarOpen),
+            ["notes"] => Command::Activity(crate::activity::Event::NotesOpen),
             ["record"] => Command::Record,
             ["night"] => Command::Night("toggle".into()),
             ["night", state @ ("on" | "off" | "toggle" | "status")] => Command::Night(state.to_string()),
@@ -158,7 +159,7 @@ impl Command {
 }
 
 pub const USAGE: &str = concat!(
-    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|sections|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
+    "usage: island-shell [toggle|show|hide|dodge|undodge|dodge-toggle|quick|sections|notifications|dnd <on|off|toggle|status>|launcher|wifi|bluetooth|calendar|notes|record|night [on|off|toggle]|compact [<item> on|off|toggle]|",
     "timer <duration|pomodoro|stopwatch|next|pause|resume|toggle|cancel|status>|screenshot <file>|",
     "task [--pid=N] start|set|done|fail|cancel <id> …|task list|progress <title> <n>%|run [--title T] [--] <command>|",
     "status|set <key> <value>|quit]",

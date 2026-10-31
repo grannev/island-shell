@@ -955,6 +955,11 @@ pub struct Island {
     /// the month sheet (a right click on the clock) and where it is
     calendar: Option<Calendar>,
     calendar_rect: Option<Rect>,
+    /// the notes page: kept while the island runs, so the caret and the
+    /// chosen pad are where they were
+    pub notes: crate::notes::Notes,
+    notes_rect: Option<Rect>,
+    notes_were_open: bool,
     clock_rect: Option<Rect>,
     /// who records from a microphone now: an orange dot at the line's end
     mic_users: Vec<String>,
@@ -1276,6 +1281,9 @@ impl Island {
             tasks_pill_rect: None,
             calendar: None,
             calendar_rect: None,
+            notes: crate::notes::Notes::new(),
+            notes_rect: None,
+            notes_were_open: false,
             clock_rect: None,
             mic_users: Vec::new(),
             night_glow: Spring::new(0.0, 0.35, 1.0),
@@ -1426,6 +1434,7 @@ impl Island {
             || self.record_chip.is_moving(now)
             || self.mic_dot.is_moving(now)
             || self.calendar.as_ref().is_some_and(|c| c.is_animating(now)) && self.calendar_shown()
+            || self.notes.is_animating(now) && self.notes_shown()
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
@@ -1604,6 +1613,11 @@ impl Island {
         let chip = shown.editor && self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
         self.mascot_chip.set(if shown.mascot { 1.0 } else { 0.0 }, now);
+        // however the notes page went (Escape, an outside click, another
+        // sheet taking the island), what was typed is written now
+        let notes_open = self.notes_open();
+        if self.notes_were_open && !notes_open { self.notes.close(now); }
+        self.notes_were_open = notes_open;
         // a timer starting gets a determined little nod
         if self.timer.is_some() && !self.mascot_saw_timer {
             self.mascot_react(crate::mascot::Reaction::Nod, now);
@@ -1680,6 +1694,7 @@ impl Island {
         }
         if let Some(launcher) = &mut self.launcher { changed |= launcher.advance(now); }
         changed |= self.side_hud.advance(now);
+        changed |= self.notes.advance(now);
         if self.mascot_on_line() {
             if let Some((reaction, at)) = self.mascot_pending {
                 if now - at > MASCOT_PATIENCE {
@@ -1853,6 +1868,7 @@ impl Island {
         if let Some(t) = self.side_hud.deadline() {
             consider(t);
         }
+        if let Some(t) = self.notes.deadline(now, self.notes_shown()) { consider(t); }
         if self.mascot_on_line() {
             if let Some(t) = self.mascot.deadline(now) { consider(t); }
             if let Some((_, at)) = self.mascot_pending {
@@ -2143,6 +2159,7 @@ impl Island {
         self.clip_search.set_waker(tx.clone());
         crate::weather::set_waker(tx.clone());
         self.art.set_waker(tx.clone());
+        self.notes.set_waker(tx.clone());
         self.activity_art.set_waker(tx);
     }
 
@@ -2163,8 +2180,9 @@ impl Island {
         let icons = self.launcher_icons.drain();
         let art = self.art.drain();
         let activity = self.activity_art.drain();
+        let notes = self.notes.drain(now) && self.notes_open();
         // a forecast arrived: the open calendar shows it
-        let mut files = crate::weather::take_fresh() && self.calendar_open();
+        let mut files = crate::weather::take_fresh() && self.calendar_open() || notes;
         for (generation, reply) in self.file_search.drain() {
             if let Some(launcher) = &mut self.launcher {
                 files |= launcher.receive_files(generation, reply, now);
@@ -2522,6 +2540,7 @@ impl Island {
         if !self.keyboard_panel_open() {
             return false;
         }
+        if self.notes_open() { self.notes.close(now); }
         self.activity_retiring = self.activity.take();
         self.sync(now);
         true
@@ -2964,6 +2983,69 @@ impl Island {
         if !self.calendar_open() { self.calendar = None; }
     }
 
+    /// Open the notes page (the sections gallery, `island-shell notes`).
+    pub fn open_notes(&mut self, now: Time) {
+        if self.notes_open() || self.auth.is_some() || self.launcher.is_some() { return; }
+        if self.center.open {
+            self.center.close();
+            self.center_rect = None;
+        }
+        if self.quick_open { self.close_quick_menu(now); }
+        self.notes.open(now);
+        self.show_activity(activity::Event::NotesOpen, now);
+    }
+
+    pub fn notes_open(&self) -> bool {
+        self.activity.as_ref().is_some_and(|a| a.event == activity::Event::NotesOpen)
+    }
+
+    fn notes_shown(&self) -> bool {
+        self.visible_activity().is_some_and(|a| a.event == activity::Event::NotesOpen)
+    }
+
+    /// The page closes: what is unsaved is written now.
+    fn close_notes(&mut self, now: Time) {
+        self.notes.close(now);
+        self.activity_retiring = self.activity.take();
+        self.sync(now);
+    }
+
+    pub fn notes_key(&mut self, key: &str, text: Option<&str>, ctrl: bool, shift: bool, now: Time) -> bool {
+        if !self.notes_open() { return false; }
+        if self.notes.key(key, text, ctrl, shift, now) { self.sync(now); }
+        true
+    }
+
+    pub fn set_notes_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.notes_open() { return false; }
+        let Some(r) = self.notes_rect else { return false };
+        self.notes.pointer(px - r.x, py - r.y, now)
+    }
+
+    /// A press on the open page: a tab, "+", the bin, the collapse button
+    /// or the text (the caret, a selection to drag). True when taken.
+    pub fn press_notes(&mut self, px: f64, py: f64, shift: bool, now: Time) -> bool {
+        if !self.notes_open() { return false; }
+        let Some(r) = self.notes_rect else { return true };
+        if self.notes.press(px - r.x, py - r.y, shift, now) {
+            self.close_notes(now);
+        }
+        self.sync(now);
+        true
+    }
+
+    pub fn release_notes(&mut self) -> bool {
+        if !self.notes.dragging() { return false; }
+        self.notes.release();
+        true
+    }
+
+    pub fn scroll_notes(&mut self, px: f64, now: Time) -> bool {
+        if !self.notes_open() { return false; }
+        self.notes.scroll_by(px, now);
+        true
+    }
+
     pub fn calendar_open(&self) -> bool {
         self.activity.as_ref().is_some_and(|a| a.event == activity::Event::CalendarOpen)
     }
@@ -3349,6 +3431,7 @@ impl Island {
         self.tasks_rect = None;
         self.tasks_pill_rect = None;
         self.calendar_rect = None;
+        self.notes_rect = None;
         self.clock_rect = None;
         self.line_rect = None;
         self.timer_rect = None;
@@ -3420,6 +3503,8 @@ impl Island {
                 self.tasks.pill_size()
             } else if a.event == activity::Event::CalendarOpen {
                 self.calendar.as_ref().map_or(a.event.size(), |c| (calendar::WIDTH, c.height()))
+            } else if a.event == activity::Event::NotesOpen {
+                (crate::notes::WIDTH, crate::notes::HEIGHT)
             } else if a.event == activity::Event::TimerMenu {
                 (timer_page::WIDTH, self.timer_page.height(&self.timer_session(now)))
             } else { a.event.size() }
@@ -3923,6 +4008,13 @@ impl Island {
                     if let Some(c) = &self.calendar {
                         c.draw(cr, renderer, x, dy + climb + enter, bh, content_alpha, now);
                     }
+                }
+                if activity.event == activity::Event::NotesOpen {
+                    let x = cx - crate::notes::WIDTH / 2.0;
+                    if content_alpha > 0.9 {
+                        self.notes_rect = Some(Rect { x, y: dy + climb + enter, w: crate::notes::WIDTH, h: bh });
+                    }
+                    self.notes.draw(cr, renderer, x, dy + climb + enter, content_alpha, now);
                 }
                 if activity.event == activity::Event::Tasks {
                     if content_alpha > 0.9 {
@@ -5573,7 +5665,7 @@ impl Font {
         Font::Clock, Font::ClockSmall, Font::Bar, Font::BarBold, Font::BatteryDigits,
     ];
 
-    fn face(self) -> (&'static str, f64) {
+    pub fn face(self) -> (&'static str, f64) {
         match self {
             Font::Text => (FONT, FONT_PX),
             Font::Caption => (FONT, CAPTION_PX),
@@ -5667,6 +5759,12 @@ impl Renderer {
 
     pub fn scale(&self) -> f64 {
         self.scale
+    }
+
+    /// The pango context every layout here is made in (for pages that
+    /// keep layouts of their own, like the notes' text).
+    pub fn pango_context(&self) -> &pango::Context {
+        &self.ctx
     }
 
     /// Round a logical coordinate to a whole output pixel.
@@ -6120,6 +6218,16 @@ mod tests {
             island.open_calendar(10.0);
             island.calendar = Some(Calendar::at(calendar::Date { year: 2026, month: 10, day: 5 }, 10.0));
             gallery_shot("05f-calendar", &mut island, 10.0);
+            let mut notes = gallery_island();
+            let shopping = "# Покупки\n- хлеб\n- молоко\n- кофе в зёрнах, светлая обжарка\n- батарейки AA для мыши";
+            notes.notes = crate::notes::Notes::offline(&[shopping, "Идеи для островка: маскот, полка для файлов, загрузки", "Созвон в четверг"], 10.0);
+            notes.notes.caret = shopping.len();
+            notes.open_notes(10.0);
+            gallery_shot("05n-notes", &mut notes, 10.0);
+            notes.notes_key("Left", None, true, true, 12.5);
+            notes.notes_key("Left", None, true, true, 12.5);
+            notes.set_notes_hover(490.0 - crate::notes::WIDTH / 2.0 + 60.0, 30.0, 12.5);
+            gallery_shot_after("05n2-notes-selection", &mut notes, 12.5, 0.5);
             crate::weather::inject(r#"{"current":{"temperature_2m":11.6,"weather_code":2,"is_day":1},
                 "daily":{"time":["2026-10-05","2026-10-06","2026-10-07","2026-10-08","2026-10-09","2026-10-10","2026-10-11"],
                 "weather_code":[2,61,3,0,95,71,45],

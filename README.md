@@ -541,6 +541,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell timer 25m | timer pause        # compact countdown
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)
+    island-shell notes                          # the notes page
     island-shell record                         # 3-2-1, record the screen; again stops
     island-shell night [on|off|toggle|status]   # night mode (gammastep)
     island-shell compact [<item> on|off|toggle] # what the closed island shows (saved)
@@ -585,6 +586,20 @@ little so the title stays centred). The cover answers like the equaliser, and
 the ring like the timer's reading. `island-shell compact
 clock off` (or `on`, `toggle`) changes one item in the running island and writes
 the new list to the config file, so it survives a restart.
+
+**Notes** (the sections gallery's «Заметки», `island-shell notes`), after
+Vorssaint's scratchpad: the top row holds the pads as tabs, titled by
+their first line, with «+» for a new one; the card below is the chosen
+pad's text, ready for typing. Each pad is a Markdown file in
+`~/Documents/notes/` (named by when it was made), saved 0.6 s after the
+last change and whenever the page closes (written to a temporary file and
+renamed). Keys: arrows (Ctrl by word, Shift selecting), Home / End,
+Backspace / Delete (Ctrl by word), Enter, Tab, Ctrl+A / C / X / V (wl-copy
+/ wl-paste), Ctrl+T or Ctrl+N a new pad, Ctrl+Tab / Ctrl+PageDown the next
+pad, Ctrl+Shift+Tab / Ctrl+PageUp the previous, Escape closes. The mouse
+places the caret and drags a selection; the wheel scrolls. A pad emptied
+and left goes away; the bin on the hovered chosen tab sends a pad to the
+trash (`gio trash`) on a second press.
 
 **The companion** (`mascot`, after Vorssaint's): a small coral capsule with
 two soft black eyes at the left end of the closed line. It blinks now and
