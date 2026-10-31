@@ -130,8 +130,20 @@ island::Config, README "Configuration"); the old waybar island and its scripts a
 (backup: ~/.config/waybar/old-island-backup.tar.gz), island-shell runs as
 a systemd user service. Neovim integration lives in nvim/ and the iVim
 repository (~/it/coding/ivim). iswm, a soft fork of SwayFX with island-styled
-title bars and animations, lives in ~/it/coding/iswm and its work continues
-there; the plan for stages 0–2 is `docs/iswm.md`.
+title bars and animations, lives in ~/it/coding/iswm (plan: `docs/iswm.md`);
+the user dropped it and its `startiswm` (2026-10-31).
+niri is supported too (2026-10-31): `startniri` (`scripts/startniri`,
+installed to ~/.local/bin) starts `niri --session` from a TTY without
+niri.service, so neither DankMaterialShell nor waybar.service (via
+graphical-session.target) starts — an empty niri with the island as its whole
+shell; `~/.config/niri/config.kdl` restarts island-shell.service at startup
+(no dunst / nm-applet there; Mod+D launcher, Mod+I toggle, Mod+L island lock).
+`src/compositor.rs` picks sway (`src/sway.rs`) or niri (`src/niri.rs`, when
+NIRI_SOCKET answers). niri's questions are answered from a model kept from its
+event stream (a fullscreen window sends a layout change every frame; asking
+niri each time overflowed its socket); niri has no fullscreen flag, so a tiled
+window the size of the island's output counts as one; `Outputs` can take a
+second to answer and is never asked. Never edit ~/.local/bin/startway.
 
 Live activities are native too: volume and brightness sliders, charging
 and low-battery states, Bluetooth and Wi-Fi connection changes, screenshot

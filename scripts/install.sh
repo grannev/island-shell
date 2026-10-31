@@ -5,11 +5,13 @@ cd "$(dirname "$0")/.."
 cargo build --release
 install -Dm755 target/release/island-shell "$HOME/.local/bin/island-shell"
 install -Dm755 scripts/island-screenshot.sh "$HOME/.local/bin/island-screenshot"
+# a niri session with the island as its shell, from a TTY (see the script)
+install -Dm755 scripts/startniri "$HOME/.local/bin/startniri"
 install -Dm644 shell/island.bash "$HOME/.local/share/island-shell/island.bash"
 install -Dm644 assets/waybar/timer.svg "$HOME/.local/share/island-shell/icons/timer.svg"
 install -Dm644 assets/waybar/bluetooth.svg "$HOME/.local/share/island-shell/icons/bluetooth.svg"
 echo "installed $HOME/.local/bin/island-shell"
-# the user service (started by the sway config, see README)
+# the user service (started by the sway and niri configs, see README)
 install -Dm644 systemd/island-shell.service "$HOME/.config/systemd/user/island-shell.service"
 systemctl --user daemon-reload 2>/dev/null || true
 # the Neovim companion goes on nvim's runtime path (see nvim/README.md)

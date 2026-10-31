@@ -80,7 +80,7 @@ pub fn spawn(tx: Sender<Snapshot>) -> mpsc::Sender<Request> {
     thread::Builder::new()
         .name("controls".into())
         .spawn(move || {
-            let mut worker = Worker { sway: None, muted: false };
+            let mut worker = Worker { compositor: None, muted: false };
             while let Ok(first) = rx.recv() {
                 // a drag sends many values; only the latest of each matters
                 let mut volume = None;
@@ -135,18 +135,18 @@ pub fn spawn(tx: Sender<Snapshot>) -> mpsc::Sender<Request> {
 }
 
 struct Worker {
-    sway: Option<crate::sway::Query>,
+    compositor: Option<crate::compositor::Query>,
     /// the last read mute state: moving the slider unmutes, like any
     /// volume control
     muted: bool,
 }
 
 impl Worker {
-    fn sway(&mut self) -> Option<&mut crate::sway::Query> {
-        if self.sway.is_none() {
-            self.sway = crate::sway::Query::connect().ok();
+    fn compositor(&mut self) -> Option<&mut crate::compositor::Query> {
+        if self.compositor.is_none() {
+            self.compositor = crate::compositor::Query::connect().ok();
         }
-        self.sway.as_mut()
+        self.compositor.as_mut()
     }
 
     fn set_volume(&mut self, value: f64) {
@@ -166,9 +166,9 @@ impl Worker {
                 true
             }
             Request::NextLayout => {
-                if let Some(sway) = self.sway() {
-                    if sway.command("input type:keyboard xkb_switch_layout next").is_err() {
-                        self.sway = None;
+                if let Some(compositor) = self.compositor() {
+                    if compositor.next_layout().is_err() {
+                        self.compositor = None;
                     }
                 }
                 true
@@ -205,8 +205,8 @@ impl Worker {
                 false
             }
             Request::Logout => {
-                if let Some(sway) = self.sway() {
-                    let _ = sway.command("exit");
+                if let Some(compositor) = self.compositor() {
+                    let _ = compositor.exit();
                 }
                 false
             }
@@ -215,7 +215,7 @@ impl Worker {
     }
 
     fn snapshot(&mut self) -> Snapshot {
-        let layout = self.sway().and_then(|sway| sway.keyboard_layout().ok().flatten());
+        let layout = self.compositor().and_then(|c| c.keyboard_layout().ok().flatten());
         Snapshot {
             volume: crate::activity::read_volume(),
             brightness: backlight().and_then(|path| crate::activity::read_backlight(&path)),
@@ -369,7 +369,7 @@ mod tests {
     #[ignore = "touches the live session; ISLAND_CONTROL_TEST=1"]
     fn worker_round_trips_against_the_session() {
         if std::env::var_os("ISLAND_CONTROL_TEST").is_none() { return; }
-        let mut worker = Worker { sway: None, muted: false };
+        let mut worker = Worker { compositor: None, muted: false };
         let before = worker.snapshot();
         eprintln!("{before:?}");
         let (volume, muted) = before.volume.expect("volume");

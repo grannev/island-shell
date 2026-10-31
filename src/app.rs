@@ -65,7 +65,7 @@ use crate::dbus::{self, PlayerCommand};
 use crate::eq::{self, Cava};
 use crate::island::{Config, Frame, Island, Rect, Renderer};
 use crate::notify;
-use crate::sway;
+use crate::compositor;
 
 /// Logical size of the (mostly transparent) surface until the compositor
 /// says otherwise: it covers the whole output, so the island can reach the
@@ -260,7 +260,7 @@ struct DismissSurface {
     size: (u32, u32),
     /// where the free area it fills starts on the output, and the
     /// output's width (the island is centred on the whole output)
-    usable: Option<sway::Usable>,
+    usable: Option<compositor::Usable>,
     input_hole: std::cell::RefCell<Option<Vec<(i32, i32, i32, i32)>>>,
 }
 
@@ -377,7 +377,7 @@ pub struct App {
 
     pub island: Island,
     renderer: Renderer,
-    sway_query: Option<sway::Query>,
+    wm: Option<compositor::Query>,
     /// the equaliser feed, alive only while a player is playing
     cava: Option<Cava>,
     cava_start: crate::background::Worker<(), Result<Cava, String>>,
@@ -471,10 +471,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let volume_read = crate::background::Worker::new("audio-state", |_| read_muted());
     volume_read.set_waker(asset_tx);
 
-    let sway_query = match sway::Query::connect() {
+    // sway's or niri's IPC (compositor.rs)
+    let wm = match compositor::Query::connect() {
         Ok(q) => Some(q),
         Err(e) => {
-            eprintln!("island-shell: sway ipc unavailable ({e}); no fullscreen auto-hide");
+            eprintln!("island-shell: compositor ipc unavailable ({e}); no fullscreen auto-hide");
             None
         }
     };
@@ -534,7 +535,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         nvim_token: crate::nvim::token(),
         island,
         renderer: Renderer::new(1.0),
-        sway_query,
+        wm,
         cava: None,
         cava_start,
         cava_pending: false,
@@ -671,7 +672,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.after_change();
         }
     })?;
-    if let Some(layout) = app.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) {
+    if let Some(layout) = app.wm.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) {
         app.island.controls.layout = Some(layout);
     }
 
@@ -692,9 +693,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    // sway events: hide behind a fullscreen window
-    if app.sway_query.is_some() {
-        match sway::Events::subscribe(&["window", "workspace", "input"]) {
+    // the compositor's events: hide behind a fullscreen window, follow
+    // the workspaces and the keyboard layout
+    if let Some(query) = app.wm.as_mut() {
+        match compositor::Events::subscribe(query) {
             Ok(events) => {
                 loop_handle.insert_source(
                     Generic::new(events, Interest::READ, Mode::Level),
@@ -702,26 +704,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // SAFETY: the stream is only read from, never removed here
                         let events = unsafe { events.get_mut() };
                         match events.drain() {
-                            Ok(list) => {
-                                let relevant = list.iter().any(|(_, change)| {
-                                    matches!(change.as_str(), "fullscreen_mode" | "focus" | "close" | "new" | "move")
-                                });
-                                if relevant {
+                            Ok(changes) => {
+                                if changes.windows {
                                     app.check_fullscreen();
                                 }
-                                if list.iter().any(|(_, change)| change == "xkb_layout") {
+                                if changes.layout {
                                     app.layout_changed();
                                 }
-                                // a workspace event (type 0), or a window opened,
-                                // closed or moved (type 3): the bar's buttons
-                                // and the applications on them
-                                if list.iter().any(|(kind, change)| *kind == 0 || (*kind == 3 && matches!(change.as_str(), "new" | "close" | "move"))) {
+                                if changes.workspaces {
                                     app.refresh_workspaces();
                                 }
                                 Ok(PostAction::Continue)
                             }
                             Err(e) => {
-                                eprintln!("island-shell: sway ipc: {e}");
+                                eprintln!("island-shell: compositor ipc: {e}");
                                 Ok(PostAction::Remove)
                             }
                         }
@@ -730,7 +726,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.check_fullscreen();
                 app.refresh_workspaces();
             }
-            Err(e) => eprintln!("island-shell: sway subscribe failed: {e}"),
+            Err(e) => eprintln!("island-shell: compositor events unavailable: {e}"),
         }
     }
 
@@ -1274,8 +1270,8 @@ impl App {
 
     fn check_fullscreen(&mut self) {
         let island_output = self.bound_output_name();
-        let Some(q) = self.sway_query.as_mut() else { return };
-        match q.outputs(island_output.as_deref()) {
+        let Some(q) = self.wm.as_mut() else { return };
+        match q.outputs(island_output.as_deref(), (self.width, self.height)) {
             Ok((focused, fs)) => {
                 if focused != self.focused_output {
                     self.focused_output = focused;
@@ -1291,8 +1287,8 @@ impl App {
                 }
             }
             Err(e) => {
-                eprintln!("island-shell: sway query: {e}");
-                self.sway_query = None;
+                eprintln!("island-shell: compositor query: {e}");
+                self.wm = None;
             }
         }
     }
@@ -1469,7 +1465,7 @@ impl App {
         if !self.island.config.bar {
             return;
         }
-        let Some(list) = self.sway_query.as_mut().and_then(|q| q.workspaces().ok()) else { return };
+        let Some(list) = self.wm.as_mut().and_then(|q| q.workspaces().ok()) else { return };
         let output = self.bound_output_name();
         if self.island.bar.workspaces != list || self.island.bar.output != output {
             self.island.bar.workspaces = list;
@@ -1484,10 +1480,10 @@ impl App {
         use crate::control::Request;
         let now = self.frame_time();
         match action {
-            Action::Workspace(name) => self.sway_command(&format!("workspace \"{}\"", name.replace('"', "\\\""))),
+            Action::Workspace(name) => self.focus_workspace(&name),
             Action::CycleWorkspace(step) => {
                 if let Some(name) = self.island.bar.cycled(step) {
-                    self.sway_command(&format!("workspace \"{}\"", name.replace('"', "\\\"")));
+                    self.focus_workspace(&name);
                 }
             }
             Action::ToggleDrawer => self.toggle_drawer(now),
@@ -1534,10 +1530,10 @@ impl App {
         }
     }
 
-    fn sway_command(&mut self, command: &str) {
-        if let Some(q) = self.sway_query.as_mut() {
-            if let Err(e) = q.command(command) {
-                eprintln!("island-shell: sway: {e}");
+    fn focus_workspace(&mut self, name: &str) {
+        if let Some(q) = self.wm.as_mut() {
+            if let Err(e) = q.focus_workspace(name) {
+                eprintln!("island-shell: workspace {name}: {e}");
             }
         }
     }
@@ -1557,7 +1553,7 @@ impl App {
     }
 
     fn layout_changed(&mut self) {
-        let Some(layout) = self.sway_query.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) else { return };
+        let Some(layout) = self.wm.as_mut().and_then(|q| q.keyboard_layout().ok().flatten()) else { return };
         if self.island.controls.layout.as_deref() == Some(layout.as_str()) {
             return;
         }
@@ -2294,9 +2290,20 @@ impl LayerShellHandler for App {
             }
             if self.dismiss.as_ref().is_some_and(|d| d.layer.wl_surface() == layer.wl_surface()) {
                 // the free area moved (a keyboard slid in or out): where
-                // does it start now? sway has arranged it before configuring
+                // does it start now? sway has arranged it before configuring;
+                // niri does not say, but the only room taken at the top is
+                // the bar's own reserve
                 let output = self.bound_output_name();
-                let usable = self.sway_query.as_mut().and_then(|q| q.usable(output.as_deref()).ok().flatten());
+                let niri = self.wm.as_ref().is_some_and(compositor::Query::is_niri);
+                let usable = if niri {
+                    Some(compositor::Usable {
+                        x: 0,
+                        y: if self.bar_reserve.is_some() { crate::bar::HEIGHT as i32 } else { 0 },
+                        output_w: self.width as i32,
+                    })
+                } else {
+                    self.wm.as_mut().and_then(|q| q.usable(output.as_deref()).ok().flatten())
+                };
                 let dismiss = self.dismiss.as_mut().expect("dismiss surface");
                 let (w, h) = configure.new_size;
                 if w == 0 || h == 0 { return; }

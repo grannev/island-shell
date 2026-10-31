@@ -1,0 +1,23 @@
+#!/bin/sh
+# startniri — start a niri session from a TTY with island-shell as its whole
+# shell (bar, notifications, launcher, tray), the way startway starts sway.
+#
+# niri runs directly (`niri --session`), not as niri.service through
+# niri-session: so nothing that service or graphical-session.target pulls in
+# starts (DankMaterialShell, the Debian waybar.service) — an empty niri, and
+# the island. niri hands its environment to systemd before it runs the
+# config's spawn-at-startup, where ~/.config/niri/config.kdl restarts
+# island-shell.service; the island finds niri through NIRI_SOCKET.
+# The compositor's log goes to ~/.cache/niri.log (the TTY stays clean).
+export XDG_CURRENT_DESKTOP=niri
+export XDG_SESSION_DESKTOP=niri
+export XDG_SESSION_TYPE=wayland
+
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/niri.log"
+niri --session >"$LOG" 2>&1
+
+# The session is over: the island stops, and services forget the niri that
+# is gone (the next session sets its own).
+systemctl --user stop island-shell.service 2>/dev/null
+systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY NIRI_SOCKET \
+	XDG_CURRENT_DESKTOP 2>/dev/null
