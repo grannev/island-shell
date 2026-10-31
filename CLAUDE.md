@@ -129,7 +129,9 @@ surface is recreated on hotplug / `closed`, never exits; config keys in
 island::Config, README "Configuration"); the old waybar island and its scripts are removed
 (backup: ~/.config/waybar/old-island-backup.tar.gz), island-shell runs as
 a systemd user service. Neovim integration lives in nvim/ and the iVim
-repository (~/it/coding/ivim).
+repository (~/it/coding/ivim). iswm, a soft fork of SwayFX with island-styled
+title bars and animations, lives in ~/it/coding/iswm and its work continues
+there; the plan for stages 0–2 is `docs/iswm.md`.
 
 Live activities are native too: volume and brightness sliders, charging
 and low-battery states, Bluetooth and Wi-Fi connection changes, screenshot
