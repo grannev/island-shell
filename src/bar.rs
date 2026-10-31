@@ -48,6 +48,14 @@ const MEMORY: &str = "\u{1009D6}";
 /// frame's edge (a tugged island's full ripple is 1).
 const SPLASH_WORKSPACE: f64 = 0.35;
 const SPLASH_MENU: f64 = 0.3;
+/// The drawer's graphs: how many readings (one a second), their size, the
+/// gap before them, and their colours (CPU cyan, memory purple).
+const HISTORY: usize = 30;
+const GRAPH_W: f64 = 32.0;
+const GRAPH_H: f64 = 14.0;
+const GRAPH_GAP: f64 = 6.0;
+const GRAPH_CPU: (f64, f64, f64) = (0x66 as f64 / 255.0, 0xD9 as f64 / 255.0, 1.0);
+const GRAPH_MEMORY: (f64, f64, f64) = (0xBF as f64 / 255.0, 0x5A as f64 / 255.0, 0xF2 as f64 / 255.0);
 /// A workspace's application icons: their size, the gap after its name,
 /// between them, and how many at most.
 pub const APP_ICON: f64 = 15.0;
@@ -85,6 +93,7 @@ pub struct Details {
     pub disk_free: String,
     pub cpu: u8,
     pub memory_gb: f64,
+    pub memory_total_gb: f64,
 }
 
 /// A tray icon, decoded by a worker.
@@ -189,6 +198,10 @@ pub struct Bar {
     /// the icons of the workspaces' applications, by app id, at the
     /// output's scale (None: still loading or none to be had)
     pub app_icons: HashMap<String, Option<cairo::ImageSurface>>,
+    /// the drawer's readings since it opened (CPU, memory; 0..1), and the
+    /// graphs sliding left as each new one comes in
+    history: std::collections::VecDeque<(f64, f64)>,
+    history_scroll: Spring,
     /// something moved in a drop that should ripple the frame's edge: from
     /// where along it (x) and how strongly
     splash: Option<(f64, f64)>,
@@ -239,6 +252,8 @@ impl Default for Bar {
             menu: None,
             glyphs: Default::default(),
             app_icons: HashMap::new(),
+            history: std::collections::VecDeque::new(),
+            history_scroll: Spring::new(0.0, 0.35, 1.0),
             splash: None,
             focused: None,
             tug: None,
@@ -272,6 +287,10 @@ impl Bar {
     }
 
     pub fn set_drawer(&mut self, open: bool) {
+        // the graphs start afresh each time it opens
+        if open && !self.drawer {
+            self.history.clear();
+        }
         self.drawer = open;
     }
 
@@ -281,6 +300,18 @@ impl Bar {
     }
 
     /// A tray item's menu arrived: open it as a sheet under the item.
+    /// A reading of the drawer's sampler: shown, and added to its graphs.
+    pub fn push_details(&mut self, details: Details, now: Time) {
+        let memory = if details.memory_total_gb > 0.0 { details.memory_gb / details.memory_total_gb } else { 0.0 };
+        self.history.push_back((details.cpu as f64 / 100.0, memory.clamp(0.0, 1.0)));
+        while self.history.len() > HISTORY {
+            self.history.pop_front();
+        }
+        self.history_scroll = Spring::new(1.0, 0.35, 1.0);
+        self.history_scroll.set(0.0, now);
+        self.details = Some(details);
+    }
+
     /// A ripple the bar asks for since it was last asked: (x, strength).
     pub fn take_splash(&mut self) -> Option<(f64, f64)> {
         self.splash.take()
@@ -397,6 +428,7 @@ impl Bar {
             || self.focus_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.washes.values().any(|s| s.is_moving(now))
             || self.glyphs.is_animating(now)
+            || (self.drawer && self.history_scroll.is_moving(now))
             || self.tug.is_some()
             || self.stretch.iter().any(|s| s.is_moving(now))
     }
@@ -546,7 +578,8 @@ impl Bar {
                 (Item::Cpu, format!("{CPU} {}%", d.cpu)),
                 (Item::Memory, format!("{MEMORY} {:.1}GB", d.memory_gb)),
             ] {
-                let width = if self.drawer { text_w(&text) + 2.0 * PAD } else { 0.0 };
+                let graph = if item == Item::Disk { 0.0 } else { GRAPH_GAP + GRAPH_W };
+                let width = if self.drawer { text_w(&text) + graph + 2.0 * PAD } else { 0.0 };
                 cells.push((Cell { item, width }, Some(text)));
             }
         }
@@ -756,6 +789,17 @@ impl Bar {
                             }
                             _ => 0.0,
                         };
+                        // the CPU's and memory's last half minute
+                        if self.drawer && matches!(item, Item::Cpu | Item::Memory) {
+                            let (colour, pick): ((f64, f64, f64), fn(&(f64, f64)) -> f64) = if *item == Item::Cpu {
+                                (GRAPH_CPU, |s| s.0)
+                            } else {
+                                (GRAPH_MEMORY, |s| s.1)
+                            };
+                            let values: Vec<f64> = self.history.iter().map(pick).collect();
+                            let r = Rect { x: x + slot_w - PAD - GRAPH_W, y: (HEIGHT - GRAPH_H) / 2.0, w: GRAPH_W, h: GRAPH_H };
+                            graph(cr, r, &values, self.history_scroll.value(now).clamp(0.0, 1.0), colour);
+                        }
                         if !text.is_empty() {
                             let key = format!("bar {item:?}");
                             let lh = renderer.layout(cr, text, Font::Bar).pixel_extents().1;
@@ -944,6 +988,55 @@ fn first_row(m: &Menu) -> Option<usize> {
     selectable_rows(m).into_iter().find(|k| *k > 0 || m.pages.len() == 1)
 }
 
+/// A small graph of `values` (0..1, oldest first, one per step) in `r`,
+/// the newest at its right edge; `scroll` (1 → 0) slides the newest in.
+fn graph(cr: &Context, r: Rect, values: &[f64], scroll: f64, colour: (f64, f64, f64)) {
+    let step = r.w / (HISTORY - 1) as f64;
+    cr.save().unwrap();
+    // its floor
+    rounded(cr, r, 3.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
+    let _ = cr.fill_preserve();
+    cr.clip();
+    if !values.is_empty() {
+        let n = values.len();
+        let at = |i: usize| {
+            let x = r.x + r.w - (n - 1 - i) as f64 * step + scroll * step;
+            (x, r.y + r.h - 1.0 - values[i].clamp(0.0, 1.0) * (r.h - 2.0))
+        };
+        cr.new_path();
+        for i in 0..n {
+            let (x, y) = at(i);
+            if i == 0 { cr.move_to(x, y) } else { cr.line_to(x, y) }
+        }
+        if n == 1 {
+            let (x, y) = at(0);
+            cr.line_to(x - step, y);
+        }
+        let line = cr.copy_path().ok();
+        // the area under it, fading down
+        let (x_last, _) = at(n - 1);
+        let (x_first, _) = if n == 1 { (x_last - step, 0.0) } else { at(0) };
+        cr.line_to(x_last, r.y + r.h);
+        cr.line_to(x_first, r.y + r.h);
+        cr.close_path();
+        let fill = cairo::LinearGradient::new(0.0, r.y, 0.0, r.y + r.h);
+        fill.add_color_stop_rgba(0.0, colour.0, colour.1, colour.2, 0.45);
+        fill.add_color_stop_rgba(1.0, colour.0, colour.1, colour.2, 0.05);
+        let _ = cr.set_source(&fill);
+        let _ = cr.fill();
+        if let Some(line) = line {
+            cr.new_path();
+            cr.append_path(&line);
+            cr.set_line_width(1.3);
+            cr.set_line_join(cairo::LineJoin::Round);
+            cr.set_source_rgba(colour.0, colour.1, colour.2, 1.0);
+            let _ = cr.stroke();
+        }
+    }
+    cr.restore().unwrap();
+}
+
 fn inside(r: Rect, x: f64, y: f64) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
@@ -1000,7 +1093,7 @@ mod tests {
         bar.volume = Some((0.5, false));
         bar.layout = Some("English".into());
         bar.battery = Some(Battery { percent: 84, charging: false, remaining: None });
-        bar.details = Some(Details { disk_free: "120G".into(), cpu: 7, memory_gb: 3.2 });
+        bar.details = Some(Details { disk_free: "120G".into(), cpu: 7, memory_gb: 3.2, memory_total_gb: 16.0 });
         bar
     }
 
@@ -1312,5 +1405,38 @@ mod workspace_apps_look {
         bar.draw(&cr, &renderer, 1504.0, 0.6, t);
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-workspaces.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod drawer_look {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-drawer.png"]
+    fn drawer_graphs() {
+        let renderer = Renderer::new(1.5);
+        let (w, h, zoom) = (620.0, 36.0, 2.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let mut bar = Bar::default();
+        bar.volume = Some((0.6, false));
+        bar.battery = Some(Battery { percent: 72, charging: false, remaining: None });
+        bar.set_drawer(true);
+        let mut t = 10.0;
+        for i in 0..24 {
+            let cpu = (8.0 + 30.0 * ((i as f64) * 0.7).sin().abs() + if i == 15 { 50.0 } else { 0.0 }) as u8;
+            bar.push_details(Details { disk_free: "118G".into(), cpu, memory_gb: 5.0 + i as f64 * 0.08, memory_total_gb: 16.0 }, t);
+            t += 1.0;
+        }
+        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 100).unwrap();
+        let sc = Context::new(&scratch).unwrap();
+        for _ in 0..90 { bar.draw(&sc, &renderer, w, 0.6, t); t += 1.0 / 60.0; }
+        cr.scale(zoom, zoom);
+        cr.set_source_rgb(0.18, 0.35, 0.40);
+        cr.paint().unwrap();
+        bar.draw(&cr, &renderer, w, 0.6, t);
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-drawer.png").unwrap()).unwrap();
     }
 }

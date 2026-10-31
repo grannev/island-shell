@@ -39,15 +39,17 @@ pub fn spawn_details(tx: Sender<BarEvent>, open: Arc<AtomicBool>) {
                     _ => 0,
                 };
                 last_cpu = cpu;
-                if tick % 15 == 14 {
+                if tick % 30 == 29 {
                     disk = disk_free("/");
                 }
-                let details = Details { disk_free: disk.clone(), cpu: usage, memory_gb: memory_used_gib().unwrap_or(0.0) };
+                let (memory_gb, memory_total_gb) = memory_gib().unwrap_or((0.0, 0.0));
+                let details = Details { disk_free: disk.clone(), cpu: usage, memory_gb, memory_total_gb };
                 if tx.send(BarEvent::Details(details)).is_err() {
                     return;
                 }
                 tick += 1;
-                for _ in 0..20 {
+                // once a second: the drawer draws the last half minute
+                for _ in 0..10 {
                     if !open.load(Ordering::Relaxed) { return; }
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -66,11 +68,12 @@ fn read_cpu() -> Option<(u64, u64)> {
     Some((total - idle, total))
 }
 
-/// Used memory (total less available), GiB.
-fn memory_used_gib() -> Option<f64> {
+/// Used memory (total less available) and the total, GiB.
+fn memory_gib() -> Option<(f64, f64)> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kib = |key: &str| info.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse::<f64>().ok();
-    Some((kib("MemTotal:")? - kib("MemAvailable:")?) / 1024.0 / 1024.0)
+    let total = kib("MemTotal:")?;
+    Some(((total - kib("MemAvailable:")?) / 1024.0 / 1024.0, total / 1024.0 / 1024.0))
 }
 
 /// Free space on `path`'s filesystem, as Waybar wrote it ("118G", "56.3G").
@@ -97,8 +100,8 @@ mod tests {
     fn readings_are_sane() {
         let (busy, total) = read_cpu().unwrap();
         assert!(total > 0 && busy <= total);
-        let mem = memory_used_gib().unwrap();
-        assert!(mem > 0.0 && mem < 4096.0);
+        let (mem, total) = memory_gib().unwrap();
+        assert!(mem > 0.0 && mem < total && total < 4096.0);
         assert!(disk_free("/").ends_with('G') || disk_free("/").ends_with('M'));
         assert_eq!(human(127.4 * 1024.0 * 1024.0 * 1024.0), "127G");
         assert_eq!(human(56.34 * 1024.0 * 1024.0 * 1024.0), "56.3G");

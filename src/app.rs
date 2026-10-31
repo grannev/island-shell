@@ -634,10 +634,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let channel::Event::Msg(event) = event {
             match event {
                 crate::bar_sources::BarEvent::Details(details) => {
-                    if app.island.bar.details.as_ref() != Some(&details) {
-                        app.island.bar.details = Some(details);
-                        app.redraw();
-                    }
+                    let now = app.frame_time();
+                    app.island.bar.push_details(details, now);
+                    app.redraw();
                 }
                 crate::bar_sources::BarEvent::Tray(items) => {
                     app.island.bar.tray = items.into_iter().map(|t| crate::bar::TrayIcon {

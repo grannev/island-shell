@@ -255,8 +255,9 @@ corners, 32 px like the island (an empty top-layer surface reserves the room,
 `BarReserve`): workspaces (sway events, a sliding focus pill, click / scroll,
 up to four icons of the applications on each from the sway tree, resolved
 through the desktop entries and loaded on the launcher's icon worker)
-left; the drawer (disk / CPU / memory sampled only while open,
-`bar_sources.rs`), volume (click mute, scroll 5 %), layout (click: wvkbd),
+left; the drawer (disk / CPU / memory sampled once a second only while open,
+`bar_sources.rs`; CPU and memory carry small graphs of the readings since it
+opened, sliding left on a spring as each arrives), volume (click mute, scroll 5 %), layout (click: wvkbd),
 battery (tooltip with the time left) and the tray right; the speaker, keyboard
 and battery are vectors (`src/bar_icons.rs`: waves lit by the level, a mute
 slash, iOS's battery with the percentage cut out of its fill, red ≤ 20 %,

@@ -7004,7 +7004,7 @@ mod bar_look {
             island.controls.volume = Some(0.5);
             island.controls.layout = Some("English (US)".into());
             island.bar.battery = Some(crate::bar::Battery { percent: 84, charging: false, remaining: None });
-            island.bar.details = Some(crate::bar::Details { disk_free: "118G".into(), cpu: 7, memory_gb: 3.4 });
+            island.bar.details = Some(crate::bar::Details { disk_free: "118G".into(), cpu: 7, memory_gb: 3.4, memory_total_gb: 16.0 });
             island.bar.set_drawer(drawer);
             island.bar.tray = vec![crate::bar::TrayIcon { id: "vpn".into(), icon: None, has_menu: true, item_is_menu: false, title: "VPN".into() }];
             if drawer {
