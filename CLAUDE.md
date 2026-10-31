@@ -140,7 +140,9 @@ installed to ~/.local/bin) starts `niri --session` from a TTY without
 niri.service, so neither DankMaterialShell nor waybar.service (via
 graphical-session.target) starts — an empty niri with the island as its whole
 shell; `~/.config/niri/config.kdl` restarts island-shell.service at startup
-(no dunst / nm-applet there; Mod+D launcher, Mod+I toggle, Mod+L island lock).
+(no dunst / nm-applet there; Mod+D launcher, Mod+I toggle, Mod+L island lock,
+Mod+N notes, Mod+S shelf, Mod+Print the island's screenshot.sh instead of niri's
+screenshot-screen, which bypassed the island; sway binds mod+n / mod+s alike).
 `src/compositor.rs` picks sway (`src/sway.rs`) or niri (`src/niri.rs`, when
 NIRI_SOCKET answers). niri's questions are answered from a model kept from its
 event stream (a fullscreen window sends a layout change every frame; asking

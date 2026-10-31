@@ -692,7 +692,8 @@ impl Shelf {
                 }
             });
             if active {
-                let (rx, ry) = (rect.0 + (TILE_W - ICON) / 2.0 - 2.0, GRID_TOP + rect.1 + 8.0);
+                // page coordinates, as the tile's own rect below
+                let (rx, ry) = (RAIL + rect.0 + (TILE_W - ICON) / 2.0 - 2.0, GRID_TOP + rect.1 + 8.0);
                 rects.push((Hit::Remove(i), (rx - 11.0, ry - 11.0, 22.0, 22.0)));
                 rects.push((Hit::Tile(i), (RAIL + rect.0, GRID_TOP + rect.1, TILE_W, TILE_H)));
             }
@@ -958,5 +959,33 @@ mod tests {
         // a press let go in place is a click that opens the file
         shelf.press(40.0, 80.0, 2.0);
         assert_eq!(shelf.release(40.0, 80.0, 0, 2.1), Release::Open(PathBuf::from("/a/one.txt")));
+    }
+}
+#[cfg(test)]
+mod hit_tests {
+    use super::*;
+
+    /// The × sits on the tile's icon, where it is drawn: a click on it
+    /// takes the file off (it once landed on the tile and opened it).
+    #[test]
+    fn the_x_on_a_tile_takes_it_off_and_the_tile_opens() {
+        let entry = |p: &str| Entry { path: p.into(), dir: false, size: 1 };
+        let mut shelf = Shelf::offline(vec![entry("/a/one.txt"), entry("/a/two.txt")], Vec::new());
+        let renderer = Renderer::new(1.5);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 600).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let none = |_: &str, _: i32| None;
+        let no_thumb = |_: &Path, _: i32| None;
+        let look = Look { icon: &none, thumb: &no_thumb, active: &[] };
+        shelf.open(Tab::Shelf, 0.0);
+        shelf.draw(&cr, &renderer, 0.0, 0.0, 200.0, 1.0, &look, 1.0);
+        let (rx, ry) = (RAIL + (TILE_W - ICON) / 2.0 - 2.0, GRID_TOP + 8.0);
+        shelf.press(rx, ry, 1.2);
+        assert_eq!(shelf.release(rx, ry, 0, 1.3), Release::None);
+        assert_eq!(shelf.items.iter().map(|e| e.path.to_str().unwrap()).collect::<Vec<_>>(), ["/a/two.txt"]);
+        shelf.draw(&cr, &renderer, 0.0, 0.0, 200.0, 1.0, &look, 2.0);
+        let (tx, ty) = (RAIL + TILE_W / 2.0, GRID_TOP + TILE_H - 20.0);
+        shelf.press(tx, ty, 2.1);
+        assert_eq!(shelf.release(tx, ty, 0, 2.2), Release::Open("/a/two.txt".into()));
     }
 }

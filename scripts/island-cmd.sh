@@ -5,9 +5,12 @@
 #                 (mod+o, details-toggle.sh) is closed first if it is open,
 #                 since the island cannot be a panel and dodge it at once
 #   quick         mod+m: unfold the island's shortcut menu
+#   notes         mod+n: the notes page
+#   shelf         mod+s: the shelf
 bin="${ISLAND_SHELL:-$HOME/.local/bin/island-shell}"
 [ -x "$bin" ] || bin=island-shell
-if [ "$1" = launcher ] || [ "$1" = quick ]; then
+case "$1" in launcher|quick|notes|shelf) panel=1 ;; *) panel= ;; esac
+if [ -n "$panel" ]; then
 	case "$("$bin" status 2>/dev/null)" in
 		*" dodged "*) "$HOME/.config/sway/scripts/details-toggle.sh" ;;
 	esac

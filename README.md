@@ -588,7 +588,7 @@ the ring like the timer's reading. `island-shell compact
 clock off` (or `on`, `toggle`) changes one item in the running island and writes
 the new list to the config file, so it survives a restart.
 
-**Notes** (the sections gallery's «Заметки», `island-shell notes`), after
+**Notes** (mod+n, the sections gallery's «Заметки», `island-shell notes`), after
 Vorssaint's scratchpad: the top row holds the pads as tabs, titled by
 their first line, with «+» for a new one; the card below is the chosen
 pad's text, ready for typing. Each pad is a Markdown file in
@@ -614,7 +614,7 @@ tile takes it off. «Сжать» packs everything into `~/Downloads/Полка
 <time>.zip` (a job ring while it works; the archive joins the shelf),
 «Пути» copies the paths, the bin empties it on a second press. The list
 is kept in `~/.local/state/island-shell/shelf`. Open it by hand from the
-sections gallery («Полка») or `island-shell shelf`.
+sections gallery («Полка»), mod+s or `island-shell shelf`.
 
 **Downloads**: the shelf's second tab («Загрузки», also in the gallery and
 `island-shell downloads`) shows the newest files in `~/Downloads`, running
