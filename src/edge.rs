@@ -1348,3 +1348,36 @@ mod island_light_gallery {
         out.write_to_png(&mut std::fs::File::create("target/gallery/edge-from-island.png").unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+mod membrane_cost {
+    use super::*;
+
+    /// What a frame of a running ripple costs at 1.5×, with the bar's drops
+    /// and the island (`cargo test --release membrane_frame_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn membrane_frame_cost() {
+        use crate::outline::Drop;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 200).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let shore = Shore {
+            corner: 16.0,
+            smoothing: 0.6,
+            drops: [Some(Drop { w: 140.0, h: 32.0 }), Some(Drop { w: 420.0, h: 32.0 })],
+            island: Some((Rect { x: 640.0, y: 0.0, w: 224.0, h: 32.0 }, 14.0, 14.0)),
+        };
+        let mut m = Membrane::default();
+        m.ripple(752.0, 1.0, 0.0);
+        let mut times = Vec::new();
+        for i in 0..110 {
+            let now = i as f64 / 60.0;
+            let t = std::time::Instant::now();
+            m.draw(&cr, 1504.0, &shore, 752.0, 0.0, 0.0, now);
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!("membrane frame: median={:.3}ms p95={:.3}ms max={:.3}ms", times[times.len() / 2], times[times.len() * 95 / 100], times[times.len() - 1]);
+    }
+}

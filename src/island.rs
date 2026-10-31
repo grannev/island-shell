@@ -7173,3 +7173,41 @@ mod ripple_look {
         crate::golden::check("ripple-wall", &ripple_wall_image());
     }
 }
+
+#[cfg(test)]
+mod quick_cost {
+    use super::*;
+
+    /// The Control Center's first opening against later ones, at 1.5×
+    /// (`cargo test --release quick_first_open_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a timing, not a check"]
+    fn quick_first_open_cost() {
+        let renderer = Renderer::new(1.5);
+        let mut island = tests::gallery_island_pub();
+        island.controls.volume = Some(0.5);
+        island.controls.layout = Some("English (US)".into());
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 1000).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        cr.scale(1.5, 1.5);
+        let mut now = 10.0;
+        for _ in 0..30 { island.advance(now); island.draw(&cr, &renderer, 752.0, now); now += 1.0 / 60.0; }
+        for cycle in 0..3 {
+            island.open_quick_menu_shortcut(now);
+            let mut times = Vec::new();
+            for _ in 0..40 {
+                island.advance(now);
+                let t = std::time::Instant::now();
+                island.draw(&cr, &renderer, 752.0, now);
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+                now += 1.0 / 60.0;
+            }
+            island.close_quick_menu(now);
+            for _ in 0..40 { island.advance(now); island.draw(&cr, &renderer, 752.0, now); now += 1.0 / 60.0; }
+            let first = times[0];
+            let max = times.iter().cloned().fold(0.0, f64::max);
+            times.sort_by(f64::total_cmp);
+            println!("quick cycle={cycle} first={first:.3}ms median={:.3}ms max={max:.3}ms >16ms={}", times[times.len() / 2], times.iter().filter(|t| **t > 16.0).count());
+        }
+    }
+}
