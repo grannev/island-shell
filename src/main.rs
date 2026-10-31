@@ -35,6 +35,8 @@ mod menu_style;
 mod motion;
 mod launch;
 mod notes;
+mod shelf;
+mod downloads;
 mod notify;
 mod notice_center;
 mod notification_server;

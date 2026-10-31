@@ -136,13 +136,15 @@ pub enum Section {
     Files,
     Clipboard,
     Notes,
+    Shelf,
+    Downloads,
 }
 
 /// The gallery, in reading (and keyboard) order.
-pub const SECTIONS: [Section; 11] = [
+pub const SECTIONS: [Section; 13] = [
     Section::Control, Section::Sound, Section::Calendar, Section::Notifications, Section::Timer,
     Section::Wifi, Section::Bluetooth, Section::Search, Section::Files, Section::Clipboard,
-    Section::Notes,
+    Section::Notes, Section::Shelf, Section::Downloads,
 ];
 
 impl Section {
@@ -159,6 +161,8 @@ impl Section {
             Section::Files => "Файлы",
             Section::Clipboard => "Буфер",
             Section::Notes => "Заметки",
+            Section::Shelf => "Полка",
+            Section::Downloads => "Загрузки",
         }
     }
 
@@ -169,6 +173,7 @@ impl Section {
             Section::Calendar => (menu_style::RED.0, menu_style::RED.1, menu_style::RED.2, 1.0),
             Section::Timer => (menu_style::ORANGE.0, menu_style::ORANGE.1, menu_style::ORANGE.2, 1.0),
             Section::Notes => (1.0, 0.84, 0.04, 1.0),
+            Section::Downloads => (menu_style::BLUE.0, menu_style::BLUE.1, menu_style::BLUE.2, 1.0),
             _ => (1.0, 1.0, 1.0, 0.85),
         }
     }
@@ -933,6 +938,11 @@ fn section_symbol(cr: &Context, section: Section, cx: f64, cy: f64) {
         Section::Notes => {
             cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
             crate::notes::symbol(cr, cx, cy);
+        }
+        Section::Shelf => crate::shelf::tray_symbol(cr, cx, cy, (1.0, 1.0, 1.0), 1.0),
+        Section::Downloads => {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            crate::shelf::download_symbol(cr, cx, cy);
         }
     }
 }

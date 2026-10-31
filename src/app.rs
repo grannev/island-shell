@@ -26,7 +26,10 @@ use smithay_client_toolkit::{
             Connection, Dispatch, Proxy, QueueHandle, WEnum,
             backend::ObjectId,
             globals::{GlobalList, registry_queue_init},
-            protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_touch},
+            protocol::{
+                wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_data_source::WlDataSource,
+                wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface, wl_touch,
+            },
         },
         protocols::wp::{
             fractional_scale::v1::client::{
@@ -40,6 +43,12 @@ use smithay_client_toolkit::{
             ext_idle_notification_v1::{self, ExtIdleNotificationV1},
             ext_idle_notifier_v1::ExtIdleNotifierV1,
         },
+    },
+    data_device_manager::{
+        DataDeviceManagerState, WritePipe,
+        data_device::{DataDevice, DataDeviceData, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::{DataSourceHandler, DragSource},
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -338,6 +347,20 @@ pub struct App {
     frame_stats: FrameStats,
     pointer: Option<wl_pointer::WlPointer>,
     touch: Option<wl_touch::WlTouch>,
+    /// drag and drop: files dropped on the island go on the shelf, a
+    /// shelf tile dragged out offers its file
+    data_devices: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    /// a drag carrying files hangs over the island
+    drop_hover: bool,
+    /// the offer dropped on the island, finished once its list is read
+    drop_offer: Option<DragOffer>,
+    drop_tx: channel::Sender<String>,
+    drag_source: Option<DragSource>,
+    drag_path: Option<std::path::PathBuf>,
+    drag_icon: Option<(wl_surface::WlSurface, WpViewport, Buffer)>,
+    /// the serial of the last button press (a drag starts from it)
+    press_serial: u32,
     /// the seat going idle and coming back (the companion sleeps)
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle_notification: Option<ExtIdleNotificationV1>,
@@ -439,6 +462,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let viewporter: WpViewporter = bind_global(&globals, &qh, 1)?;
     let fractional_mgr: Option<WpFractionalScaleManagerV1> = bind_global(&globals, &qh, 1).ok();
     let idle_notifier: Option<ExtIdleNotifierV1> = bind_global(&globals, &qh, 1).ok();
+    let data_devices = DataDeviceManagerState::bind(&globals, &qh).ok();
+    let (drop_tx, drop_rx) = channel::channel::<String>();
     if fractional_mgr.is_none() {
         eprintln!("island-shell: wp_fractional_scale_v1 not offered, rendering at scale 1");
     }
@@ -523,6 +548,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         touch: None,
         idle_notifier,
         idle_notification: None,
+        data_devices,
+        data_device: None,
+        drop_hover: false,
+        drop_offer: None,
+        drop_tx,
+        drag_source: None,
+        drag_path: None,
+        drag_icon: None,
+        press_serial: 0,
         gesture: crate::touch::Touch::default(),
         touch_hold: None,
         touch_sticky: false,
@@ -641,6 +675,30 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.island.set_muted(*muted, now);
             }
             app.island.live_activity(event, now);
+            app.after_change();
+        }
+    })?;
+
+    // a drop's text/uri-list, read off the UI thread
+    loop_handle.insert_source(drop_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(list) = event {
+            let now = app.frame_time();
+            if let Some(offer) = app.drop_offer.take() {
+                offer.finish();
+                offer.destroy();
+            }
+            let paths = crate::shelf::parse_uri_list(&list);
+            app.island.shelf_drop(paths, now);
+            app.after_change();
+        }
+    })?;
+    // downloads into ~/Downloads (inotify, a thread of its own)
+    let (downloads_tx, downloads_rx) = channel::channel::<crate::downloads::Event>();
+    crate::downloads::spawn(downloads_tx);
+    loop_handle.insert_source(downloads_rx, |event, _, app: &mut App| {
+        if let channel::Event::Msg(event) = event {
+            let now = app.frame_time();
+            app.island.download_event(event, now);
             app.after_change();
         }
     })?;
@@ -1130,6 +1188,7 @@ impl App {
                     activity::Event::BluetoothOpen => self.island.open_connections(crate::network::Kind::Bluetooth, self.network_tx.clone(), now),
                     activity::Event::CalendarOpen => self.island.open_calendar(now),
                     activity::Event::NotesOpen => self.island.open_notes(now),
+                    activity::Event::ShelfOpen { .. } => self.island.open_shelf(crate::shelf::Tab::Shelf, now),
                     _ => self.island.live_activity(event, now),
                 }
                 self.after_change();
@@ -1152,6 +1211,11 @@ impl App {
                 }
                 self.after_change();
                 return if want { "on".into() } else { "off".into() };
+            }
+            Command::Downloads => {
+                self.island.open_shelf(crate::shelf::Tab::Downloads, now);
+                self.after_change();
+                return "ok".into();
             }
             Command::Compact(words) => {
                 let mut compact = self.island.config.compact;
@@ -2392,6 +2456,11 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
         }
+        if capability == Capability::Pointer && self.data_device.is_none() {
+            if let Some(manager) = &self.data_devices {
+                self.data_device = Some(manager.get_data_device(qh, &seat));
+            }
+        }
         if self.idle_notification.is_none() {
             if let Some(notifier) = &self.idle_notifier {
                 self.idle_notification = Some(notifier.get_idle_notification(IDLE_AFTER_MS, &seat, qh, ()));
@@ -2556,6 +2625,15 @@ impl App {
                     if self.island.set_notes_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
                     }
+                    if self.island.set_shelf_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    // a shelf tile pressed and moved: its file goes out as a drag
+                    if let Some(path) = self.island.shelf_drag_from(event.position.0, event.position.1, self.clock.predict(false)) {
+                        self.start_file_drag(path);
+                        changed = true;
+                        continue;
+                    }
                     self.island.hold_tasks_hover(event.position.0, event.position.1, self.clock.predict(false));
                     if self.island.set_timer_hover(event.position.0, event.position.1, self.clock.predict(false)) {
                         changed = true;
@@ -2643,6 +2721,16 @@ impl App {
                     if button == BTN_LEFT && self.island.release_notes() {
                         changed = true;
                     }
+                    if button == BTN_LEFT {
+                        let now = self.clock.predict(false);
+                        match self.island.release_shelf(event.position.0, event.position.1, now) {
+                            Some(crate::shelf::Release::Open(path)) => { crate::files::open(&path); }
+                            Some(crate::shelf::Release::Copy(text)) => crate::clipboard::copy(&text),
+                            Some(_) => {}
+                            None => {}
+                        }
+                        changed = true;
+                    }
                     if button == BTN_LEFT && self.island.timer_release(event.position.0, self.clock.predict(false)) {
                         changed = true;
                     }
@@ -2667,7 +2755,8 @@ impl App {
                         changed = true;
                     }
                 }
-                PointerEventKind::Press { button, .. } => {
+                PointerEventKind::Press { button, serial, .. } => {
+                    self.press_serial = serial;
                     let now = self.clock.predict(false);
                     // the closed island may be taken in the hand: what the
                     // press means waits for the release
@@ -2743,6 +2832,13 @@ impl App {
                         continue;
                     }
                     if self.island.click_calendar(event.position.0, event.position.1, button == BTN_LEFT, now) {
+                        changed = true;
+                        continue;
+                    }
+                    if self.island.shelf_open() {
+                        if button == BTN_LEFT {
+                            self.island.press_shelf(event.position.0, event.position.1, now);
+                        }
                         changed = true;
                         continue;
                     }
@@ -3020,6 +3116,8 @@ impl App {
                         match section {
                             Section::Calendar => { self.island.open_calendar(now); }
                             Section::Notes => { self.island.open_notes(now); }
+                            Section::Shelf => { self.island.open_shelf(crate::shelf::Tab::Shelf, now); }
+                            Section::Downloads => { self.island.open_shelf(crate::shelf::Tab::Downloads, now); }
                             Section::Notifications => { self.island.open_notification_center(now); }
                             Section::Timer => { let _ = self.island.timer_command("menu", now); }
                             Section::Wifi => self.island.open_connections(crate::network::Kind::Wifi, self.network_tx.clone(), now),
@@ -3369,6 +3467,183 @@ impl ProvidesRegistryState for App {
         &mut self.registry_state
     }
     registry_handlers![OutputState, SeatState];
+}
+
+impl App {
+    /// Hand `path` to whatever it is dropped on: a drag of its URI from the
+    /// island, with its icon under the pointer.
+    fn start_file_drag(&mut self, path: std::path::PathBuf) {
+        if self.data_devices.is_none() || self.data_device.is_none() { return; }
+        let icon = self.drag_icon_surface(&path);
+        let (Some(manager), Some(device)) = (&self.data_devices, &self.data_device) else { return };
+        let source = manager.create_drag_and_drop_source(&self.qh,
+            ["text/uri-list", "text/plain;charset=utf-8", "text/plain", "UTF8_STRING"], DndAction::Copy);
+        source.start_drag(device, self.layer.wl_surface(), icon.as_ref().map(|(s, _, _)| s), self.press_serial);
+        self.drag_source = Some(source);
+        self.drag_path = Some(path);
+        self.drag_icon = icon;
+    }
+
+    /// The dragged file's icon (or thumbnail) on a dark rounded platter,
+    /// 52 px, centred under the pointer.
+    fn drag_icon_surface(&mut self, path: &std::path::Path) -> Option<(wl_surface::WlSurface, WpViewport, Buffer)> {
+        const SIZE: f64 = 52.0;
+        let px = (SIZE * self.scale).round() as i32;
+        let picture = self.island.file_icon(path, (38.0 * self.scale).round() as i32)?;
+        let (buffer, canvas) = self.pool.create_buffer(px, px, px * 4, wl_shm::Format::Argb8888).ok()?;
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+        {
+            let cr = cairo::Context::new(&surface).ok()?;
+            cr.scale(self.scale, self.scale);
+            crate::menu_style::rounded(&cr, 1.0, 1.0, SIZE - 2.0, SIZE - 2.0, 14.0);
+            cr.set_source_rgba(0.11, 0.11, 0.118, 0.94);
+            let _ = cr.fill();
+            let k = 38.0 / picture.width().max(1) as f64;
+            cr.translate(7.0, 7.0);
+            cr.scale(k, k);
+            let _ = cr.set_source_surface(&picture, 0.0, 0.0);
+            let _ = cr.paint();
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.take_data().ok()?;
+        for row in 0..px as usize {
+            canvas[row * px as usize * 4..(row + 1) * px as usize * 4].copy_from_slice(&data[row * stride..row * stride + px as usize * 4]);
+        }
+        let wl = self.compositor.create_surface(&self.qh);
+        let viewport = self.viewporter.get_viewport(&wl, &self.qh, ());
+        viewport.set_destination(SIZE as i32, SIZE as i32);
+        buffer.attach_to(&wl).ok()?;
+        if wl.version() >= 5 { wl.offset(-(SIZE as i32) / 2, -(SIZE as i32) / 2); }
+        wl.damage_buffer(0, 0, px, px);
+        wl.commit();
+        Some((wl, viewport, buffer))
+    }
+
+    /// A drag over the surface: files reaching the island itself (not the
+    /// bar's drops beside it) unfold the shelf.
+    fn consider_drop(&mut self, device: &WlDataDevice, x: f64, y: f64) {
+        let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.drag_offer()) else { return };
+        let files = offer.with_mime_types(|types| types.iter().any(|t| t == "text/uri-list"));
+        // our own tile passing over the island on its way out is no drop
+        if !files || self.drag_source.is_some() || !self.pointer_inside_island((x, y)) {
+            offer.accept_mime_type(offer.serial, None);
+            offer.set_actions(DndAction::empty(), DndAction::empty());
+            return;
+        }
+        offer.accept_mime_type(offer.serial, Some("text/uri-list".into()));
+        // copy only: a move would let the file manager delete what the
+        // shelf merely points at
+        offer.set_actions(DndAction::Copy, DndAction::Copy);
+        self.drop_hover = true;
+        let now = self.frame_time();
+        self.island.shelf_drag_enter(now);
+        self.after_change();
+    }
+
+    fn end_file_drag(&mut self) {
+        self.drag_source = None;
+        self.drag_path = None;
+        self.drag_icon = None;
+    }
+}
+
+impl DataDeviceHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice, x: f64, y: f64, _: &wl_surface::WlSurface) {
+        self.consider_drop(device, x, y);
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        if !self.drop_hover { return; }
+        self.drop_hover = false;
+        let now = self.frame_time();
+        self.island.shelf_drag_leave(now);
+        self.after_change();
+    }
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice, x: f64, y: f64) {
+        if !self.drop_hover {
+            self.consider_drop(device, x, y);
+        } else if !self.pointer_inside_island((x, y)) {
+            // off the island but still over the surface (the bar's drops)
+            if let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.drag_offer()) {
+                offer.accept_mime_type(offer.serial, None);
+                offer.set_actions(DndAction::empty(), DndAction::empty());
+            }
+            self.drop_hover = false;
+            let now = self.frame_time();
+            self.island.shelf_drag_leave(now);
+            self.after_change();
+        }
+    }
+
+
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
+        if !self.drop_hover { return; }
+        self.drop_hover = false;
+        let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.drag_offer()) else { return };
+        // the list comes through a pipe of our own, read on a thread
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 fills two fresh descriptors that are owned below.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 { return; }
+        let (read, write) = unsafe {
+            use std::os::fd::FromRawFd;
+            (std::fs::File::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1]))
+        };
+        smithay_client_toolkit::data_device_manager::data_offer::receive_to_fd(offer.inner(), "text/uri-list".into(), write);
+        self.drop_offer = Some(offer);
+        let tx = self.drop_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = read.take(1 << 20).read_to_string(&mut text);
+            let _ = tx.send(text);
+        });
+        // the drop's leave is not a drag going away
+        let now = self.frame_time();
+        self.island.shelf_drop(Vec::new(), now);
+        self.after_change();
+    }
+}
+
+impl DataOfferHandler for App {
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, offer: &mut DragOffer, _: DndAction) {
+        if self.drop_hover { offer.set_actions(DndAction::Copy, DndAction::Copy); }
+    }
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+}
+
+impl DataSourceHandler for App {
+    fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
+
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, mime: String, mut fd: WritePipe) {
+        use std::io::Write;
+        let Some(path) = &self.drag_path else { return };
+        let text = if mime == "text/uri-list" {
+            format!("{}\r\n", crate::shelf::uri(path))
+        } else {
+            path.display().to_string()
+        };
+        // a line or two: the pipe takes it at once
+        let _ = fd.write_all(text.as_bytes());
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
+        self.end_file_drag();
+    }
+
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
+        self.end_file_drag();
+        let now = self.frame_time();
+        self.island.mascot_react(crate::mascot::Reaction::Happy, now);
+        self.after_change();
+    }
+
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
 
 smithay_client_toolkit::delegate_dispatch2!(App);

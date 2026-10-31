@@ -47,6 +47,9 @@ pub enum Event {
     CalendarOpen,
     /// the notes page (`src/notes.rs`)
     NotesOpen,
+    /// the shelf (`src/shelf.rs`); `modal` when opened by hand (it takes
+    /// the keyboard and an outside click), not when a drag unfolded it
+    ShelfOpen { modal: bool },
     /// the default microphone was muted or unmuted
     MicMute { muted: bool },
     /// the applications recording from a microphone now (state for the
@@ -89,6 +92,8 @@ impl Event {
             // sized by the island from the month shown
             Event::CalendarOpen => (crate::calendar::WIDTH, 352.0),
             Event::NotesOpen => (crate::notes::WIDTH, crate::notes::HEIGHT),
+            // sized by the island from its rows
+            Event::ShelfOpen { .. } => (crate::shelf::WIDTH, 176.0),
             Event::MicMute { .. } => (300.0, PILL_H),
             Event::MicInUse { .. } => (0.0, 0.0),
             Event::RecordCountdown => (300.0, PILL_H),
@@ -109,7 +114,7 @@ impl Event {
             Event::Screenshot { .. } => 4.0,
             Event::TimerDone { .. } => 4.0,
             Event::Tasks => 4.5,
-            Event::CalendarOpen | Event::NotesOpen => f64::INFINITY,
+            Event::CalendarOpen | Event::NotesOpen | Event::ShelfOpen { .. } => f64::INFINITY,
             Event::MicMute { .. } => 1.8,
             Event::MicInUse { .. } => 0.0,
             Event::RecordCountdown => RECORD_COUNTDOWN,
@@ -128,7 +133,7 @@ impl Event {
 
 pub fn takes_keyboard(event: &Event) -> bool {
     matches!(event, Event::TimerMenu | Event::WifiOpen | Event::BluetoothOpen | Event::CalendarOpen | Event::NotesOpen
-        | Event::RecordCountdown)
+        | Event::ShelfOpen { modal: true } | Event::RecordCountdown)
 }
 
 /// Start the environment readers.  Missing optional tools simply disable
@@ -635,7 +640,7 @@ pub fn draw_pill(
         Event::TimerMenu => {}
         Event::WifiOpen | Event::BluetoothOpen => {}
         // drawn by the island, which holds the jobs and the calendar
-        Event::Tasks | Event::CalendarOpen | Event::NotesOpen | Event::MicInUse { .. } => {}
+        Event::Tasks | Event::CalendarOpen | Event::NotesOpen | Event::ShelfOpen { .. } | Event::MicInUse { .. } => {}
         Event::NightMode { on } => {
             // the moon bounces in a warm (or a plain) well
             let (mx, o) = (x0 + 49.0, crate::menu_style::ORANGE);

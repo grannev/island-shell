@@ -959,6 +959,14 @@ pub struct Island {
     /// chosen pad are where they were
     pub notes: crate::notes::Notes,
     notes_rect: Option<Rect>,
+    /// the shelf and its downloads tab, picture thumbnails for its tiles,
+    /// the downloads running now, and whether a drag unfolded it
+    pub shelf: crate::shelf::Shelf,
+    shelf_rect: Option<Rect>,
+    shelf_thumbs: crate::art::Art,
+    downloads: Vec<(String, crate::shelf::Active)>,
+    shelf_by_drag: bool,
+    shelf_fold_at: Option<Time>,
     notes_were_open: bool,
     clock_rect: Option<Rect>,
     /// who records from a microphone now: an orange dot at the line's end
@@ -1283,6 +1291,12 @@ impl Island {
             calendar_rect: None,
             notes: crate::notes::Notes::new(),
             notes_rect: None,
+            shelf: crate::shelf::Shelf::new(),
+            shelf_rect: None,
+            shelf_thumbs: crate::art::Art::new(),
+            downloads: Vec::new(),
+            shelf_by_drag: false,
+            shelf_fold_at: None,
             notes_were_open: false,
             clock_rect: None,
             mic_users: Vec::new(),
@@ -1435,6 +1449,7 @@ impl Island {
             || self.mic_dot.is_moving(now)
             || self.calendar.as_ref().is_some_and(|c| c.is_animating(now)) && self.calendar_shown()
             || self.notes.is_animating(now) && self.notes_shown()
+            || self.shelf.is_animating(now) && self.shelf_shown()
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
@@ -1695,6 +1710,16 @@ impl Island {
         if let Some(launcher) = &mut self.launcher { changed |= launcher.advance(now); }
         changed |= self.side_hud.advance(now);
         changed |= self.notes.advance(now);
+        if self.shelf_open() {
+            changed |= self.shelf.advance(now);
+            // a drop leaves the shelf open a moment to show what arrived,
+            // then it folds (unless the pointer is on it)
+            if self.shelf_fold_at.is_some_and(|t| now >= t) {
+                self.shelf_fold_at = None;
+                if !self.hovered { self.close_shelf(now); }
+                changed = true;
+            }
+        }
         if self.mascot_on_line() {
             if let Some((reaction, at)) = self.mascot_pending {
                 if now - at > MASCOT_PATIENCE {
@@ -1869,6 +1894,10 @@ impl Island {
             consider(t);
         }
         if let Some(t) = self.notes.deadline(now, self.notes_shown()) { consider(t); }
+        if self.shelf_open() {
+            if let Some(t) = self.shelf.deadline() { consider(t); }
+            if let Some(t) = self.shelf_fold_at { consider(t); }
+        }
         if self.mascot_on_line() {
             if let Some(t) = self.mascot.deadline(now) { consider(t); }
             if let Some((_, at)) = self.mascot_pending {
@@ -2160,6 +2189,8 @@ impl Island {
         crate::weather::set_waker(tx.clone());
         self.art.set_waker(tx.clone());
         self.notes.set_waker(tx.clone());
+        self.shelf.set_waker(tx.clone());
+        self.shelf_thumbs.set_waker(tx.clone());
         self.activity_art.set_waker(tx);
     }
 
@@ -2181,6 +2212,18 @@ impl Island {
         let art = self.art.drain();
         let activity = self.activity_art.drain();
         let notes = self.notes.drain(now) && self.notes_open();
+        let thumbs = self.shelf_thumbs.drain() && self.shelf_open();
+        let (shelf, zipped) = self.shelf.drain(now);
+        if let Some(result) = zipped {
+            let detail = match &result { Ok(_) => "Готово".to_string(), Err(e) => e.clone() };
+            let op = if result.is_ok() { tasks::Op::Done { detail: Some(detail) } } else { tasks::Op::Fail { detail: Some(detail) } };
+            let _ = self.task(tasks::Request { id: "shelf-zip".into(), op, owner: None }, now);
+            if let Ok(path) = result {
+                self.shelf.add(vec![path], now);
+                self.mascot_react(crate::mascot::Reaction::Cheer, now);
+            }
+        }
+        let notes = notes || thumbs || shelf && self.shelf_open();
         // a forecast arrived: the open calendar shows it
         let mut files = crate::weather::take_fresh() && self.calendar_open() || notes;
         for (generation, reply) in self.file_search.drain() {
@@ -2983,6 +3026,170 @@ impl Island {
         if !self.calendar_open() { self.calendar = None; }
     }
 
+    /// Open the shelf on a tab (the gallery, `island-shell shelf|downloads`).
+    pub fn open_shelf(&mut self, tab: crate::shelf::Tab, now: Time) {
+        if self.auth.is_some() || self.launcher.is_some() { return; }
+        if self.shelf_open() {
+            self.shelf.show(tab, now);
+            self.sync(now);
+            return;
+        }
+        if self.center.open {
+            self.center.close();
+            self.center_rect = None;
+        }
+        if self.quick_open { self.close_quick_menu(now); }
+        self.shelf_by_drag = false;
+        self.shelf_fold_at = None;
+        self.shelf.open(tab, now);
+        self.show_activity(activity::Event::ShelfOpen { modal: true }, now);
+    }
+
+    pub fn shelf_open(&self) -> bool {
+        self.activity.as_ref().is_some_and(|a| matches!(a.event, activity::Event::ShelfOpen { .. }))
+    }
+
+    fn shelf_shown(&self) -> bool {
+        self.visible_activity().is_some_and(|a| matches!(a.event, activity::Event::ShelfOpen { .. }))
+    }
+
+    pub fn close_shelf(&mut self, now: Time) {
+        if !self.shelf_open() { return; }
+        self.shelf.set_drop_over(false, now);
+        self.shelf_by_drag = false;
+        self.shelf_fold_at = None;
+        self.activity_retiring = self.activity.take();
+        self.sync(now);
+    }
+
+    /// A drag carrying files reached the island: the shelf unfolds with
+    /// its drop zone lit (it takes neither the keyboard nor outside clicks).
+    pub fn shelf_drag_enter(&mut self, now: Time) {
+        self.shelf_fold_at = None;
+        if !self.shelf_open() {
+            if self.auth.is_some() || self.launcher.is_some() { return; }
+            if self.center.open {
+                self.center.close();
+                self.center_rect = None;
+            }
+            if self.quick_open { self.close_quick_menu(now); }
+            self.shelf.open(crate::shelf::Tab::Shelf, now);
+            self.shelf_by_drag = true;
+            self.show_activity(activity::Event::ShelfOpen { modal: false }, now);
+        } else {
+            self.shelf.show(crate::shelf::Tab::Shelf, now);
+        }
+        self.shelf.set_drop_over(true, now);
+        self.sync(now);
+    }
+
+    /// The drag went away without dropping: a shelf it unfolded folds.
+    pub fn shelf_drag_leave(&mut self, now: Time) {
+        self.shelf.set_drop_over(false, now);
+        if self.shelf_by_drag && self.shelf_fold_at.is_none() {
+            self.close_shelf(now);
+        }
+        self.sync(now);
+    }
+
+    /// The files of a drop arrived.
+    pub fn shelf_drop(&mut self, paths: Vec<std::path::PathBuf>, now: Time) {
+        self.shelf.set_drop_over(false, now);
+        let added = self.shelf.add(paths, now);
+        if added > 0 { self.mascot_react(crate::mascot::Reaction::Happy, now); }
+        if self.shelf_by_drag { self.shelf_fold_at = Some(now + 1.8); }
+        self.sync(now);
+    }
+
+    pub fn set_shelf_hover(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.shelf_open() { return false; }
+        let Some(r) = self.shelf_rect else { return false };
+        // the pointer on it keeps a dropped-on shelf open for as long
+        if self.shelf_fold_at.is_some() { self.shelf_fold_at = Some(now + 1.2); }
+        self.shelf.pointer(px - r.x, py - r.y, now)
+    }
+
+    pub fn press_shelf(&mut self, px: f64, py: f64, now: Time) -> bool {
+        if !self.shelf_open() { return false; }
+        let Some(r) = self.shelf_rect else { return true };
+        self.shelf.press(px - r.x, py - r.y, now);
+        self.shelf_fold_at = None;
+        true
+    }
+
+    /// The press on a tile moved far enough: the file to drag out. The
+    /// shelf folds out of the way of wherever it is going.
+    pub fn shelf_drag_from(&mut self, px: f64, py: f64, now: Time) -> Option<std::path::PathBuf> {
+        if !self.shelf_open() { return None; }
+        let r = self.shelf_rect?;
+        let path = self.shelf.drag_from(px - r.x, py - r.y, self.downloads.len())?;
+        self.close_shelf(now);
+        Some(path)
+    }
+
+    pub fn release_shelf(&mut self, px: f64, py: f64, now: Time) -> Option<crate::shelf::Release> {
+        if !self.shelf_open() { return None; }
+        let r = self.shelf_rect?;
+        let release = self.shelf.release(px - r.x, py - r.y, self.downloads.len(), now);
+        match &release {
+            crate::shelf::Release::Close | crate::shelf::Release::Open(_) => self.close_shelf(now),
+            crate::shelf::Release::Zipping => {
+                let _ = self.task(tasks::Request { id: "shelf-zip".into(), op: tasks::Op::Start { title: "Сжатие полки".into(), after: 0.0 }, owner: None }, now);
+            }
+            _ => {}
+        }
+        self.sync(now);
+        Some(release)
+    }
+
+    /// A file's picture for a drag: its thumbnail or its theme icon at
+    /// `px` device pixels (None until loaded).
+    pub fn file_icon(&self, path: &std::path::Path, px: i32) -> Option<cairo::ImageSurface> {
+        let entry = self.shelf.items.iter().chain(self.shelf.downloads.iter()).find(|e| e.path == path).cloned()
+            .unwrap_or(crate::shelf::Entry { path: path.to_path_buf(), dir: false, size: 0 });
+        self.shelf_thumbs.get(&crate::shelf::uri(path), px)
+            .or_else(|| self.launcher_icons.get_scaled(crate::shelf::icon_name(&entry), px))
+    }
+
+    /// A download in ~/Downloads started, moved on or ended.
+    pub fn download_event(&mut self, event: crate::downloads::Event, now: Time) {
+        use crate::downloads::Event;
+        match event {
+            Event::Started { key, name } => {
+                let _ = self.task(tasks::Request { id: key.clone(), op: tasks::Op::Start { title: name.clone(), after: 0.0 }, owner: None }, now);
+                match self.downloads.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, a)) => a.name = name,
+                    None => self.downloads.push((key, crate::shelf::Active { name, bytes: 0, speed: 0.0 })),
+                }
+            }
+            Event::Progress { key, bytes, speed } => {
+                let detail = if speed > 1.0 {
+                    format!("{} · {}/с", crate::downloads::size_text(bytes), crate::downloads::size_text(speed as u64))
+                } else {
+                    crate::downloads::size_text(bytes)
+                };
+                let _ = self.task(tasks::Request { id: key.clone(), op: tasks::Op::Set { progress: None, detail: Some(detail) }, owner: None }, now);
+                if let Some((_, a)) = self.downloads.iter_mut().find(|(k, _)| *k == key) {
+                    a.bytes = bytes;
+                    a.speed = speed;
+                }
+            }
+            Event::Finished { key, path } => {
+                self.downloads.retain(|(k, _)| *k != key);
+                let _ = self.task(tasks::Request { id: key, op: tasks::Op::Done { detail: Some("Загружено".into()) }, owner: None }, now);
+                let _ = path;
+                self.shelf.rescan();
+                self.mascot_react(crate::mascot::Reaction::Cheer, now);
+            }
+            Event::Cancelled { key } => {
+                self.downloads.retain(|(k, _)| *k != key);
+                let _ = self.task(tasks::Request { id: key, op: tasks::Op::Fail { detail: Some("Прервано".into()) }, owner: None }, now);
+                self.shelf.rescan();
+            }
+        }
+        self.sync(now);
+    }
+
     /// Open the notes page (the sections gallery, `island-shell notes`).
     pub fn open_notes(&mut self, now: Time) {
         if self.notes_open() || self.auth.is_some() || self.launcher.is_some() { return; }
@@ -3432,6 +3639,7 @@ impl Island {
         self.tasks_pill_rect = None;
         self.calendar_rect = None;
         self.notes_rect = None;
+        self.shelf_rect = None;
         self.clock_rect = None;
         self.line_rect = None;
         self.timer_rect = None;
@@ -3505,6 +3713,8 @@ impl Island {
                 self.calendar.as_ref().map_or(a.event.size(), |c| (calendar::WIDTH, c.height()))
             } else if a.event == activity::Event::NotesOpen {
                 (crate::notes::WIDTH, crate::notes::HEIGHT)
+            } else if matches!(a.event, activity::Event::ShelfOpen { .. }) {
+                (crate::shelf::WIDTH, self.shelf.target_height())
             } else if a.event == activity::Event::TimerMenu {
                 (timer_page::WIDTH, self.timer_page.height(&self.timer_session(now)))
             } else { a.event.size() }
@@ -4008,6 +4218,19 @@ impl Island {
                     if let Some(c) = &self.calendar {
                         c.draw(cr, renderer, x, dy + climb + enter, bh, content_alpha, now);
                     }
+                }
+                if matches!(activity.event, activity::Event::ShelfOpen { .. }) {
+                    let x = cx - crate::shelf::WIDTH / 2.0;
+                    if content_alpha > 0.9 {
+                        self.shelf_rect = Some(Rect { x, y: dy + climb + enter, w: crate::shelf::WIDTH, h: bh });
+                    }
+                    let icons = self.launcher_icons.clone();
+                    let icon = move |name: &str, px: i32| icons.get_scaled(name, px);
+                    let thumbs = &self.shelf_thumbs;
+                    let thumb = |path: &std::path::Path, px: i32| thumbs.get(&crate::shelf::uri(path), px);
+                    let active: Vec<crate::shelf::Active> = self.downloads.iter().map(|(_, a)| a.clone()).collect();
+                    let look = crate::shelf::Look { icon: &icon, thumb: &thumb, active: &active };
+                    self.shelf.draw(cr, renderer, x, dy + climb + enter, bh, content_alpha, &look, now);
                 }
                 if activity.event == activity::Event::NotesOpen {
                     let x = cx - crate::notes::WIDTH / 2.0;
@@ -6228,6 +6451,25 @@ mod tests {
             notes.notes_key("Left", None, true, true, 12.5);
             notes.set_notes_hover(490.0 - crate::notes::WIDTH / 2.0 + 60.0, 30.0, 12.5);
             gallery_shot_after("05n2-notes-selection", &mut notes, 12.5, 0.5);
+            let entry = |p: &str, dir: bool| crate::shelf::Entry { path: p.into(), dir, size: 2_400_000 };
+            let mut shelf = gallery_island();
+            shelf.shelf = crate::shelf::Shelf::offline(vec![
+                entry("/home/u/Documents/Отчёт за октябрь.pdf", false), entry("/home/u/Pictures/screenshot.png", false),
+                entry("/home/u/Music/Nils Frahm — Says.flac", false), entry("/home/u/it/coding/island-shell", true),
+                entry("/home/u/Downloads/debian-13.iso", false), entry("/home/u/notes.md", false),
+                entry("/home/u/Таблица бюджета.ods", false),
+            ], vec![entry("/home/u/Downloads/archive.zip", false), entry("/home/u/Downloads/photo.jpg", false)]);
+            shelf.open_shelf(crate::shelf::Tab::Shelf, 10.0);
+            gallery_shot("05s-shelf", &mut shelf, 10.0);
+            shelf.set_shelf_hover(490.0 - 280.0 + 24.0 + 40.0, 110.0, 12.0);
+            gallery_shot_after("05s2-shelf-hover", &mut shelf, 12.0, 0.6);
+            shelf.downloads.push(("download:1".into(), crate::shelf::Active { name: "film.mkv".into(), bytes: 734_000_000, speed: 4.2e6 }));
+            shelf.shelf.show(crate::shelf::Tab::Downloads, 13.0);
+            gallery_shot("05s3-downloads", &mut shelf, 13.0);
+            let mut empty = gallery_island();
+            empty.shelf = crate::shelf::Shelf::offline(Vec::new(), Vec::new());
+            empty.shelf_drag_enter(10.0);
+            gallery_shot("05s4-shelf-drop", &mut empty, 10.0);
             crate::weather::inject(r#"{"current":{"temperature_2m":11.6,"weather_code":2,"is_day":1},
                 "daily":{"time":["2026-10-05","2026-10-06","2026-10-07","2026-10-08","2026-10-09","2026-10-10","2026-10-11"],
                 "weather_code":[2,61,3,0,95,71,45],

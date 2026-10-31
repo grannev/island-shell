@@ -280,6 +280,13 @@ Notes (`src/notes.rs`, activity `NotesOpen`, section «Заметки», `island
 notes`): pads are ~/Documents/notes/*.md, read / written / trashed on the
 page's own worker; saved 0.6 s after a change and on any close (`sync`
 notices the page going).
+The shelf (`src/shelf.rs`, activity `ShelfOpen { modal }` — not modal when
+a drag unfolded it, so no keyboard grab or outside catcher) takes
+text/uri-list drops on the island (wl_data_device in app.rs, copy action
+only) and drags tiles out (a DragSource from the press serial, icon on a
+viewport-scaled surface); its second tab lists ~/Downloads.
+`src/downloads.rs` watches ~/Downloads with inotify (polling sizes only
+while a .part/.crdownload exists) and feeds the island's tasks.
 The companion (`src/mascot.rs`, compact key `mascot`, the Control Center's
 «Друг» tile) lives at the line's left end: blinks / glances on deadlines
 only, reactions queued in `Island::mascot_react` until a pill leaves the

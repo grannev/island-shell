@@ -542,6 +542,7 @@ to the running one over `$XDG_RUNTIME_DIR/island-shell-<display>.sock`:
     island-shell screenshot <file.png>          # animate a finished grim image
     island-shell calendar                       # the month (right click on the clock)
     island-shell notes                          # the notes page
+    island-shell shelf | downloads              # the shelf, on either tab
     island-shell record                         # 3-2-1, record the screen; again stops
     island-shell night [on|off|toggle|status]   # night mode (gammastep)
     island-shell compact [<item> on|off|toggle] # what the closed island shows (saved)
@@ -600,6 +601,29 @@ pad, Ctrl+Shift+Tab / Ctrl+PageUp the previous, Escape closes. The mouse
 places the caret and drags a selection; the wheel scrolls. A pad emptied
 and left goes away; the bin on the hovered chosen tab sends a pad to the
 trash (`gio trash`) on a second press.
+
+**The shelf** (after Vorssaint's file tray): drag files from any
+application onto the island and it unfolds into the shelf with its drop
+zone lit; letting go puts them there (as references — nothing is copied;
+the drop is a copy action, never a move). A shelf a drag unfolded folds
+again when the drag leaves, or a moment after the drop. Its tiles show
+the file's icon (pictures as thumbnails) and name; a click opens the file,
+a tile dragged out goes to wherever it is dropped (the shelf folds out of
+the way, the file's icon rides under the pointer), and the × on a hovered
+tile takes it off. «Сжать» packs everything into `~/Downloads/Полка
+<time>.zip` (a job ring while it works; the archive joins the shelf),
+«Пути» copies the paths, the bin empties it on a second press. The list
+is kept in `~/.local/state/island-shell/shelf`. Open it by hand from the
+sections gallery («Полка») or `island-shell shelf`.
+
+**Downloads**: the shelf's second tab («Загрузки», also in the gallery and
+`island-shell downloads`) shows the newest files in `~/Downloads`, running
+downloads first with a turning ring. A download in progress — Firefox's
+`.part` or Chromium's `.crdownload` beside the file it becomes, watched
+with inotify — is also a job ring beside the clock with its size and
+speed («734 МБ · 4,2 МБ/с»; browsers do not tell the total), ending in a
+tick («Загружено») when the partial becomes its file, or a cross when it
+vanishes without one.
 
 **The companion** (`mascot`, after Vorssaint's): a small coral capsule with
 two soft black eyes at the left end of the closed line. It blinks now and
