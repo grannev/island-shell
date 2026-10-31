@@ -573,7 +573,7 @@ at the beginning of a line or as a separate word), read at start;
     compact = all         # what the closed island shows: all, none, or a list of
                           # clock editor timer tasks record music unread dnd mic mascot
     timer_sound = on      # the timer ruler's ticks and the alarm
-    screen_corners = 11.2 # radius of the screen's rounded corners, px (0 = square)
+    screen_corners = 8    # radius of the screen's rounded corners, px (0 = square)
     edge_light = on       # light along the screen's edges (notifications, Touch ID)
     ambilight = off       # music lights the bottom edge in the cover's colour
     bar = on              # Waybar's row in the island's corner drops (off: run Waybar again)

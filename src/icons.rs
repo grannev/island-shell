@@ -16,7 +16,7 @@ use crate::notify::AppKind;
 const UNIT: f64 = 44.0;
 const TILE: f64 = 40.0;
 // menu_style::tight(11.0); this file is also built by examples/icons
-const TILE_R: f64 = 11.0 * 0.7;
+const TILE_R: f64 = 11.0 * 0.5;
 
 fn rgb(hex: u32) -> (f64, f64, f64) {
     (((hex >> 16) & 0xff) as f64 / 255.0, ((hex >> 8) & 0xff) as f64 / 255.0, (hex & 0xff) as f64 / 255.0)

@@ -1101,12 +1101,13 @@ mod membrane_tests {
         let shore = bar();
         m.ripple(300.0, 1.0, 0.0);
         // it reaches the side at full height, and the drop's fillet there
+        // (7 px since the corners tightened)
         // swells as it hits
-        assert!(ever(&mut m, &shore, 0.2, 0.7, 597, 40), "the crest reaches the side");
-        assert!(ever(&mut m, &shore, 0.2, 0.7, 599, 44), "the fillet bulges");
+        assert!(ever(&mut m, &shore, 0.2, 0.7, 597, 37), "the crest reaches the side");
+        assert!(ever(&mut m, &shore, 0.2, 0.7, 599, 41), "the fillet bulges");
         // nothing comes back across the drop, and the corner settles
         assert!(!ever(&mut m, &shore, 0.75, 0.9, 480, 34), "spent against the wall");
-        assert!(!ever(&mut m, &shore, 1.0, 1.2, 597, 47), "the corner settles");
+        assert!(!ever(&mut m, &shore, 1.0, 1.2, 597, 44), "the corner settles");
     }
 
     #[test]

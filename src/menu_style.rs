@@ -56,9 +56,9 @@ pub enum ButtonKind {
 }
 
 /// How much of its designed radius every rounded corner keeps: the user
-/// asked for tighter corners throughout (2026-10-31). Capsules and discs
+/// asked for tighter corners throughout (2026-10-31, then tighter still). Capsules and discs
 /// keep their round ends (see `corner`).
-pub const CORNER_SCALE: f64 = 0.7;
+pub const CORNER_SCALE: f64 = 0.5;
 
 /// A designed radius, tightened.
 pub const fn tight(r: f64) -> f64 {

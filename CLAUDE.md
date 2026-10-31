@@ -51,7 +51,7 @@ a PipeWire capture, dunst (or an own org.freedesktop.Notifications).
 
 ## Current island to match (reference: ~/.config/waybar/island-*.sh, sway.css)
 (Since 2026-10-31 every corner radius — the box, fillets, pills, sheets,
-cards, the bar's drops, `screen_corners` — is drawn at 0.7 of the values
+cards, the bar's drops, `screen_corners` — is drawn at 0.5 of the values
 below: `menu_style::CORNER_SCALE`; capsules and discs stay round.)
 Geometry (logical px): black box 32 tall at y 0..32, bottom corners r=14,
 14 px concave fillets where it meets the top edge, text SF Pro Text
