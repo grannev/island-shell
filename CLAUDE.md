@@ -310,7 +310,13 @@ green and a bolt while charging). A drop can be pulled down like the island
 (`Bar::tug_press/tug_to/tug_release`, left presses on it act on release; a
 pull jumps back on jelly and ripples the edge; under niri, `Bar::overview`,
 the left drop gives to 44 px and a pull past 20 px asks for niri's overview,
-`Bar::take_overview`). Tablet mode under niri: switch-events run
+`Bar::take_overview`). niri itself is patched (2026-11-01, branch `island-touch-gestures` in
+~/.local/src/niri on v26.04, `src/input/touch_gesture_grab.rs`, built into
+~/.local/bin/niri which shadows /usr/local/bin): two fingers on a window
+moving together resize it from the nearest corner (a pinch stays the
+client's), four fingers drawn together toggle floating — carried over from
+the SwayFX patch's touch_resize.c. Rebase the branch when niri updates.
+Tablet mode under niri: switch-events run
 ~/.config/niri/scripts/tablet-mode.sh (autorotate + lisgd; no automatic
 on-screen keyboard), root step scripts/04-install-tablet-tools.sh. The bar holds state
 and returns `bar::Action`s; it does no I/O. The tray (`src/tray.rs`): the
