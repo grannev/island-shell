@@ -12,8 +12,9 @@ use crate::island::{Font, Renderer};
 pub type Rgb = (f64, f64, f64);
 
 /// How wide each symbol is (logical px), at rest.
-pub const SPEAKER_W: f64 = 19.0;
-pub const KEYBOARD_W: f64 = 19.0;
+pub const SPEAKER_W: f64 = 19.5;
+pub const KEYBOARD_W: f64 = 20.0;
+pub const ELLIPSIS_W: f64 = 14.0;
 /// The battery: its body, the cap after a gap, and the bolt's room.
 const BODY_W: f64 = 25.5;
 const BODY_H: f64 = 12.5;
@@ -92,42 +93,39 @@ impl Glyphs {
         BATTERY_W + BOLT_W * self.charge.target()
     }
 
-    /// The speaker from `x`, centred on `cy`.
+    /// The speaker from `x`, centred on `cy` (SF Symbols' speaker.wave.3.fill:
+    /// one smooth body and cone, three even arcs).
     pub fn draw_speaker(&self, cr: &Context, x: f64, cy: f64, colour: Rgb, alpha: f64, now: Time) {
         let (r, g, b) = colour;
         cr.save().unwrap();
-        cr.new_path();
-        // the body and its cone, one rounded shape
-        cr.set_line_join(cairo::LineJoin::Round);
-        cr.set_line_width(1.3);
-        cr.move_to(x + 1.0, cy - 2.9);
-        cr.line_to(x + 4.0, cy - 2.9);
-        cr.line_to(x + 8.0, cy - 6.6);
-        cr.line_to(x + 8.0, cy + 6.6);
-        cr.line_to(x + 4.0, cy + 2.9);
-        cr.line_to(x + 1.0, cy + 2.9);
-        cr.close_path();
+        rounded_polygon(cr, &[
+            (x, cy - 3.0, 1.2),
+            (x + 3.6, cy - 3.0, 0.9),
+            (x + 8.0, cy - 7.0, 1.6),
+            (x + 8.0, cy + 7.0, 1.6),
+            (x + 3.6, cy + 3.0, 0.9),
+            (x, cy + 3.0, 1.2),
+        ]);
         cr.set_source_rgba(r, g, b, alpha);
-        let _ = cr.fill_preserve();
-        let _ = cr.stroke();
+        let _ = cr.fill();
         // the waves, lit by the level (a lit one swells out a little)
         cr.set_line_cap(cairo::LineCap::Round);
-        cr.set_line_width(1.6);
+        cr.set_line_width(1.75);
         for (i, w) in self.waves.iter().enumerate() {
             let k = w.value(now).clamp(-0.2, 1.3);
             let lit = WAVE_DIM + (1.0 - WAVE_DIM) * k.clamp(0.0, 1.0);
             let fade = 1.0 - self.slash.value(now).clamp(0.0, 1.0) * (1.0 - WAVE_DIM);
-            let radius = [3.9, 7.0, 10.1][i] * (0.92 + 0.08 * k);
-            let sweep = [0.95, 0.88, 0.82][i];
+            let radius = [4.7, 7.9, 11.1][i] * (0.94 + 0.06 * k);
+            let sweep = [0.74, 0.8, 0.84][i];
             cr.new_path();
-            cr.arc(x + 7.4, cy, radius, -sweep, sweep);
+            cr.arc(x + 7.0, cy, radius, -sweep, sweep);
             cr.set_source_rgba(r, g, b, alpha * (lit * fade).min(1.0));
             let _ = cr.stroke();
         }
         // muted: a stroke drawn across it, cut out of what it crosses
         let s = self.slash.value(now).clamp(0.0, 1.05);
         if s > 0.01 {
-            let (x0, y0, x1, y1) = (x + 1.5, cy - 7.5, x + 16.0, cy + 7.5);
+            let (x0, y0, x1, y1) = (x + 1.5, cy - 8.0, x + 17.0, cy + 8.0);
             let (ex, ey) = (x0 + (x1 - x0) * s, y0 + (y1 - y0) * s);
             cr.new_path();
             cr.move_to(x0, y0);
@@ -195,28 +193,71 @@ impl Glyphs {
     }
 }
 
-/// The keyboard from `x`, centred on `cy`: a filled body, its keys cut out.
+/// The keyboard from `x`, centred on `cy` (SF Symbols' keyboard.fill): a
+/// filled body with three rows cut out of it — seven keys, six between
+/// them, and the space bar between two.
 pub fn draw_keyboard(cr: &Context, renderer: &Renderer, x: f64, cy: f64, colour: Rgb, alpha: f64) {
-    let (w, h) = (KEYBOARD_W, 12.6);
+    let (w, h) = (KEYBOARD_W, 13.5);
     let (x, y) = (renderer.snap(x), renderer.snap(cy - h / 2.0));
     cr.save().unwrap();
-    rounded(cr, x, y, w, h, 2.8);
+    rounded(cr, x, y, w, h, 3.0);
     cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
     let _ = cr.fill();
     cr.set_source_rgba(0.0, 0.0, 0.0, alpha);
-    let key = |kx: f64, ky: f64, kw: f64| {
-        rounded(cr, renderer.snap(kx), renderer.snap(ky), kw, 1.9, 0.5);
+    let (kw, kh, pitch, margin) = (1.8, 1.8, 2.5, 1.6);
+    let key = |kx: f64, ky: f64, width: f64| {
+        rounded(cr, kx, ky, width, kh, 0.5);
         let _ = cr.fill();
     };
-    // two rows of keys, the second shifted by half a key, and the space bar
+    for i in 0..7 {
+        key(x + margin + i as f64 * pitch, y + 2.4, kw);
+    }
     for i in 0..6 {
-        key(x + 2.2 + i as f64 * 2.6, y + 2.2, 1.9);
+        key(x + margin + pitch / 2.0 + i as f64 * pitch, y + 5.8, kw);
     }
-    for i in 0..5 {
-        key(x + 3.5 + i as f64 * 2.6, y + 5.0, 1.9);
-    }
-    key(x + 5.0, y + 8.3, w - 10.0);
+    key(x + margin, y + 9.2, kw);
+    key(x + margin + pitch, y + 9.2, w - 2.0 * (margin + pitch));
+    key(x + w - margin - kw, y + 9.2, kw);
     cr.restore().unwrap();
+}
+
+/// The drawer's handle from `x`, centred on `cy`: three dots.
+pub fn draw_ellipsis(cr: &Context, x: f64, cy: f64, colour: Rgb, alpha: f64) {
+    cr.save().unwrap();
+    cr.new_path();
+    for i in 0..3 {
+        let cx = x + 1.7 + i as f64 * 5.3;
+        cr.new_sub_path();
+        cr.arc(cx, cy, 1.7, 0.0, std::f64::consts::TAU);
+    }
+    cr.set_source_rgba(colour.0, colour.1, colour.2, alpha);
+    let _ = cr.fill();
+    cr.restore().unwrap();
+}
+
+/// A closed polygon through `(x, y, radius)` points, each corner rounded
+/// smoothly (a curve tangent to both of its edges).
+fn rounded_polygon(cr: &Context, points: &[(f64, f64, f64)]) {
+    let n = points.len();
+    cr.new_path();
+    for i in 0..n {
+        let (px, py, _) = points[(i + n - 1) % n];
+        let (vx, vy, r) = points[i];
+        let (nx, ny, _) = points[(i + 1) % n];
+        let (ax, ay) = (px - vx, py - vy);
+        let (bx, by) = (nx - vx, ny - vy);
+        let (la, lb) = (ax.hypot(ay), bx.hypot(by));
+        let (ax, ay, bx, by) = (ax / la, ay / la, bx / lb, by / lb);
+        // where the curve leaves each edge: r / tan(half the corner's angle)
+        let angle = (ax * bx + ay * by).clamp(-1.0, 1.0).acos();
+        let t = (r / (angle / 2.0).tan()).min(la / 2.0).min(lb / 2.0);
+        let (p1x, p1y) = (vx + ax * t, vy + ay * t);
+        let (p2x, p2y) = (vx + bx * t, vy + by * t);
+        if i == 0 { cr.move_to(p1x, p1y) } else { cr.line_to(p1x, p1y) }
+        let k = 0.55;
+        cr.curve_to(p1x + (vx - p1x) * k, p1y + (vy - p1y) * k, p2x + (vx - p2x) * k, p2y + (vy - p2y) * k, p2x, p2y);
+    }
+    cr.close_path();
 }
 
 /// A bolt round the origin, about 7 × 11.

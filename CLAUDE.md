@@ -262,8 +262,10 @@ left; the drawer (disk / CPU / memory sampled once a second only while open,
 `bar_sources.rs`; CPU and memory carry small graphs of the readings since it
 opened, sliding left on a spring as each arrives), volume (click mute, scroll 5 %), layout (click: wvkbd),
 battery (tooltip with the time left) and the tray right; the speaker, keyboard
-and battery are vectors (`src/bar_icons.rs`: waves lit by the level, a mute
-slash, iOS's battery with the percentage cut out of its fill, red ≤ 20 %,
+and battery are vectors after SF Symbols (`src/bar_icons.rs`: one smooth
+speaker body with even waves lit by the level, a mute
+slash, keyboard.fill's three rows, a dotted ⋯, readings in Semibold, iOS's
+battery with the percentage cut out of its fill, red ≤ 20 %,
 green and a bolt while charging). A drop can be pulled down like the island
 (`Bar::tug_press/tug_to/tug_release`, left presses on it act on release; a
 pull jumps back on jelly and ripples the edge). The bar holds state

@@ -40,7 +40,6 @@ pub const TRAY_ICON: f64 = 18.0;
 const TRAY_SPACING: f64 = 6.0;
 
 /// SF Symbols (private-use glyphs of SF Pro, as the menu bar draws them).
-const ELLIPSIS: &str = "\u{100360}";
 const DISK: &str = "\u{1009D8}";
 const CPU: &str = "\u{1009D3}";
 const MEMORY: &str = "\u{1009D6}";
@@ -62,6 +61,9 @@ pub const APP_ICON: f64 = 15.0;
 const APP_ICON_GAP: f64 = 6.0;
 const APP_ICON_SPACING: f64 = 3.0;
 const APP_ICONS_MAX: usize = 4;
+/// The right drop's readings: SF Pro Text Semibold, as iOS's status bar
+/// writes them beside its battery.
+const STATUS_FONT: Font = Font::Text;
 /// Between a drawn symbol and its text.
 const SYMBOL_GAP: f64 = 5.0;
 
@@ -576,7 +578,7 @@ impl Bar {
 
     /// The right drop's cells, left to right.
     fn right_cells(&self, cr: &Context, renderer: &Renderer) -> Vec<(Cell, Option<String>)> {
-        let text_w = |s: &str| renderer.layout(cr, s, Font::Bar).pixel_extents().1.width() as f64;
+        let text_w = |s: &str| renderer.layout(cr, s, STATUS_FONT).pixel_extents().1.width() as f64;
         let mut cells = Vec::new();
         // the drawer opens to the left of ⋯, which stays by the volume
         if let Some(d) = &self.details {
@@ -590,7 +592,7 @@ impl Bar {
                 cells.push((Cell { item, width }, Some(text)));
             }
         }
-        cells.push((Cell { item: Item::Details, width: text_w(ELLIPSIS) + 2.0 * PAD_DETAILS }, Some(ELLIPSIS.to_string())));
+        cells.push((Cell { item: Item::Details, width: crate::bar_icons::ELLIPSIS_W + 2.0 * PAD_DETAILS }, Some(String::new())));
         // the drawn symbols, their text after them
         if let Some((value, _)) = self.volume {
             let text = format!("{}%", (value * 100.0).round() as u32);
@@ -790,6 +792,10 @@ impl Bar {
                                 crate::bar_icons::draw_keyboard(cr, renderer, x + pad, cy, colour, 1.0);
                                 crate::bar_icons::KEYBOARD_W + SYMBOL_GAP
                             }
+                            Item::Details => {
+                                crate::bar_icons::draw_ellipsis(cr, x + pad, cy, colour, 1.0);
+                                0.0
+                            }
                             Item::Battery => {
                                 if let Some(b) = self.battery {
                                     self.glyphs.draw_battery(cr, renderer, x + pad, cy, b.percent, 1.0, now);
@@ -811,9 +817,9 @@ impl Bar {
                         }
                         if !text.is_empty() {
                             let key = format!("bar {item:?}");
-                            let lh = renderer.layout(cr, text, Font::Bar).pixel_extents().1;
+                            let lh = renderer.layout(cr, text, STATUS_FONT).pixel_extents().1;
                             crate::motion::text(cr, renderer, &key, text, x + pad + symbol, (HEIGHT - lh.height() as f64) / 2.0 - lh.y() as f64,
-                                (slot_w - pad - symbol).max(4.0) + 40.0, 0.0, Font::Bar, colour, 1.0);
+                                (slot_w - pad - symbol).max(4.0) + 40.0, 0.0, STATUS_FONT, colour, 1.0);
                         }
                     }
                     _ => {}
