@@ -327,7 +327,7 @@ folding the screen back starts `~/.config/niri/scripts/tablet-mode.sh on` —
 the screen follows the accelerometer (`monitor-sensor`, niri's transform)
 and lisgd turns touchscreen swipes into niri actions (one finger in from the
 left / right edge: that column; up from the bottom edge: the overview; three
-fingers are niri's own, see below); folding it back stops
+fingers are niri's own, see above); folding it back stops
 both and stands the screen upright. The on-screen keyboard is not shown on
 its own. The touchscreen and the pen are mapped to eDP-1. Root step:
 `sudo sh scripts/04-install-tablet-tools.sh` (lisgd, libinput-tools, and a
