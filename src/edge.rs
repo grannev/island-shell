@@ -74,7 +74,7 @@ struct Pulse {
 const EMBER_REACH: f64 = 70.0;
 
 /// The island's fillets where it hangs from the screen's edge.
-const ISLAND_FILLET: f64 = 14.0;
+const ISLAND_FILLET: f64 = crate::menu_style::tight(14.0);
 
 #[derive(Default)]
 pub struct Edge {

@@ -186,7 +186,7 @@ fn ease_out_back(x: f64) -> f64 {
 }
 
 fn rounded(cr: &Context, r: Rect, radius: f64) {
-    let radius = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+    let radius = crate::menu_style::corner(radius, r.w, r.h);
     use std::f64::consts::{FRAC_PI_2, PI};
     cr.new_sub_path();
     cr.arc(r.x + r.w - radius, r.y + radius, radius, -FRAC_PI_2, 0.0);

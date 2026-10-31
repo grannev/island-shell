@@ -55,8 +55,26 @@ pub enum ButtonKind {
     Plain,
 }
 
+/// How much of its designed radius every rounded corner keeps: the user
+/// asked for tighter corners throughout (2026-10-31). Capsules and discs
+/// keep their round ends (see `corner`).
+pub const CORNER_SCALE: f64 = 0.7;
+
+/// A designed radius, tightened.
+pub const fn tight(r: f64) -> f64 {
+    r * CORNER_SCALE
+}
+
+/// The radius a `w`×`h` box with a designed corner `r` is drawn with: a
+/// radius that already makes a capsule or a disc stays one, any other
+/// corner tightens.
+pub fn corner(r: f64, w: f64, h: f64) -> f64 {
+    let full = (w.min(h) / 2.0).max(0.0);
+    if r >= full - 0.01 { full } else { tight(r).max(0.0) }
+}
+
 pub fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    let r = corner(r, w, h);
     cr.new_path();
     cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
     cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);

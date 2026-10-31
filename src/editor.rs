@@ -13,7 +13,7 @@ use crate::nvim::{Diagnostics, Editor};
 
 pub const PANEL_W: f64 = 470.0;
 pub const PANEL_H: f64 = BUTTON_Y + crate::menu_style::SMALL_BUTTON_H + PAD;
-pub const PANEL_R: f64 = 30.0;
+pub const PANEL_R: f64 = crate::menu_style::tight(30.0);
 
 const PAD: f64 = 22.0;
 const ICON: f64 = crate::menu_style::TILE;
@@ -513,7 +513,7 @@ fn hsl(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
 }
 
 fn capsule(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0);
+    let r = crate::menu_style::corner(r, w, h);
     cr.new_path();
     cr.arc(x + r, y + r, r, PI, 1.5 * PI);
     cr.arc(x + w - r, y + r, r, 1.5 * PI, 2.0 * PI);

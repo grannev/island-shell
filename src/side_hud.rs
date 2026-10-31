@@ -17,8 +17,8 @@ use crate::island::{Font, Rect, Renderer};
 /// and the fillets where it meets the edge.
 const WIDTH: f64 = 56.0;
 const HEIGHT: f64 = 220.0;
-const RADIUS: f64 = 24.0;
-const FILLET: f64 = 14.0;
+const RADIUS: f64 = crate::menu_style::tight(24.0);
+const FILLET: f64 = crate::menu_style::tight(14.0);
 /// The slider inside: its width and where it runs.
 const TRACK_W: f64 = 6.0;
 const TRACK_TOP: f64 = 50.0;

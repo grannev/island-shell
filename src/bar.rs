@@ -20,8 +20,8 @@ use crate::island::{Font, Rect, Renderer};
 /// The drops are as tall as the island.
 pub const HEIGHT: f64 = 32.0;
 /// Their free corner and the fillets where they leave an edge.
-pub const RADIUS: f64 = 14.0;
-pub const FILLET: f64 = 14.0;
+pub const RADIUS: f64 = crate::menu_style::tight(14.0);
+pub const FILLET: f64 = crate::menu_style::tight(14.0);
 /// Room inside a drop before its first item and after its last (the free
 /// end also clears the rounded corner).
 const LEAD: f64 = 4.0;
@@ -1066,7 +1066,7 @@ fn menu_label(cr: &Context, renderer: &Renderer, text: &str, r: Rect, enabled: b
 }
 
 fn rounded(cr: &Context, r: Rect, radius: f64) {
-    let radius = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+    let radius = crate::menu_style::corner(radius, r.w, r.h);
     use std::f64::consts::{FRAC_PI_2, PI};
     cr.new_sub_path();
     cr.arc(r.x + r.w - radius, r.y + radius, radius, -FRAC_PI_2, 0.0);

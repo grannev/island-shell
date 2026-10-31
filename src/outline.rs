@@ -66,8 +66,8 @@ pub struct Outline {
 }
 
 /// Drops' free corners and fillets.
-const DROP_RADIUS: f64 = 14.0;
-const DROP_FILLET: f64 = 14.0;
+const DROP_RADIUS: f64 = crate::menu_style::tight(14.0);
+const DROP_FILLET: f64 = crate::menu_style::tight(14.0);
 
 impl Outline {
     /// The loop on a screen `w`×`h` with corners `corner`, the island (or

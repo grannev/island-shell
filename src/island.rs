@@ -26,10 +26,10 @@ use crate::touchid;
 /// Height of the black box, logical px.
 pub const BOX_H: f64 = 32.0;
 /// Bottom corner radius at rest / when fully retracted into the edge.
-const RADIUS: f64 = 14.0;
-const RADIUS_HIDDEN: f64 = 22.0;
+const RADIUS: f64 = crate::menu_style::tight(14.0);
+const RADIUS_HIDDEN: f64 = crate::menu_style::tight(22.0);
 /// The concave fillets where the box meets the top edge of the screen.
-pub const FILLET: f64 = 14.0;
+pub const FILLET: f64 = crate::menu_style::tight(14.0);
 /// How strongly a new notification ripples the frame's edge.
 const SPLASH_NOTICE: f64 = 0.45;
 const PAD: f64 = 16.0;
@@ -112,7 +112,7 @@ const HIDE_DUR: f64 = 0.25;
 const REVEAL_DUR: f64 = 0.3;
 /// the island opening into the player, and the toast's life
 const PLAYER_DUR: f64 = 0.34;
-const PLAYER_R: f64 = 28.0;
+const PLAYER_R: f64 = crate::menu_style::tight(28.0);
 /// how often a drag tells the player where it has got to
 const SCRUB_INTERVAL: f64 = 0.25;
 /// the progress line's swell and the controls' glow (response, damping);
@@ -312,7 +312,7 @@ const BARS_H: f64 = 14.0;
 /// the middle where the clock was. Around a title the shorter wing evens up
 /// with the wider one (within WING_BALANCE), so the title stays centred.
 const COVER: f64 = 20.0;
-const COVER_R: f64 = 6.0;
+const COVER_R: f64 = crate::menu_style::tight(6.0);
 const COVER_GAP: f64 = 10.0;
 /// the timer's ring and its gap, when it moves to the left wing
 const RING_LEN: f64 = 30.0;
@@ -459,7 +459,7 @@ pub struct Config {
 
 /// The X1 Titanium's lid corners, measured off a photo: ~55 photo px where
 /// the 26 px bar is ~95.
-pub const SCREEN_CORNERS: f64 = 16.0;
+pub const SCREEN_CORNERS: f64 = crate::menu_style::tight(16.0);
 
 pub const CLOCK_FORMAT: &str = "%a %b %-d  %-I:%M %p";
 
@@ -3169,7 +3169,7 @@ impl Island {
         } else if self.auth.is_some() || self.notice.is_some() || self.toast.is_some() || self.visible_activity().is_some() {
             self.sheet_corners = false;
         }
-        let pill_radius = if self.sheet_corners { 30.0 } else { self.pill_h.state(now).x / 2.0 };
+        let pill_radius = crate::menu_style::tight(if self.sheet_corners { 30.0 } else { self.pill_h.state(now).x / 2.0 });
         let radius = radius
             + (pill_radius - radius) * q
             + (PLAYER_R - radius) * pl

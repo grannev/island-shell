@@ -13,7 +13,7 @@ use crate::island::{Font, Renderer};
 
 pub const PANEL_W: f64 = 660.0;
 pub const PANEL_H: f64 = 512.0;
-pub const PANEL_R: f64 = 32.0;
+pub const PANEL_R: f64 = crate::menu_style::tight(32.0);
 
 /// The search field.
 const FIELD_TOP: f64 = 46.0;
@@ -921,7 +921,7 @@ fn hsl(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
 }
 
 fn rounded(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0);
+    let r = crate::menu_style::corner(r, w, h);
     cr.new_path();
     cr.arc(x + r, y + r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
     cr.arc(x + w - r, y + r, r, 1.5 * std::f64::consts::PI, 2.0 * std::f64::consts::PI);

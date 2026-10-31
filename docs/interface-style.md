@@ -25,6 +25,10 @@ give the new family a clear purpose and add its helper to `menu_style.rs`.
   y = 40 (`HEADER_MID`); content starts at y = 76 (`CONTENT_TOP`); 22 px
   bottom rail. Grouped lists and cards have 12 px corners, quick-menu tiles
   16 px, app tiles 25 % of their size.
+- **Corners:** every radius in this guide and in the code is a designed
+  value; corners are drawn at `menu_style::CORNER_SCALE` (0.7) of it —
+  constants through `menu_style::tight`, rounded boxes through
+  `menu_style::corner`, which leaves capsules and discs round.
 
 ## Roles
 

@@ -928,7 +928,7 @@ fn draw_clock(cr: &Context, cx: f64, cy: f64, alpha: f64) {
 }
 
 fn round_rect(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    let r = r.min(w / 2.0).min(h / 2.0);
+    let r = crate::menu_style::corner(r, w, h);
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
     cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
