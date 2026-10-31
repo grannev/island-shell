@@ -1,5 +1,8 @@
 # iswm — island-sway WM: stages 1–2
 
+This is the original plan. The living copy, with its checklist kept
+current, is `~/it/coding/iswm/docs/plan.md`.
+
 iswm is a soft fork of SwayFX whose window decorations and motion follow the
 island's look. It is not a rewrite: the tree, layouts, i3/sway IPC, input,
 Xwayland and every protocol stay SwayFX's. iswm adds its own decoration
