@@ -238,6 +238,10 @@ impl Query {
         action(json!({ "FocusWorkspace": { "reference": { "Id": id } } }))
     }
 
+    pub fn toggle_overview(&mut self) -> io::Result<()> {
+        action(json!({ "ToggleOverview": {} }))
+    }
+
     pub fn next_layout(&mut self) -> io::Result<()> {
         action(json!({ "SwitchLayout": { "layout": "Next" } }))
     }

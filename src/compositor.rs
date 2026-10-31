@@ -68,6 +68,14 @@ impl Query {
         }
     }
 
+    /// niri's overview; sway has none (the bar never asks there).
+    pub fn toggle_overview(&mut self) -> io::Result<()> {
+        match self {
+            Query::Sway(_) => Ok(()),
+            Query::Niri(q) => q.toggle_overview(),
+        }
+    }
+
     /// The keyboard's next layout.
     pub fn next_layout(&mut self) -> io::Result<()> {
         match self {

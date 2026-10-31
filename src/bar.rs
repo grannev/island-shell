@@ -213,6 +213,13 @@ pub struct Bar {
     /// jumps back
     tug: Option<DropTug>,
     stretch: [Spring; 2],
+    /// the compositor has an overview (niri): the left drop pulled far
+    /// enough opens it
+    pub overview: bool,
+    /// a pull asked for the overview (the app takes it), and when (its
+    /// symbol zooms away as the overview opens)
+    overview_asked: bool,
+    overview_fired: Option<Time>,
 }
 
 /// A drop held by the pointer: pulled down against a rubber band.
@@ -223,11 +230,17 @@ struct DropTug {
     pull: f64,
     velocity: f64,
     at: Time,
+    /// when the pull crossed the overview's threshold (it bounces then)
+    armed: Option<Time>,
 }
 
 /// How far a drop gives (it never reaches this), the pointer's travel
 /// before a press becomes a pull, and the jelly it springs back on.
 const TUG_DOWN: f64 = 26.0;
+/// With an overview to open, the left drop gives further, and a pull past
+/// this (about 65 px of travel) opens it on release.
+const OVERVIEW_DOWN: f64 = 44.0;
+const OVERVIEW_AT: f64 = 20.0;
 const TUG_SLOP: f64 = 6.0;
 const TUG_RESPONSE: f64 = 0.46;
 const TUG_DAMPING: f64 = 0.42;
@@ -259,6 +272,9 @@ impl Default for Bar {
             splash: None,
             focused: None,
             tug: None,
+            overview: false,
+            overview_asked: false,
+            overview_fired: None,
             stretch: [0; 2].map(|_| Spring::new(0.0, TUG_RESPONSE, TUG_DAMPING)),
         }
     }
@@ -434,6 +450,38 @@ impl Bar {
             // (a drop in the hand needs no frames of its own: each move of
             // the pointer draws one, and a lost release must not spin)
             || self.stretch.iter().any(|s| s.is_moving(now))
+            // the overview's symbol bouncing as the pull crosses its
+            // threshold, and zooming away on release (both bounded)
+            || self.tug.as_ref().and_then(|t| t.armed).is_some_and(|a| now - a < 0.6)
+            || self.overview_fired.is_some_and(|t| now - t < 0.35)
+    }
+
+    /// Under the workspaces of a pulled left drop: the overview's symbol,
+    /// four tiles that come up as the pull nears the threshold, bounce as
+    /// it crosses it, and zoom away when let go there.
+    fn draw_overview_hint(&self, cr: &Context, dw: f64, pull: f64, now: Time) {
+        let armed = self.tug.as_ref().filter(|t| t.side == 0).and_then(|t| t.armed);
+        let fired = self.overview_fired.map(|t| now - t).filter(|t| *t < 0.35);
+        let k = crate::island::smoothstep((pull - 6.0) / (OVERVIEW_AT - 6.0));
+        let (scale, alpha) = match (armed, fired) {
+            (_, Some(t)) => (1.0 + 0.8 * crate::island::smoothstep(t / 0.35), 1.0 - crate::island::smoothstep(t / 0.35)),
+            (Some(a), None) => (crate::menu_style::bounce_scale(now - a), 1.0),
+            (None, None) => (0.7 + 0.3 * k, 0.45 * k),
+        };
+        if alpha <= 0.01 { return; }
+        let (cx, cy) = (dw / 2.0, HEIGHT + pull - 12.0);
+        let (tile, gap) = (5.0, 2.0);
+        cr.save().unwrap();
+        cr.translate(cx, cy);
+        cr.scale(scale, scale);
+        for (i, j) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let x = -tile - gap / 2.0 + i * (tile + gap);
+            let y = -tile - gap / 2.0 + j * (tile + gap);
+            crate::menu_style::rounded(cr, x, y, tile, tile, 1.6);
+        }
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+        let _ = cr.fill();
+        cr.restore().unwrap();
     }
 
     /// Which drop a press here would take in the hand (none while a menu
@@ -449,7 +497,7 @@ impl Bar {
     /// the press means waits: a pull, or a click on release.
     pub fn tug_press(&mut self, x: f64, y: f64, now: Time) -> bool {
         let Some(side) = self.tuggable(x, y) else { return false };
-        self.tug = Some(DropTug { side, from: (x, y), engaged: false, pull: 0.0, velocity: 0.0, at: now });
+        self.tug = Some(DropTug { side, from: (x, y), engaged: false, pull: 0.0, velocity: 0.0, at: now, armed: None });
         true
     }
 
@@ -468,7 +516,15 @@ impl Bar {
             }
             t.engaged = true;
         }
-        let pull = crate::island::rubber(dy.max(0.0), TUG_DOWN);
+        let limit = if t.side == 0 && self.overview { OVERVIEW_DOWN } else { TUG_DOWN };
+        let pull = crate::island::rubber(dy.max(0.0), limit);
+        if limit == OVERVIEW_DOWN {
+            if pull >= OVERVIEW_AT && t.armed.is_none() {
+                t.armed = Some(now);
+            } else if pull < OVERVIEW_AT - 3.0 {
+                t.armed = None;
+            }
+        }
         let dt = now - t.at;
         if dt > 0.004 {
             t.velocity = 0.5 * t.velocity + 0.5 * (pull - t.pull) / dt;
@@ -490,7 +546,16 @@ impl Bar {
         if let Some(d) = self.drops[t.side] {
             self.splash = Some((d.x + d.w / 2.0, (t.pull / TUG_DOWN).min(1.0)));
         }
+        if t.armed.is_some() {
+            self.overview_asked = true;
+            self.overview_fired = Some(now);
+        }
         true
+    }
+
+    /// A pull past the threshold asked for the overview (once).
+    pub fn take_overview(&mut self) -> bool {
+        std::mem::take(&mut self.overview_asked)
     }
 
     /// How far a drop is stretched down now.
@@ -680,14 +745,18 @@ impl Bar {
         let content: f64 = left_w.iter().sum();
         if content > 0.5 {
             let dw = LEAD + content + TAIL;
-            // pulled down it stretches, its buttons riding half way
+            // pulled down it stretches, its buttons riding half way (a
+            // quarter, when the overview's symbol shows up under them)
             let pull = self.stretched(0, now);
             crate::drop::corner(cr, w, false, dw, HEIGHT + pull, RADIUS, FILLET, smoothing);
             cr.set_source_rgb(0.0, 0.0, 0.0);
             let _ = cr.fill();
             self.drops[0] = Some(Rect { x: 0.0, y: 0.0, w: dw, h: HEIGHT + pull + y });
+            if self.overview {
+                self.draw_overview_hint(cr, dw, pull, now);
+            }
             cr.save().unwrap();
-            cr.translate(0.0, pull / 2.0);
+            cr.translate(0.0, if self.overview { pull / 4.0 } else { pull / 2.0 });
             let mut x = LEAD;
             let mut focus = None;
             for ((cell, text), slot_w) in left.iter().zip(&left_w) {
@@ -747,7 +816,7 @@ impl Bar {
                 let _ = cr.fill();
             }
             cr.restore().unwrap();
-            frame.painted.push(Rect { x: 0.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + TUG_DOWN + FILLET * 5.0 + y).max(0.0) });
+            frame.painted.push(Rect { x: 0.0, y: 0.0, w: dw + FILLET * 5.0, h: (HEIGHT + OVERVIEW_DOWN + FILLET * 5.0 + y).max(0.0) });
             frame.input.push(Rect { x: 0.0, y: 0.0, w: dw, h: (HEIGHT + pull.max(0.0) + y).max(0.0) });
         }
 
@@ -1231,6 +1300,43 @@ mod tests {
         settle(&mut bar, 13.0);
         assert!((bar.drop_sizes()[1].unwrap().h - HEIGHT).abs() < 0.5);
         assert!(!bar.is_animating(15.0));
+    }
+
+    #[test]
+    fn the_left_drop_pulled_far_opens_the_overview() {
+        let mut bar = bar();
+        bar.overview = true;
+        settle(&mut bar, 10.0);
+        let left = bar.drops[0].unwrap();
+        let (x, y) = (left.x + left.w / 2.0, 16.0);
+        // a short pull just jumps back
+        assert!(bar.tug_press(x, y, 11.0));
+        bar.tug_to(x, y + 30.0, 11.1);
+        assert!(bar.tug_release(11.2));
+        assert!(!bar.take_overview());
+        // a long one opens it, once; the drop gives further than the right one
+        settle(&mut bar, 12.0);
+        assert!(bar.tug_press(x, y, 13.0));
+        bar.tug_to(x, y + 120.0, 13.1);
+        settle_once(&mut bar, 13.1);
+        assert!(bar.drop_sizes()[0].unwrap().h > HEIGHT + TUG_DOWN);
+        assert!(bar.tug_release(13.2));
+        assert!(bar.take_overview());
+        assert!(!bar.take_overview());
+        settle(&mut bar, 14.0);
+        assert!(!bar.is_animating(16.0));
+        // the right drop, and a compositor without an overview, never ask
+        let right = bar.drops[1].unwrap();
+        assert!(bar.tug_press(right.x + right.w / 2.0, 16.0, 17.0));
+        bar.tug_to(right.x + right.w / 2.0, 140.0, 17.1);
+        bar.tug_release(17.2);
+        assert!(!bar.take_overview());
+        bar.overview = false;
+        settle(&mut bar, 18.0);
+        assert!(bar.tug_press(x, y, 19.0));
+        bar.tug_to(x, y + 120.0, 19.1);
+        bar.tug_release(19.2);
+        assert!(!bar.take_overview());
     }
 
     fn settle_once(bar: &mut Bar, now: Time) -> BarFrame {

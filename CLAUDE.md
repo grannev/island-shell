@@ -308,7 +308,11 @@ slash, keyboard.fill's three rows, a dotted ⋯, readings in Semibold, iOS's
 battery with the percentage cut out of its fill, red ≤ 20 %,
 green and a bolt while charging). A drop can be pulled down like the island
 (`Bar::tug_press/tug_to/tug_release`, left presses on it act on release; a
-pull jumps back on jelly and ripples the edge). The bar holds state
+pull jumps back on jelly and ripples the edge; under niri, `Bar::overview`,
+the left drop gives to 44 px and a pull past 20 px asks for niri's overview,
+`Bar::take_overview`). Tablet mode under niri: switch-events run
+~/.config/niri/scripts/tablet-mode.sh (autorotate + lisgd; no automatic
+on-screen keyboard), root step scripts/04-install-tablet-tools.sh. The bar holds state
 and returns `bar::Action`s; it does no I/O. The tray (`src/tray.rs`): the
 island owns `org.kde.StatusNotifierWatcher` (same properties/signals as
 Waybar's, lock.sh counts items) and hosts the items on threads; menus

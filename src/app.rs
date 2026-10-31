@@ -516,6 +516,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    // niri has an overview: the bar's left drop pulled down opens it
+    island.bar.overview = wm.as_ref().is_some_and(|q| q.is_niri());
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -1634,6 +1636,15 @@ impl App {
         }
     }
 
+    /// niri's overview (the left drop pulled far enough).
+    fn toggle_overview(&mut self) {
+        if let Some(q) = self.wm.as_mut() {
+            if let Err(e) = q.toggle_overview() {
+                eprintln!("island-shell: overview: {e}");
+            }
+        }
+    }
+
     fn focus_workspace(&mut self, name: &str) {
         if let Some(q) = self.wm.as_mut() {
             if let Err(e) = q.focus_workspace(name) {
@@ -2565,6 +2576,7 @@ impl App {
                     PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                         if let Some(press) = self.bar_click.take() {
                             if self.island.bar.tug_release(now) {
+                                if self.island.bar.take_overview() { self.toggle_overview(); }
                                 changed = true;
                             } else {
                                 self.bar_replay = true;

@@ -307,6 +307,22 @@ a tight rubber band (at most ~34 px down, ~26 px sideways, a squash up), leans
 with its top lagging, stretches like a drop with its fillets drawn out, and
 jumps back like jelly when let go. A press that moves less than 6 px is still
 a click, decided on release.
+Under niri the bar's left drop (the workspaces) is the overview's handle:
+pulled down with a finger or the mouse it gives further than the right one,
+the overview's four tiles come up beneath the workspaces, bounce as the pull
+passes ~65 px, and letting go there opens niri's overview (the tiles zoom
+away); a shorter pull just jumps back.
+
+**Tablet mode under niri** (`~/.config/niri/config.kdl`, `switch-events`):
+folding the screen back starts `~/.config/niri/scripts/tablet-mode.sh on` —
+the screen follows the accelerometer (`monitor-sensor`, niri's transform)
+and lisgd turns touchscreen swipes into niri actions (one finger in from the
+left / right edge: that column; up from the bottom edge: the overview; three
+fingers sideways: columns, up / down: workspaces); folding it back stops
+both and stands the screen upright. The on-screen keyboard is not shown on
+its own. The touchscreen and the pen are mapped to eDP-1. Root step:
+`sudo sh scripts/04-install-tablet-tools.sh` (lisgd, libinput-tools, and a
+udev rule that lets the logged-in user read the touchscreen only).
 
 Keyboard: text, Backspace, Ctrl+U, Up/Down/Tab, Enter to launch, Escape to fold; the pointer picks rows and
 the wheel scrolls. The launcher takes the keyboard
