@@ -7126,7 +7126,14 @@ mod ripple_look {
         }
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/ripple-drops.png").unwrap()).unwrap();
-        // the right side close up, as the crest hits it
+        ripple_wall_image().write_to_png(&mut std::fs::File::create("target/gallery/ripple-wall.png").unwrap()).unwrap();
+    }
+
+    /// The right side close up, as the crest hits it (top), and the right
+    /// drop's inner turn (bottom), frame by frame.
+    fn ripple_wall_image() -> cairo::ImageSurface {
+        let renderer = Renderer::new(1.5);
+        let (w, h) = (1504.0, 1002.0);
         let times = [0.3, 0.36, 0.42, 0.5, 0.55, 0.58, 0.61, 0.65, 0.72, 0.85];
         let (cw, ch, zoom) = (150.0, 70.0, 3.0);
         let close = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom * times.len() as f64) as i32, (2.0 * ch * zoom + 3.0) as i32).unwrap();
@@ -7158,6 +7165,11 @@ mod ripple_look {
             }
         }
         drop(cr);
-        close.write_to_png(&mut std::fs::File::create("target/gallery/ripple-wall.png").unwrap()).unwrap();
+        close
+    }
+
+    #[test]
+    fn ripples_hit_the_wall_as_before() {
+        crate::golden::check("ripple-wall", &ripple_wall_image());
     }
 }

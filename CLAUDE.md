@@ -290,6 +290,11 @@ bounded LRU with pixel-quantized widths. Audio startup/mute polling are also
 background jobs. Keep a single timed redraw source for a steady countdown.
 The ignored `animation_benchmark` release test measures offscreen paint cost
 at 1.5× against the real desktop catalog (not compositor latency).
+Picture tests (`src/golden.rs`): scenes such as the bar's symbols, its drawer,
+a pulled drop and a ripple hitting the wall are compared with references in
+`tests/golden/` (colour channels, small slack); a mismatch writes the picture
+and a difference map to `target/golden/`; `UPDATE_GOLDEN=1 cargo test`
+accepts a deliberate change of look.
 
 The launcher also searches filenames/folders under HOME using fdfind/fd:
 two-character minimum, 180 ms debounce, 80 results, two worker threads,

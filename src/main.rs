@@ -52,6 +52,8 @@ mod timer_page;
 mod touch;
 mod touchid;
 mod tray;
+#[cfg(test)]
+mod golden;
 mod weather;
 
 fn main() {

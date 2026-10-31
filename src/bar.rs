@@ -1298,9 +1298,7 @@ mod tests {
 mod symbols_look {
     use super::*;
 
-    #[test]
-    #[ignore = "writes target/gallery/bar-symbols.png"]
-    fn symbols() {
+    fn symbols_image() -> cairo::ImageSurface {
         let states: [(f64, bool, u8, bool); 6] = [
             (0.2, false, 84, false), (0.5, false, 50, false), (0.9, false, 100, false),
             (0.5, true, 15, false), (0.7, false, 60, true), (0.0, false, 7, false),
@@ -1330,8 +1328,19 @@ mod symbols_look {
             cr.restore().unwrap();
         }
         drop(cr);
+        surface
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-symbols.png"]
+    fn symbols() {
         std::fs::create_dir_all("target/gallery").unwrap();
-        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-symbols.png").unwrap()).unwrap();
+        symbols_image().write_to_png(&mut std::fs::File::create("target/gallery/bar-symbols.png").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn symbols_look_as_before() {
+        crate::golden::check("bar-symbols", &symbols_image());
     }
 }
 
@@ -1339,9 +1348,7 @@ mod symbols_look {
 mod tug_look {
     use super::*;
 
-    #[test]
-    #[ignore = "writes target/gallery/bar-tug.png"]
-    fn pulled_drop() {
+    fn pulled_drop_image() -> cairo::ImageSurface {
         let renderer = Renderer::new(1.5);
         let (w, h, zoom) = (420.0, 70.0, 2.0);
         let pulls = [0.0, 30.0, 90.0, 400.0];
@@ -1372,7 +1379,19 @@ mod tug_look {
             cr.restore().unwrap();
         }
         drop(cr);
-        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-tug.png").unwrap()).unwrap();
+        surface
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-tug.png"]
+    fn pulled_drop() {
+        std::fs::create_dir_all("target/gallery").unwrap();
+        pulled_drop_image().write_to_png(&mut std::fs::File::create("target/gallery/bar-tug.png").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn pulled_drop_look_as_before() {
+        crate::golden::check("bar-tug", &pulled_drop_image());
     }
 }
 
@@ -1412,9 +1431,7 @@ mod workspace_apps_look {
 mod drawer_look {
     use super::*;
 
-    #[test]
-    #[ignore = "writes target/gallery/bar-drawer.png"]
-    fn drawer_graphs() {
+    fn drawer_graphs_image() -> cairo::ImageSurface {
         let renderer = Renderer::new(1.5);
         let (w, h, zoom) = (620.0, 36.0, 2.5);
         let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom) as i32).unwrap();
@@ -1437,6 +1454,18 @@ mod drawer_look {
         cr.paint().unwrap();
         bar.draw(&cr, &renderer, w, 0.6, t);
         drop(cr);
-        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-drawer.png").unwrap()).unwrap();
+        surface
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-drawer.png"]
+    fn drawer_graphs() {
+        std::fs::create_dir_all("target/gallery").unwrap();
+        drawer_graphs_image().write_to_png(&mut std::fs::File::create("target/gallery/bar-drawer.png").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn drawer_graphs_look_as_before() {
+        crate::golden::check("bar-drawer", &drawer_graphs_image());
     }
 }
