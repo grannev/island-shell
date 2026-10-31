@@ -93,6 +93,9 @@ const GAUGE_HEAD_LEN: f64 = 48.0;
 /// A comet's tail, as a share of the way round.
 const COMET_TAIL: f64 = 0.22;
 
+/// Over how much of the edge the island's rim light fades out past its
+/// fillets.
+const HALO_FADE: f64 = 22.0;
 /// The island's fillets where it hangs from the screen's edge.
 const ISLAND_FILLET: f64 = 14.0;
 
@@ -107,9 +110,9 @@ pub struct Edge {
     gauge: Option<Gauge>,
     /// the bottom corners smouldering red (low battery), how strongly
     ember: f64,
-    /// the frame grown this much thicker (Focus / Do Not Disturb), and the
-    /// screen's corner radius it rounds with
-    border: (f64, f64),
+    /// the island's own rim lit (Do Not Disturb purple, unread blue): each
+    /// colour and how strongly
+    halo: Vec<(Rgb, f64)>,
     /// music's light along the bottom edge: the cover's colour, how bright
     ambient: Option<(Rgb, f64)>,
     /// a continuous wave (Touch ID waiting): its colour, since when, and
@@ -170,10 +173,10 @@ impl Edge {
         self.ambient = ambient.filter(|a| a.1 > 0.005);
     }
 
-    /// Thicken the frame by `width` (0 = as usual), concentric with the
-    /// screen's corners of `radius`.
-    pub fn set_border(&mut self, width: f64, radius: f64) {
-        self.border = (width, radius);
+    /// Light the island's own rim — round its lower edge, up its sides and
+    /// its fillets, and no further — in each colour as strongly as given.
+    pub fn set_halo(&mut self, halo: Vec<(Rgb, f64)>) {
+        self.halo = halo.into_iter().filter(|h| h.1 > 0.004).collect();
     }
 
     /// The bottom corners' red glow (0 = none); it stands still.
@@ -195,7 +198,7 @@ impl Edge {
             self.breath = None;
         }
         if self.pulses.is_empty() && self.breath.is_none() && self.gauge.is_none()
-            && self.ember <= 0.0 && self.border.0 <= 0.05 && self.ambient.is_none() {
+            && self.ember <= 0.0 && self.halo.is_empty() && self.ambient.is_none() {
             return Vec::new();
         }
         // the frame's inner edge, round the island and the bar's drops
@@ -298,26 +301,16 @@ impl Edge {
                 .into_iter().map(|(d, a)| (d, a.max(rim))).chain([(far + SOFT, rim)]).collect();
             painted.extend(outline.paint(cr, colour, &|s| strength_at(&wave, both_ways(s))));
         }
-        // the thicker frame goes over the light: the light comes out of it
-        let (width, radius) = self.border;
-        if width > 0.05 {
-            cr.save().unwrap();
-            cr.new_path();
-            cr.set_fill_rule(cairo::FillRule::EvenOdd);
-            cr.rectangle(0.0, 0.0, w, h);
-            let inner = (radius - width).max(2.0);
-            let (x0, y0, x1, y1) = (width, width, w - width, h - width);
-            use std::f64::consts::{FRAC_PI_2, PI};
-            cr.new_sub_path();
-            cr.arc(x1 - inner, y0 + inner, inner, -FRAC_PI_2, 0.0);
-            cr.arc(x1 - inner, y1 - inner, inner, 0.0, FRAC_PI_2);
-            cr.arc(x0 + inner, y1 - inner, inner, FRAC_PI_2, PI);
-            cr.arc(x0 + inner, y0 + inner, inner, PI, 1.5 * PI);
-            cr.close_path();
-            cr.set_source_rgb(0.0, 0.0, 0.0);
-            let _ = cr.fill();
-            cr.restore().unwrap();
-            lit = true;
+        // the island's rim: as far round as the island itself goes (half
+        // its lower edge, a corner, a side and a fillet each way), fading
+        // out where its fillet meets the top
+        if let Some(i) = island.filter(|_| !self.halo.is_empty()) {
+            use std::f64::consts::FRAC_PI_2;
+            let r = i.radius.min(i.rect.w / 2.0).min(i.rect.h / 2.0);
+            let end = (i.rect.w / 2.0 - r) + FRAC_PI_2 * r + (i.rect.h - r - i.fillet).max(0.0) + FRAC_PI_2 * i.fillet;
+            for &(colour, k) in &self.halo {
+                painted.extend(outline.paint(cr, colour, &|s| k * (1.0 - smooth((both_ways(s) - end + HALO_FADE) / HALO_FADE))));
+            }
         }
         if lit {
             painted.extend(strips(w, h));
@@ -703,16 +696,20 @@ mod tests {
     }
 
     #[test]
-    fn focus_thickens_the_frame_evenly() {
+    fn the_halo_lights_the_islands_rim_only() {
         let mut edge = Edge::default();
-        edge.set_border(4.0, 16.0);
+        edge.set_island(Some((Rect { x: 250.0, y: 0.0, w: 100.0, h: 32.0 }, 14.0)));
+        edge.set_halo(vec![((0.75, 0.35, 0.95), 1.0)]);
         let (mut s, rects) = render(&mut edge, 0.0);
         assert!(!rects.is_empty());
-        for (x, y) in [(300, 2), (300, 397), (1, 200), (598, 200)] {
-            assert_eq!(alpha(&mut s, x, y), 255, "{x},{y}");
-        }
-        assert_eq!(alpha(&mut s, 300, 6), 0);
-        assert_eq!(alpha(&mut s, 6, 200), 0);
+        // under the island and beside it, lit; along the top far from it,
+        // and the rest of the frame, dark
+        assert!(alpha(&mut s, 300, 36) > 40, "under it");
+        assert!(alpha(&mut s, 354, 16) > 40, "beside it");
+        assert_eq!(alpha(&mut s, 450, 2), 0, "the top further on");
+        assert_eq!(alpha(&mut s, 2, 200), 0, "the sides");
+        edge.set_halo(Vec::new());
+        assert!(render(&mut edge, 1.0).1.is_empty());
     }
 
     #[test]

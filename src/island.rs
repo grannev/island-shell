@@ -145,8 +145,11 @@ const TUG_DAMPING: f64 = 0.42;
 /// The light round the frame waits this long for a pill to open.
 const PILL_LIGHT_DELAY: f64 = 0.25;
 
-/// How much thicker the frame is while Focus (Do Not Disturb) is on.
-const FOCUS_FRAME: f64 = 4.0;
+/// The island's rim: purple while Do Not Disturb is on, blue while
+/// notifications wait unread (iOS's purple, the old unread dot's blue).
+const HALO_DND: (f64, f64, f64) = (0xBF as f64 / 255.0, 0x5A as f64 / 255.0, 0xF2 as f64 / 255.0);
+const HALO_UNREAD: (f64, f64, f64) = (0.40, 0.82, 1.0);
+const HALO_STRENGTH: f64 = 0.85;
 
 /// How far a downward tug pulls the frame's top edge down with it.
 const TUG_SAG: f64 = 0.22;
@@ -900,7 +903,8 @@ pub struct Island {
     /// the top edge as a membrane (pulled by a tug, rippling)
     membrane: crate::edge::Membrane,
     /// the frame thickened for Focus / Do Not Disturb, 0..1
-    focus_frame: Spring,
+    /// the island's rim lit blue while notifications wait unread
+    unread_halo: Spring,
     /// the surface's centre, as of the last frame drawn
     surface_cx: f64,
     /// the box as last drawn, and its corner radius (None: above the edge)
@@ -1171,7 +1175,7 @@ impl Island {
             bar: crate::bar::Bar::default(),
             low_battery: false,
             membrane: crate::edge::Membrane::default(),
-            focus_frame: Spring::new(0.0, 0.45, 0.8),
+            unread_halo: Spring::new(0.0, 0.45, 1.0),
             surface_cx: 490.0,
             box_geom: None,
             tug_top: None,
@@ -1263,7 +1267,7 @@ impl Island {
             || self.edge.is_animating(now)
             || self.curtain.is_animating(now)
             || self.membrane.is_animating(now)
-            || self.focus_frame.is_moving(now)
+            || self.unread_halo.is_moving(now)
             || self.side_hud.is_animating(now)
             || self.config.bar && self.bar.is_animating(now)
             || self.floats.target() > 0.5 && self.floats.value(now) < 0.5
@@ -3091,8 +3095,8 @@ impl Island {
         self.player_rect = None;
         self.editor_chip_rect = None;
         let shown = self.config.compact;
-        let unread_len = if shown.unread && self.center.unread() > 0 { 18.0 } else { 0.0 };
-        let dnd_len = if shown.dnd && self.dnd { 21.0 } else { 0.0 };
+        // (unread notifications and Do Not Disturb light the island's rim
+        // instead of taking room on its line: see draw_edges)
         let mic_k = if shown.mic { self.mic_dot.value(now).clamp(0.0, 1.2) } else { 0.0 };
         let mic_len = mic_k.min(1.0) * 16.0;
         // --- without the clock: the wings (see COVER) ---
@@ -3124,7 +3128,7 @@ impl Island {
         };
         let middle_len = clock_len + wing * (REST_CONTENT_W + (title_fit - REST_CONTENT_W) * reveal);
         let left_len = chip_len + cover_len + ring_len;
-        let right_len = timer_len + tasks_len + record_len + bars_len + unread_len + dnd_len + mic_len;
+        let right_len = timer_len + tasks_len + record_len + bars_len + mic_len;
         // the shorter wing keeps its items at its end and leaves the room
         // beside the middle, so a song's title stays centred; only a little
         // room, though: a wide editor chip must not leave a long empty wing
@@ -3449,27 +3453,9 @@ impl Island {
                 player::bars(cr, renderer, &self.eq, self.config.accent, bx, dy + (line_h - BARS_H) / 2.0, BARS_W, BARS_H, line_alpha * reveal);
                 cr.restore().unwrap();
             }
-            if unread_len > 0.0 {
-                let bx = after_clock + bars_len + 13.0;
-                cr.arc(bx, dy + line_h / 2.0, 2.7, 0.0, std::f64::consts::TAU);
-                cr.set_source_rgba(0.40, 0.82, 1.0, line_alpha);
-                let _ = cr.fill();
-            }
-            if dnd_len > 0.0 {
-                let mx = after_clock + bars_len + unread_len + 12.0;
-                let my = dy + line_h / 2.0;
-                cr.save().unwrap();
-                cr.set_fill_rule(cairo::FillRule::EvenOdd);
-                cr.arc(mx, my, 5.5, 0.0, std::f64::consts::TAU);
-                cr.new_sub_path();
-                cr.arc(mx + 3.0, my - 2.0, 5.2, 0.0, std::f64::consts::TAU);
-                cr.set_source_rgba(0.72, 0.64, 1.0, line_alpha);
-                let _ = cr.fill();
-                cr.restore().unwrap();
-            }
             if mic_len > 0.3 {
                 // the privacy dot swells in (a touch past full) and shrinks away
-                let mx = after_clock + bars_len + unread_len + dnd_len + 10.5;
+                let mx = after_clock + bars_len + 10.5;
                 let orange = crate::menu_style::ORANGE;
                 cr.new_path();
                 cr.arc(mx, dy + line_h / 2.0, 3.3 * mic_k, 0.0, std::f64::consts::TAU);
@@ -4996,8 +4982,14 @@ impl Island {
         });
         self.edge.set_ambient(ambient);
         // Focus: the frame gathers the screen in a little
-        self.focus_frame.set(if self.dnd && self.config.edge_light { 1.0 } else { 0.0 }, now);
-        self.edge.set_border(FOCUS_FRAME * self.focus_frame.value(now).max(0.0), self.config.screen_corners);
+        // the island's own rim: purple for Do Not Disturb, blue for unread
+        // notifications (purple over blue when both); not while it hides
+        let shown = self.config.compact;
+        let up = self.config.edge_light && !self.is_hidden();
+        self.unread_halo.set(if up && shown.unread && self.center.unread() > 0 { 1.0 } else { 0.0 }, now);
+        let dnd = if up && shown.dnd { self.dnd_glow.value(now).clamp(0.0, 1.0) } else { 0.0 };
+        let unread = self.unread_halo.value(now).clamp(0.0, 1.0) * (1.0 - dnd);
+        self.edge.set_halo(vec![(HALO_DND, HALO_STRENGTH * dnd), (HALO_UNREAD, HALO_STRENGTH * unread)]);
         let cx = cx - self.config.dodge * self.dodge.state(now).x * (1.0 - self.panel.state(now).x);
         let mut painted = self.edge.draw(cr, w, h, cx, self.config.screen_corners, now);
         painted.extend(self.curtain.draw_shutter(cr, w, h, self.config.screen_corners, now));
@@ -7224,5 +7216,57 @@ mod quick_cost {
             times.sort_by(f64::total_cmp);
             println!("quick cycle={cycle} first={first:.3}ms median={:.3}ms max={max:.3}ms >16ms={}", times[times.len() / 2], times.iter().filter(|t| **t > 16.0).count());
         }
+    }
+}
+
+#[cfg(test)]
+mod halo_look {
+    use super::*;
+
+    /// The island's rim: Do Not Disturb (purple), unread notifications
+    /// (blue), close up.
+    fn halo_image() -> cairo::ImageSurface {
+        let (w, h) = (1504.0, 1002.0);
+        let (cw, ch, zoom) = (420.0, 70.0, 2.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (cw * zoom) as i32, (2.0 * ch * zoom) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (row, dnd) in [true, false].into_iter().enumerate() {
+            let renderer = Renderer::new(1.5);
+            let mut island = tests::gallery_island_pub();
+            island.set_dnd(dnd, 9.0);
+            if !dnd {
+                let mut note = crate::notify::fabricate("Telegram", "Hi", ""); note.id = 7; island.center.upsert(note, 9.0);
+            }
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 2256, 300).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            sc.scale(1.5, 1.5);
+            let mut t = 9.0;
+            for _ in 0..90 { island.advance(t); island.draw(&sc, &renderer, w / 2.0, t); island.draw_edges(&sc, w, h, w / 2.0, t); t += 1.0 / 60.0; }
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * ch * zoom);
+            cr.rectangle(0.0, 0.0, cw * zoom, ch * zoom - 2.0);
+            cr.clip();
+            cr.scale(zoom, zoom);
+            cr.translate(cw / 2.0 - w / 2.0, 0.0);
+            cr.set_source_rgb(0.15, 0.32, 0.38);
+            cr.paint().unwrap();
+            island.draw_edges(&cr, w, h, w / 2.0, t);
+            island.draw(&cr, &renderer, w / 2.0, t);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        surface
+    }
+
+    #[test]
+    #[ignore = "writes target/gallery/halo.png"]
+    fn halo() {
+        std::fs::create_dir_all("target/gallery").unwrap();
+        halo_image().write_to_png(&mut std::fs::File::create("target/gallery/halo.png").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_rim_lights_as_before() {
+        crate::golden::check("halo", &halo_image());
     }
 }

@@ -211,7 +211,10 @@ island sends ripples to the corners, whose radius quivers as they arrive;
 lighter ones come from a new notification's pill, a workspace switch (from
 the focus pill, `Bar::take_splash`) and an opening tray menu.
 A screenshot blinks a rounded shutter in from every side
-(`Curtain::shutter`); Do Not Disturb thickens the frame by 4 px. Skipping a
+(`Curtain::shutter`); Do Not Disturb lights the island's own rim purple and
+unread notifications light it blue (`Edge::set_halo`, round its lower edge,
+sides and fillets only; compact keys `dnd` / `unread` switch them), instead of
+a moon and a dot on its line. Skipping a
 track streaks the cover's colour along the top edge; `ambilight` (off by
 default) lights the bottom edge with the cover's colour and the bass.
 Locking or sleeping from the island (Control
