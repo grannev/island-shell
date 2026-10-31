@@ -867,6 +867,9 @@ pub struct Island {
     pub launcher: Option<Launcher>,
     catalog: crate::apps::Catalog,
     launcher_icons: std::rc::Rc<crate::iconload::Icons>,
+    /// the bar's workspaces' applications: their icon names, from the
+    /// desktop entries (forgotten when those change)
+    app_icon_names: HashMap<String, String>,
     file_search: std::rc::Rc<crate::files::Search>,
     clip_search: std::rc::Rc<crate::clipboard::Search>,
     /// Neovim (the companion plugin): the editor's state, the chip that
@@ -1152,6 +1155,7 @@ impl Island {
             launcher: None,
             catalog: crate::apps::Catalog::new(),
             launcher_icons: std::rc::Rc::new(crate::iconload::Icons::new()),
+            app_icon_names: HashMap::new(),
             file_search: std::rc::Rc::new(crate::files::Search::new()),
             clip_search: std::rc::Rc::new(crate::clipboard::Search::new()),
             nvim: None,
@@ -1942,6 +1946,7 @@ impl Island {
     pub fn drain_assets(&mut self, now: Time, scale: f64) -> bool {
         let catalog = self.catalog.drain();
         if catalog {
+            self.app_icon_names.clear();
             // Warm visible icons before the user opens the launcher.
             for app in self.catalog.apps.iter().take(crate::launcher::VISIBLE_ROWS + 2) {
                 if let Some(name) = &app.icon {
@@ -1967,7 +1972,8 @@ impl Island {
                 files |= launcher.receive_clips(generation, history, now);
             }
         }
-        ((catalog || icons) && (self.launcher.is_some() || self.notice.is_some() || self.center.open)) || art || activity || files
+        let bar_apps = self.config.bar && self.bar.workspaces.iter().any(|w| !w.apps.is_empty());
+        ((catalog || icons) && (self.launcher.is_some() || self.notice.is_some() || self.center.open || bar_apps)) || art || activity || files
     }
 
     /// The companion Neovim plugin sent its state.
@@ -5051,6 +5057,19 @@ impl Island {
         self.bar.layout = self.controls.layout.as_deref().map(|l| l.trim_end_matches(" (US)").to_string());
         // a fullscreen window: up into the edge with the island
         self.bar.set_hidden(self.hidden.fullscreen, now);
+        // the workspaces' applications' icons (loaded on the launcher's
+        // worker; until one arrives its button simply has no icon)
+        let px = (crate::bar::APP_ICON * renderer.scale()).round() as i32;
+        let mut icons = HashMap::new();
+        for app in self.bar.workspaces.iter().flat_map(|w| &w.apps) {
+            if icons.contains_key(app) {
+                continue;
+            }
+            let apps = &self.catalog.apps;
+            let name = self.app_icon_names.entry(app.clone()).or_insert_with(|| app_icon_name(apps, app)).clone();
+            icons.insert(app.clone(), self.launcher_icons.get_scaled(&name, px));
+        }
+        self.bar.app_icons = icons;
         let frame = self.bar.draw(cr, renderer, w, self.config.smoothing, now);
         // a workspace switched or a tray menu opened: a ripple from there
         if let Some((x, strength)) = self.bar.take_splash() {
@@ -5088,6 +5107,20 @@ impl Island {
     fn trace_notch_with(&self, cr: &Context, x0: f64, x1: f64, y0: f64, y1: f64, r: f64, fillet: f64) {
         crate::drop::notch(cr, x0, x1, y0, y1, r, fillet, self.config.smoothing);
     }
+}
+
+/// The icon name for a window's application (Wayland app_id or X11 class):
+/// the desktop entry named after it, or one whose icon or name it is, or
+/// the id itself as an icon name.
+fn app_icon_name(apps: &[crate::apps::App], app: &str) -> String {
+    let lower = app.to_lowercase();
+    let stem = |id: &str| id.trim_end_matches(".desktop").to_lowercase();
+    apps.iter().find(|a| stem(&a.id) == lower)
+        .or_else(|| apps.iter().find(|a| stem(&a.id).rsplit('.').next() == Some(lower.as_str())))
+        .or_else(|| apps.iter().find(|a| a.icon.as_deref().is_some_and(|i| i.to_lowercase() == lower)))
+        .or_else(|| apps.iter().find(|a| a.name.to_lowercase() == lower))
+        .and_then(|a| a.icon.clone())
+        .unwrap_or(lower)
 }
 
 /// The waiting fingerprint breathes through three blues (the reference
@@ -6966,7 +6999,7 @@ mod bar_look {
             let mut island = tests::gallery_island_pub();
             island.config.bar = true;
             island.bar.workspaces = ["1", "2", "3", "10"].iter().map(|n| crate::bar::Workspace {
-                name: n.to_string(), focused: *n == "2", urgent: *n == "10", output: "eDP-1".into(),
+                name: n.to_string(), focused: *n == "2", urgent: *n == "10", output: "eDP-1".into(), apps: Vec::new(),
             }).collect();
             island.controls.volume = Some(0.5);
             island.controls.layout = Some("English (US)".into());
@@ -7025,7 +7058,7 @@ mod light_round_drops {
         for (i, t) in rows.into_iter().enumerate() {
             let mut island = tests::gallery_island_pub();
             island.config.bar = true;
-            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into() }).collect();
+            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into(), apps: Vec::new() }).collect();
             island.controls.volume = Some(0.3);
             island.controls.layout = Some("English".into());
             island.bar.battery = Some(crate::bar::Battery { percent: 50, charging: false, remaining: None });
@@ -7069,7 +7102,7 @@ mod ripple_look {
         for (i, t) in rows.into_iter().enumerate() {
             let mut island = tests::gallery_island_pub();
             island.config.bar = true;
-            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into() }).collect();
+            island.bar.workspaces = ["1", "2", "3"].iter().map(|n| crate::bar::Workspace { name: n.to_string(), focused: *n == "1", urgent: false, output: "eDP-1".into(), apps: Vec::new() }).collect();
             island.controls.volume = Some(0.3);
             island.controls.layout = Some("English".into());
             island.bar.battery = Some(crate::bar::Battery { percent: 50, charging: false, remaining: None });

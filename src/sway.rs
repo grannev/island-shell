@@ -156,11 +156,21 @@ impl Query {
     /// Every workspace, for the bar: name, focus, urgency, output.
     pub fn workspaces(&mut self) -> io::Result<Vec<crate::bar::Workspace>> {
         let all = self.request(GET_WORKSPACES, "")?;
-        Ok(all.as_array().map(Vec::as_slice).unwrap_or_default().iter().map(|w| crate::bar::Workspace {
-            name: w["name"].as_str().unwrap_or_default().to_string(),
-            focused: w["focused"] == Value::Bool(true),
-            urgent: w["urgent"] == Value::Bool(true),
-            output: w["output"].as_str().unwrap_or_default().to_string(),
+        let tree = self.request(GET_TREE, "")?;
+        Ok(all.as_array().map(Vec::as_slice).unwrap_or_default().iter().map(|w| {
+            let name = w["name"].as_str().unwrap_or_default().to_string();
+            // the applications on it, in the tree's order, each once
+            let mut apps = Vec::new();
+            if let Some(ws) = find_workspace(&tree, &name) {
+                windows(ws, &mut apps);
+            }
+            crate::bar::Workspace {
+                focused: w["focused"] == Value::Bool(true),
+                urgent: w["urgent"] == Value::Bool(true),
+                output: w["output"].as_str().unwrap_or_default().to_string(),
+                name,
+                apps,
+            }
         }).collect())
     }
 }
@@ -170,6 +180,21 @@ fn find_workspace<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
         return Some(node);
     }
     node["nodes"].as_array()?.iter().find_map(|n| find_workspace(n, name))
+}
+
+/// The applications of the windows under `node` (Wayland app_id, else the
+/// X11 class), each once.
+fn windows(node: &Value, out: &mut Vec<String>) {
+    let id = node["app_id"].as_str().filter(|s| !s.is_empty())
+        .or_else(|| node["window_properties"]["class"].as_str());
+    if let Some(id) = id {
+        if !out.iter().any(|a| a == id) {
+            out.push(id.to_string());
+        }
+    }
+    for child in children(node) {
+        windows(child, out);
+    }
 }
 
 fn children(node: &Value) -> impl Iterator<Item = &Value> {

@@ -713,8 +713,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if list.iter().any(|(_, change)| change == "xkb_layout") {
                                     app.layout_changed();
                                 }
-                                // a workspace event (type 0): the bar's buttons
-                                if list.iter().any(|(kind, _)| *kind == 0) {
+                                // a workspace event (type 0), or a window opened,
+                                // closed or moved (type 3): the bar's buttons
+                                // and the applications on them
+                                if list.iter().any(|(kind, change)| *kind == 0 || (*kind == 3 && matches!(change.as_str(), "new" | "close" | "move"))) {
                                     app.refresh_workspaces();
                                 }
                                 Ok(PostAction::Continue)

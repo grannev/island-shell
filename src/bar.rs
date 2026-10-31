@@ -48,6 +48,12 @@ const MEMORY: &str = "\u{1009D6}";
 /// frame's edge (a tugged island's full ripple is 1).
 const SPLASH_WORKSPACE: f64 = 0.35;
 const SPLASH_MENU: f64 = 0.3;
+/// A workspace's application icons: their size, the gap after its name,
+/// between them, and how many at most.
+pub const APP_ICON: f64 = 15.0;
+const APP_ICON_GAP: f64 = 6.0;
+const APP_ICON_SPACING: f64 = 3.0;
+const APP_ICONS_MAX: usize = 4;
 /// Between a drawn symbol and its text.
 const SYMBOL_GAP: f64 = 5.0;
 
@@ -56,12 +62,14 @@ const MUTED: (f64, f64, f64) = (0x8F as f64 / 255.0, 0xCD as f64 / 255.0, 0xEF a
 const CRITICAL: (f64, f64, f64) = (1.0, 0x8C as f64 / 255.0, 0x42 as f64 / 255.0);
 
 /// A workspace as sway reports it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Workspace {
     pub name: String,
     pub focused: bool,
     pub urgent: bool,
     pub output: String,
+    /// its windows' applications (app_id or class), each once
+    pub apps: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,6 +186,9 @@ pub struct Bar {
     menu: Option<Menu>,
     /// the speaker's, keyboard's and battery's symbols
     glyphs: crate::bar_icons::Glyphs,
+    /// the icons of the workspaces' applications, by app id, at the
+    /// output's scale (None: still loading or none to be had)
+    pub app_icons: HashMap<String, Option<cairo::ImageSurface>>,
     /// something moved in a drop that should ripple the frame's edge: from
     /// where along it (x) and how strongly
     splash: Option<(f64, f64)>,
@@ -227,6 +238,7 @@ impl Default for Bar {
             drops: [None, None],
             menu: None,
             glyphs: Default::default(),
+            app_icons: HashMap::new(),
             splash: None,
             focused: None,
             tug: None,
@@ -563,11 +575,22 @@ impl Bar {
         cells
     }
 
+    /// The icons shown after a workspace's name (only ones that loaded).
+    fn shown_apps<'a>(&'a self, w: &'a Workspace) -> impl Iterator<Item = &'a cairo::ImageSurface> {
+        w.apps.iter().filter_map(|a| self.app_icons.get(a).and_then(Option::as_ref)).take(APP_ICONS_MAX)
+    }
+
+    /// The room a workspace's icons take after its name.
+    fn apps_w(&self, w: &Workspace) -> f64 {
+        let n = self.shown_apps(w).count();
+        if n == 0 { 0.0 } else { APP_ICON_GAP + n as f64 * APP_ICON + (n - 1) as f64 * APP_ICON_SPACING }
+    }
+
     /// The left drop's cells: the workspaces.
     fn left_cells(&self, cr: &Context, renderer: &Renderer) -> Vec<(Cell, Option<String>)> {
         self.my_workspaces().map(|w| {
             let font = if w.focused { Font::BarBold } else { Font::Bar };
-            let width = renderer.layout(cr, &w.name, font).pixel_extents().1.width() as f64 + 2.0 * WS_PAD + 2.0 * WS_MARGIN;
+            let width = renderer.layout(cr, &w.name, font).pixel_extents().1.width() as f64 + self.apps_w(w) + 2.0 * WS_PAD + 2.0 * WS_MARGIN;
             (Cell { item: Item::Workspace(w.name.clone()), width }, Some(w.name.clone()))
         }).collect()
     }
@@ -640,8 +663,23 @@ impl Bar {
                         cr.set_source_rgba(CRITICAL.0, CRITICAL.1, CRITICAL.2, 0.18);
                         let _ = cr.fill();
                     }
+                    // the name, then its applications' icons
+                    let icons: Vec<cairo::ImageSurface> = self.shown_apps(&ws).cloned().collect();
+                    let apps_w = self.apps_w(&ws);
                     clipped(cr, Rect { x, y: 0.0, w: *slot_w, h: HEIGHT }, || {
-                        centred_text(cr, renderer, text, font, x + slot_w / 2.0, colour, alpha);
+                        let tw = renderer.layout(cr, text, font).pixel_extents().1.width() as f64;
+                        let start = x + (slot_w - tw - apps_w) / 2.0;
+                        centred_text(cr, renderer, text, font, start + tw / 2.0, colour, alpha);
+                        let mut ix = start + tw + APP_ICON_GAP;
+                        for icon in &icons {
+                            cr.save().unwrap();
+                            cr.translate(renderer.snap(ix), renderer.snap((HEIGHT - APP_ICON) / 2.0));
+                            cr.scale(APP_ICON / icon.width() as f64, APP_ICON / icon.height() as f64);
+                            let _ = cr.set_source_surface(icon, 0.0, 0.0);
+                            let _ = cr.paint_with_alpha(if ws.focused { 1.0 } else { 0.7 });
+                            cr.restore().unwrap();
+                            ix += APP_ICON + APP_ICON_SPACING;
+                        }
                     });
                 }
                 self.slots.push((cell.item.clone(), Rect { x, y: y.max(0.0), w: *slot_w, h: HEIGHT + y }));
@@ -956,7 +994,7 @@ mod tests {
     fn bar() -> Bar {
         let mut bar = Bar::default();
         bar.workspaces = ["1", "2", "3", "10"].iter().map(|n| Workspace {
-            name: n.to_string(), focused: *n == "3", urgent: false, output: "eDP-1".into(),
+            name: n.to_string(), focused: *n == "3", urgent: false, output: "eDP-1".into(), apps: Vec::new(),
         }).collect();
         bar.output = Some("eDP-1".into());
         bar.volume = Some((0.5, false));
@@ -1128,6 +1166,24 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_shows_its_applications_icons() {
+        let mut bar = bar();
+        settle(&mut bar, 10.0);
+        let width = |bar: &Bar| bar.slots.iter().find(|(i, _)| *i == Item::Workspace("2".into())).unwrap().1.w;
+        let plain = width(&bar);
+        bar.workspaces[1].apps = vec!["foot".into(), "firefox".into()];
+        // still loading: no room taken yet
+        settle(&mut bar, 12.0);
+        assert!((width(&bar) - plain).abs() < 0.5);
+        let icon = cairo::ImageSurface::create(cairo::Format::ARgb32, 22, 22).unwrap();
+        bar.app_icons.insert("foot".into(), Some(icon.clone()));
+        bar.app_icons.insert("firefox".into(), Some(icon));
+        settle(&mut bar, 14.0);
+        let grown = width(&bar) - plain;
+        assert!((grown - (APP_ICON_GAP + 2.0 * APP_ICON + APP_ICON_SPACING)).abs() < 0.5, "{grown}");
+    }
+
+    #[test]
     fn the_batterys_tip_says_how_long() {
         assert_eq!(battery_tip(Battery { percent: 84, charging: false, remaining: Some(192) }), "Осталось 3 ч 12 мин");
         assert_eq!(battery_tip(Battery { percent: 40, charging: true, remaining: Some(45) }), "Заряжается · до полной 45 мин");
@@ -1224,5 +1280,37 @@ mod tug_look {
         }
         drop(cr);
         surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-tug.png").unwrap()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod workspace_apps_look {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-workspaces.png"]
+    fn workspaces_with_apps() {
+        let renderer = Renderer::new(1.5);
+        let loader = crate::iconload::Loader::new();
+        let (w, h, zoom) = (300.0, 40.0, 3.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        let mut bar = Bar::default();
+        let ws = |name: &str, focused, apps: &[&str]| Workspace { name: name.into(), focused, apps: apps.iter().map(|a| a.to_string()).collect(), ..Default::default() };
+        bar.workspaces = vec![ws("1", false, &["firefox-esr"]), ws("2", true, &["Alacritty", "org.telegram.desktop"]), ws("3", false, &[])];
+        for app in ["firefox-esr", "Alacritty", "org.telegram.desktop"] {
+            let name = if app == "Alacritty" { "Alacritty" } else { app };
+            bar.app_icons.insert(app.into(), loader.get_scaled(name, (APP_ICON * 1.5) as i32));
+        }
+        let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 100).unwrap();
+        let sc = Context::new(&scratch).unwrap();
+        let mut t = 10.0;
+        for _ in 0..90 { bar.draw(&sc, &renderer, 1504.0, 0.6, t); t += 1.0 / 60.0; }
+        cr.scale(zoom, zoom);
+        cr.set_source_rgb(0.18, 0.35, 0.40);
+        cr.paint().unwrap();
+        bar.draw(&cr, &renderer, 1504.0, 0.6, t);
+        drop(cr);
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-workspaces.png").unwrap()).unwrap();
     }
 }

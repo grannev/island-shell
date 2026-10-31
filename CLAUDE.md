@@ -252,7 +252,9 @@ become stray stroked lines.
 
 The bar (`src/bar.rs`): two drops of the frame pressed into the top
 corners, 32 px like the island (an empty top-layer surface reserves the room,
-`BarReserve`): workspaces (sway events, a sliding focus pill, click / scroll)
+`BarReserve`): workspaces (sway events, a sliding focus pill, click / scroll,
+up to four icons of the applications on each from the sway tree, resolved
+through the desktop entries and loaded on the launcher's icon worker)
 left; the drawer (disk / CPU / memory sampled only while open,
 `bar_sources.rs`), volume (click mute, scroll 5 %), layout (click: wvkbd),
 battery (tooltip with the time left) and the tray right; the speaker, keyboard
