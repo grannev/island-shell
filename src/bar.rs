@@ -462,7 +462,8 @@ impl Bar {
     fn draw_overview_hint(&self, cr: &Context, dw: f64, pull: f64, now: Time) {
         let armed = self.tug.as_ref().filter(|t| t.side == 0).and_then(|t| t.armed);
         let fired = self.overview_fired.map(|t| now - t).filter(|t| *t < 0.35);
-        let k = crate::island::smoothstep((pull - 6.0) / (OVERVIEW_AT - 6.0));
+        // (it comes up only once there is room for it under the focus pill)
+        let k = crate::island::smoothstep((pull - 12.0) / (OVERVIEW_AT - 12.0));
         let (scale, alpha) = match (armed, fired) {
             (_, Some(t)) => (1.0 + 0.8 * crate::island::smoothstep(t / 0.35), 1.0 - crate::island::smoothstep(t / 0.35)),
             (Some(a), None) => (crate::menu_style::bounce_scale(now - a), 1.0),
@@ -474,13 +475,14 @@ impl Bar {
         cr.save().unwrap();
         cr.translate(cx, cy);
         cr.scale(scale, scale);
+        cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
         for (i, j) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             let x = -tile - gap / 2.0 + i * (tile + gap);
             let y = -tile - gap / 2.0 + j * (tile + gap);
+            // (each its own path: rounded() starts a fresh one)
             crate::menu_style::rounded(cr, x, y, tile, tile, 1.6);
+            let _ = cr.fill();
         }
-        cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
-        let _ = cr.fill();
         cr.restore().unwrap();
     }
 
@@ -1300,6 +1302,41 @@ mod tests {
         settle(&mut bar, 13.0);
         assert!((bar.drop_sizes()[1].unwrap().h - HEIGHT).abs() < 0.5);
         assert!(!bar.is_animating(15.0));
+    }
+
+    /// `cargo test bar_overview_look -- --ignored`: the left drop pulled
+    /// short of the overview, to it, and past it, into target/gallery.
+    #[test]
+    #[ignore = "writes target/gallery/bar-overview.png"]
+    fn bar_overview_look() {
+        let renderer = Renderer::new(1.5);
+        let (w, h, zoom) = (300.0, 90.0, 2.0);
+        let pulls = [25.0, 70.0, 160.0];
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom * pulls.len() as f64) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (row, pull) in pulls.into_iter().enumerate() {
+            let mut bar = bar();
+            bar.overview = true;
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 200).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            let mut t = 10.0;
+            for _ in 0..90 { bar.draw(&sc, &renderer, 800.0, 0.6, t); t += 1.0 / 60.0; }
+            let left = bar.drops[0].unwrap();
+            bar.tug_press(left.w / 2.0, 16.0, t);
+            bar.tug_to(left.w / 2.0, 16.0 + pull, t + 0.05);
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * h * zoom);
+            cr.rectangle(0.0, 0.0, w * zoom, h * zoom - 2.0);
+            cr.clip();
+            cr.scale(zoom, zoom);
+            cr.set_source_rgb(0.18, 0.35, 0.40);
+            cr.paint().unwrap();
+            bar.draw(&cr, &renderer, 800.0, 0.6, t + 0.7);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        std::fs::create_dir_all("target/gallery").unwrap();
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-overview.png").unwrap()).unwrap();
     }
 
     #[test]
