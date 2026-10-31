@@ -36,6 +36,10 @@ use smithay_client_toolkit::{
             presentation_time::client::wp_presentation_feedback::{self, WpPresentationFeedback},
             viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
         },
+        protocols::ext::idle_notify::v1::client::{
+            ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+            ext_idle_notifier_v1::ExtIdleNotifierV1,
+        },
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -73,6 +77,10 @@ use crate::compositor;
 /// input region only ever covers the island itself.
 const SURFACE_W: u32 = 980;
 const SURFACE_H: u32 = 640;
+
+/// The seat counts as idle (the companion falls asleep) after this long
+/// without input.
+const IDLE_AFTER_MS: u32 = 120_000;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -330,6 +338,9 @@ pub struct App {
     frame_stats: FrameStats,
     pointer: Option<wl_pointer::WlPointer>,
     touch: Option<wl_touch::WlTouch>,
+    /// the seat going idle and coming back (the companion sleeps)
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle_notification: Option<ExtIdleNotificationV1>,
     /// the finger on the island, as pointer events
     gesture: crate::touch::Touch,
     /// the long press waiting for a resting finger
@@ -427,6 +438,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let presentation = PresentationTimeState::bind(&globals, &qh);
     let viewporter: WpViewporter = bind_global(&globals, &qh, 1)?;
     let fractional_mgr: Option<WpFractionalScaleManagerV1> = bind_global(&globals, &qh, 1).ok();
+    let idle_notifier: Option<ExtIdleNotifierV1> = bind_global(&globals, &qh, 1).ok();
     if fractional_mgr.is_none() {
         eprintln!("island-shell: wp_fractional_scale_v1 not offered, rendering at scale 1");
     }
@@ -509,6 +521,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         frame_stats: FrameStats::default(),
         pointer: None,
         touch: None,
+        idle_notifier,
+        idle_notification: None,
         gesture: crate::touch::Touch::default(),
         touch_hold: None,
         touch_sticky: false,
@@ -2074,6 +2088,7 @@ impl App {
         self.island.set_notice_hover(-1.0, -1.0, now);
         self.island.set_eq_hover(-1.0, -1.0, now);
         self.island.set_editor_chip_hover(-1.0, -1.0, now);
+        self.island.mascot_pointer(None, now);
         self.island.set_editor_hover(None);
         if !self.island.is_scrubbing() {
             self.island.set_hovered_control(None);
@@ -2351,6 +2366,11 @@ impl SeatHandler for App {
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
         }
+        if self.idle_notification.is_none() {
+            if let Some(notifier) = &self.idle_notifier {
+                self.idle_notification = Some(notifier.get_idle_notification(IDLE_AFTER_MS, &seat, qh, ()));
+            }
+        }
         // with a wl_touch of its own the island hears fingers as fingers
         // (otherwise sway turns them into clicks, and nothing scrolls)
         if capability == Capability::Touch && self.touch.is_none() {
@@ -2490,6 +2510,7 @@ impl App {
                     self.island.set_notice_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_eq_hover(event.position.0, event.position.1, self.clock.predict(false));
                     self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false));
+                    self.island.mascot_pointer(Some(event.position), self.clock.predict(false));
                     changed = true;
                 }
                 PointerEventKind::Leave { .. } => {
@@ -2529,6 +2550,9 @@ impl App {
                         changed = true;
                     }
                     if self.island.set_editor_chip_hover(event.position.0, event.position.1, self.clock.predict(false)) {
+                        changed = true;
+                    }
+                    if self.island.mascot_pointer(Some(event.position), self.clock.predict(false)) {
                         changed = true;
                     }
                     if self.hover_launcher_row() {
@@ -2760,6 +2784,11 @@ impl App {
                         changed = true;
                         continue;
                     }
+                    // a click on the companion pokes it
+                    if button == BTN_LEFT && self.island.poke_mascot_at(event.position.0, event.position.1, now) {
+                        changed = true;
+                        continue;
+                    }
                     let music = self.island.music_area_at(event.position.0, event.position.1);
                     let menu = self.island.accepts_quick_menu_click() && self.pointer_inside_island(event.position);
                     match body_click(button, music, menu) {
@@ -2868,6 +2897,13 @@ impl App {
             self.island.close_quick_menu(now);
         }
         match action {
+            Action::Mascot => {
+                self.island.toggle_mascot(now);
+                let value = self.island.config.compact.describe();
+                if let Err(e) = persist_setting("compact", &value) {
+                    eprintln!("island-shell: config: {e}");
+                }
+            }
             Action::Night => {
                 let on = self.island.toggle_night(now);
                 let _ = self.controls.send(Request::Night(on.then_some(self.island.config.night_temp)));
@@ -3243,6 +3279,23 @@ impl KeyboardHandler for App {
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
+    }
+}
+
+impl Dispatch<ExtIdleNotifierV1, ()> for App {
+    fn event(_: &mut Self, _: &ExtIdleNotifierV1, _: <ExtIdleNotifierV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ExtIdleNotificationV1, ()> for App {
+    fn event(app: &mut Self, _: &ExtIdleNotificationV1, event: ext_idle_notification_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        let idle = match event {
+            ext_idle_notification_v1::Event::Idled => true,
+            ext_idle_notification_v1::Event::Resumed => false,
+            _ => return,
+        };
+        let now = app.frame_time();
+        app.island.set_idle(idle, now);
+        app.after_change();
     }
 }
 

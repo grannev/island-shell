@@ -30,6 +30,7 @@ mod files;
 mod floating;
 mod island;
 mod launcher;
+mod mascot;
 mod menu_style;
 mod motion;
 mod launch;

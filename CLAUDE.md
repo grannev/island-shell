@@ -276,6 +276,10 @@ entrance timestamps are separate from last-update timestamps: key repeat only
 extends the hold. Cairo icon helpers start fresh paths so text positions never
 become stray stroked lines.
 
+The companion (`src/mascot.rs`, compact key `mascot`, the Control Center's
+«Друг» tile) lives at the line's left end: blinks / glances on deadlines
+only, reactions queued in `Island::mascot_react` until a pill leaves the
+line, asleep while ext-idle-notify reports the seat idle (2 min).
 The bar (`src/bar.rs`): two drops of the frame pressed into the top
 corners, 32 px like the island (an empty top-layer surface reserves the room,
 `BarReserve`): workspaces (sway events, a sliding focus pill, click / scroll,

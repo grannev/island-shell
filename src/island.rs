@@ -336,6 +336,9 @@ fn slider_of(kind: activity::SliderKind) -> quick::Slider {
 const SLIDER_SPRING: f64 = 0.16;
 /// the window for the logout button's confirming second press
 const LOGOUT_CONFIRM: f64 = 3.0;
+/// How long a companion's reaction waits for a pill to leave the line.
+const MASCOT_PATIENCE: f64 = 8.0;
+const MASCOT_BEAT: f64 = 0.12;
 
 /// What the closed island shows at rest (`compact = clock music …`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -349,15 +352,17 @@ pub struct Compact {
     pub unread: bool,
     pub dnd: bool,
     pub mic: bool,
+    /// the companion at the line's left end (`src/mascot.rs`)
+    pub mascot: bool,
 }
 
 impl Compact {
-    pub const NAMES: [&'static str; 9] = ["clock", "editor", "timer", "tasks", "record", "music", "unread", "dnd", "mic"];
+    pub const NAMES: [&'static str; 10] = ["clock", "editor", "timer", "tasks", "record", "music", "unread", "dnd", "mic", "mascot"];
     pub const ALL: Compact = Compact {
-        clock: true, editor: true, timer: true, tasks: true, record: true, music: true, unread: true, dnd: true, mic: true,
+        clock: true, editor: true, timer: true, tasks: true, record: true, music: true, unread: true, dnd: true, mic: true, mascot: true,
     };
     pub const NONE: Compact = Compact {
-        clock: false, editor: false, timer: false, tasks: false, record: false, music: false, unread: false, dnd: false, mic: false,
+        clock: false, editor: false, timer: false, tasks: false, record: false, music: false, unread: false, dnd: false, mic: false, mascot: false,
     };
 
     fn slot(&mut self, name: &str) -> Option<&mut bool> {
@@ -371,6 +376,7 @@ impl Compact {
             "unread" => &mut self.unread,
             "dnd" => &mut self.dnd,
             "mic" => &mut self.mic,
+            "mascot" | "companion" | "friend" => &mut self.mascot,
             _ => return None,
         })
     }
@@ -1024,6 +1030,14 @@ pub struct Island {
     nvim_saved: Option<Time>,
     chip: Quintic,
     chip_w: f64,
+    /// the companion at the left end of the line, how far it is in, and
+    /// where it was last drawn
+    pub mascot: crate::mascot::Mascot,
+    mascot_chip: Quintic,
+    mascot_rect: Option<Rect>,
+    /// a reaction waiting for a pill to leave the line
+    mascot_pending: Option<(crate::mascot::Reaction, Time)>,
+    mascot_saw_timer: bool,
     /// Vorssaint's floating buttons beside an open page: how far out they
     /// are, which is lit, which was pressed, and the page they stand beside
     /// once they have arrived (for the pointer).
@@ -1191,6 +1205,7 @@ pub fn smoothstep(x: f64) -> f64 {
 impl Island {
     pub fn new(config: Config) -> Self {
         let dnd = notice_center::load_dnd();
+        let mascot_on = config.compact.mascot;
         crate::weather::configure(&config.weather);
         Island {
             hide: Quintic::at_rest(0.0, HIDE_DUR),
@@ -1313,6 +1328,11 @@ impl Island {
             nvim_saved: None,
             chip: Quintic::at_rest(0.0, CHIP_DUR),
             chip_w: 0.0,
+            mascot: crate::mascot::Mascot::new(0.0),
+            mascot_chip: Quintic::at_rest(if mascot_on { 1.0 } else { 0.0 }, CHIP_DUR),
+            mascot_rect: None,
+            mascot_pending: None,
+            mascot_saw_timer: false,
             floats: Spring::new(0.0, FLOAT_RESPONSE, FLOAT_DAMPING),
             tug: None,
             edge: crate::edge::Edge::default(),
@@ -1409,6 +1429,8 @@ impl Island {
             || (self.tasks_chip.state(now).x > 0.0 || self.tasks_pill_shown()) && self.tasks.is_animating(now)
             || self.panel.is_moving(now)
             || self.chip.is_moving(now)
+            || self.mascot_chip.is_moving(now)
+            || self.mascot_on_line() && self.mascot.is_animating(now)
             || self.clock_chip.is_moving(now)
             || self.floats.is_moving(now)
             || self.tug.is_none() && (self.tug_x.is_moving(now) || self.tug_y.is_moving(now))
@@ -1581,6 +1603,12 @@ impl Island {
         self.music_chip.set(if shown.music { 1.0 } else { 0.0 }, now);
         let chip = shown.editor && self.editor_live(now) && !self.hidden.any() && !self.dodged && !self.pill_open() && self.launcher.is_none();
         self.chip.set(if chip { 1.0 } else { 0.0 }, now);
+        self.mascot_chip.set(if shown.mascot { 1.0 } else { 0.0 }, now);
+        // a timer starting gets a determined little nod
+        if self.timer.is_some() && !self.mascot_saw_timer {
+            self.mascot_react(crate::mascot::Reaction::Nod, now);
+        }
+        self.mascot_saw_timer = self.timer.is_some();
         let timer = shown.timer && self.timer.is_some() && !self.hidden.any() && !self.dodged && self.launcher.is_none();
         for (action, spring) in self.quick_hover_springs.iter_mut() {
             if self.quick_hover != Some(*action) { spring.set(0.0, now); }
@@ -1652,6 +1680,18 @@ impl Island {
         }
         if let Some(launcher) = &mut self.launcher { changed |= launcher.advance(now); }
         changed |= self.side_hud.advance(now);
+        if self.mascot_on_line() {
+            if let Some((reaction, at)) = self.mascot_pending {
+                if now - at > MASCOT_PATIENCE {
+                    self.mascot_pending = None;
+                } else if now - at >= MASCOT_BEAT && !self.pill_open() && self.pill.state(now).x < 0.05 {
+                    self.mascot_pending = None;
+                    self.mascot.react(reaction, now);
+                    changed = true;
+                }
+            }
+            changed |= self.mascot.advance(now);
+        }
         if self.connections_open() {
             if let Some(panel) = &mut self.network_panel { changed |= panel.advance(now); }
         }
@@ -1813,6 +1853,12 @@ impl Island {
         if let Some(t) = self.side_hud.deadline() {
             consider(t);
         }
+        if self.mascot_on_line() {
+            if let Some(t) = self.mascot.deadline(now) { consider(t); }
+            if let Some((_, at)) = self.mascot_pending {
+                if !self.pill_open() && !self.pill.is_moving(now) { consider((at + MASCOT_BEAT).max(now)); }
+            }
+        }
         if let Some(timer) = &self.timer {
             if timer.running && timer.counts_up() {
                 // the stopwatch's next second
@@ -1933,6 +1979,10 @@ impl Island {
     /// The active player changed (or went away). A track that starts
     /// announces itself with a toast, the way a notification arrives.
     pub fn set_player(&mut self, np: Option<&crate::dbus::NowPlaying>, now: Time) {
+        // music starting (not a new track in a running stream) cheers the companion
+        if np.is_some_and(|np| np.playing) && !self.song.as_ref().is_some_and(|s| s.now.playing) {
+            self.mascot_react(crate::mascot::Reaction::Happy, now);
+        }
         match (np, &mut self.song) {
             (None, _) => {
                 self.song = None;
@@ -2243,6 +2293,7 @@ impl Island {
     pub fn notify(&mut self, note: crate::notify::Notification, now: Time) {
         self.center.upsert(note.clone(), now);
         if self.dnd && !note.critical { return; }
+        self.mascot_react(if note.critical { crate::mascot::Reaction::Shake } else { crate::mascot::Reaction::Startle }, now);
         // Touch ID owns the pill, and the launcher owns the whole island:
         // the notification waits its turn
         if self.auth.is_some() || self.activity.is_some() || self.launcher.is_some() || self.center.open {
@@ -2325,6 +2376,18 @@ impl Island {
     /// takes the pill from a notification; Touch ID and the launcher still
     /// keep ownership until they close.
     pub fn live_activity(&mut self, event: activity::Event, now: Time) {
+        {
+            use crate::mascot::Reaction;
+            let reaction = match &event {
+                activity::Event::Charging { .. } | activity::Event::Bluetooth { .. } | activity::Event::Recording { .. } => Some(Reaction::Happy),
+                activity::Event::Screenshot { .. } => Some(Reaction::Flash),
+                activity::Event::TimerDone { .. } => Some(Reaction::Cheer),
+                activity::Event::BatteryLow { .. } => Some(Reaction::Shake),
+                activity::Event::RecordCountdown => Some(Reaction::Startle),
+                _ => None,
+            };
+            if let Some(r) = reaction { self.mascot_react(r, now); }
+        }
         // the battery's states light the frame's bottom corners
         match event {
             activity::Event::Charging { .. } => {
@@ -2827,9 +2890,64 @@ impl Island {
 
     /// The applications recording from a microphone changed.
     pub fn set_mic_users(&mut self, apps: Vec<String>, now: Time) {
+        if self.mic_users.is_empty() && !apps.is_empty() {
+            self.mascot_react(crate::mascot::Reaction::Startle, now);
+        }
         self.mic_dot.set(if apps.is_empty() { 0.0 } else { 1.0 }, now);
         self.mic_users = apps;
         self.sync(now);
+    }
+
+    /// Is the companion out on a closed line someone can see?
+    fn mascot_on_line(&self) -> bool {
+        self.config.compact.mascot && !self.is_hidden() && !self.pill_open() && self.launcher.is_none()
+    }
+
+    /// The companion answers something the island saw. A pill covering
+    /// the line keeps the answer until the line is back (a few seconds at
+    /// most), so it is seen.
+    pub fn mascot_react(&mut self, reaction: crate::mascot::Reaction, now: Time) {
+        // it plays a beat later, from `advance`: whatever brought it
+        // (a notification, a live activity) may be opening a pill first
+        if self.config.compact.mascot {
+            self.mascot_pending = Some((reaction, now));
+        }
+    }
+
+    /// The pointer moved over the island (None: it left): the companion's
+    /// eyes follow it.
+    pub fn mascot_pointer(&mut self, at: Option<(f64, f64)>, now: Time) -> bool {
+        if !self.mascot_on_line() { return false; }
+        let Some(r) = self.mascot_rect else { return self.mascot.look_at(None, now) };
+        let rel = at.map(|(px, py)| (px - (r.x + r.w / 2.0), py - (r.y + r.h / 2.0)));
+        self.mascot.look_at(rel, now)
+    }
+
+    /// The Control Center's tile: the companion comes out or goes in.
+    /// Returns whether it is on now.
+    pub fn toggle_mascot(&mut self, now: Time) -> bool {
+        let on = !self.config.compact.mascot;
+        self.config.compact.mascot = on;
+        self.quick_bounced.insert(quick::Action::Mascot, now);
+        if on {
+            // it arrives glad to be out
+            self.mascot_pending = Some((crate::mascot::Reaction::Happy, now + CHIP_DUR));
+        }
+        self.sync(now);
+        on
+    }
+
+    /// A left click on the companion pokes it.
+    pub fn poke_mascot_at(&mut self, px: f64, py: f64, now: Time) -> bool {
+        let Some(r) = self.mascot_rect else { return false };
+        if !(px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) || !self.mascot_on_line() { return false; }
+        self.mascot.react(crate::mascot::Reaction::Poke, now);
+        true
+    }
+
+    /// The seat went idle or came back (ext-idle-notify).
+    pub fn set_idle(&mut self, idle: bool, now: Time) {
+        self.mascot.set_idle(idle, now);
     }
 
     /// Unfold the month (a right click on the clock, `island-shell calendar`).
@@ -2862,7 +2980,7 @@ impl Island {
         if self.config.compact.clock { return self.clock_rect.is_some_and(|r| inside(&r)); }
         self.line_rect.is_some_and(|r| inside(&r))
             && ![self.eq_rect, self.cover_rect, self.timer_rect, self.timer_mark_rect, self.tasks_rect, self.record_rect,
-                self.editor_chip_rect].iter().flatten().any(inside)
+                self.editor_chip_rect, self.mascot_rect].iter().flatten().any(inside)
     }
 
     /// The timer's chip: its reading, and its ring when the wings part them.
@@ -3081,6 +3199,7 @@ impl Island {
             Some(false) => self.auth = Some(Auth::Fail(now)),
             None => return,
         }
+        self.mascot_react(if result == Some(true) { crate::mascot::Reaction::Happy } else { crate::mascot::Reaction::Shake }, now);
         if self.config.edge_light {
             use crate::edge::{Wave, FAILURE_RED, SUCCESS_GREEN};
             let (wave, colour) = if result == Some(true) { (Wave::Flash, SUCCESS_GREEN) } else { (Wave::Shudder, FAILURE_RED) };
@@ -3243,6 +3362,7 @@ impl Island {
         self.eq_rect = None;
         self.player_rect = None;
         self.editor_chip_rect = None;
+        self.mascot_rect = None;
         let shown = self.config.compact;
         // (unread notifications and Do Not Disturb light the island's rim
         // instead of taking room on its line: see draw_edges)
@@ -3276,7 +3396,9 @@ impl Island {
             }
         };
         let middle_len = clock_len + wing * (REST_CONTENT_W + (title_fit - REST_CONTENT_W) * reveal);
-        let left_len = chip_len + cover_len + ring_len;
+        let mascot_k = self.mascot_chip.state(now).x;
+        let mascot_len = mascot_k * (crate::mascot::WIDTH + crate::mascot::GAP);
+        let left_len = mascot_len + chip_len + cover_len + ring_len;
         let right_len = timer_len + tasks_len + record_len + bars_len + mic_len;
         // the shorter wing keeps its items at its end and leaves the room
         // beside the middle, so a song's title stays centred; only a little
@@ -3479,6 +3601,24 @@ impl Island {
         }
         if line_alpha > 0.0 {
             let content_x = cx - content_w / 2.0;
+            if mascot_len > 0.5 {
+                // the companion grows in at the line's left end
+                let mx = content_x + crate::mascot::WIDTH / 2.0 * mascot_k;
+                let my = dy + line_h / 2.0 + 0.5;
+                if mascot_k > 0.95 && line_alpha > 0.95 && !self.pill_open() {
+                    self.mascot_rect = Some(Rect { x: content_x - 4.0, y: dy, w: crate::mascot::WIDTH + 8.0, h: line_h });
+                }
+                let beat = if self.song.as_ref().is_some_and(|s| s.playing()) {
+                    self.eq.iter().take(2).copied().fold(0.0, f64::max).clamp(0.0, 1.0)
+                } else { 0.0 };
+                cr.save().unwrap();
+                cr.translate(mx, my);
+                cr.scale(mascot_k.max(0.01), mascot_k.max(0.01));
+                cr.translate(-mx, -my);
+                self.mascot.draw(cr, mx, my, line_alpha * mascot_k * mascot_k, beat, now);
+                cr.restore().unwrap();
+            }
+            let content_x = content_x + mascot_len;
             if chip_len > 1.0 {
                 if chip_k > 0.95 && line_alpha > 0.95 && ed < 0.05 && self.nvim.is_some() {
                     self.editor_chip_rect = Some(Rect { x: content_x, y: dy, w: chip_len, h: line_h });
@@ -4199,6 +4339,7 @@ impl Island {
             timer: self.timer.as_ref().map(|t| (t.reading(now), t.running)),
             recording: self.recorder.then_some(self.recording.is_some()),
             night: self.night_glow.value(now),
+            mascot: self.mascot_chip.state(now).x,
         }
     }
 
@@ -6358,9 +6499,41 @@ mod tests {
             renderer.layout_ellipsized(&cr, "Stable", Font::Text, 200.00001, 1));
     }
 
+    /// The default config without the companion, whose blinks and
+    /// reactions add deadlines and frames of their own.
+    fn no_mascot() -> Config {
+        let mut config = Config::default();
+        config.compact.mascot = false;
+        config
+    }
+
+    #[test]
+    fn the_companion_answers_after_a_pill_leaves_and_its_tile_puts_it_away() {
+        let mut island = Island::new(Config::default());
+        island.sync(1.0);
+        island.advance(2.0);
+        // a notification opens the pill: the startle waits for the line
+        island.notify(crate::notify::fabricate("Telegram", "Alice", "Hi"), 10.0);
+        island.advance(10.2);
+        assert!(island.mascot_pending.is_some());
+        island.dismiss_notice(10.5);
+        let mut t = 10.5;
+        while island.mascot_pending.is_some() && t < 13.0 {
+            t += 1.0 / 60.0;
+            island.advance(t);
+        }
+        assert!(island.mascot_pending.is_none(), "played once the pill folded");
+        assert!(island.mascot.is_animating(t));
+        // the tile turns it off: no more deadlines of its own
+        assert!(!island.toggle_mascot(20.0));
+        assert!(!island.config.compact.mascot);
+        assert!(island.deadline(30.0).is_none());
+        assert!(island.toggle_mascot(31.0));
+    }
+
     #[test]
     fn steady_countdown_uses_deadlines_instead_of_continuous_frame_callbacks() {
-        let mut island = Island::new(Config::default());
+        let mut island = Island::new(no_mascot());
         island.timer_command("25m", 10.0).unwrap();
         island.advance(12.0);
         assert!(!island.is_animating(12.0));
@@ -6619,7 +6792,7 @@ mod tests {
 
     #[test]
     fn level_changes_slide_out_at_the_side_and_leave_the_island_alone() {
-        let mut island = Island::new(Config::default());
+        let mut island = Island::new(no_mascot());
         for i in 0..60 {
             let time = 10.0 + i as f64 * 0.05;
             island.live_activity(activity::Event::Slider {
@@ -7055,6 +7228,7 @@ mod command_tests {
     fn without_the_clock_the_island_rests_as_a_short_capsule_and_right_click_opens_the_month() {
         let mut config = Config::default();
         config.compact.clock = false;
+        config.compact.mascot = false;
         let mut island = Island::new(config);
         island.advance(1.0);
         let renderer = Renderer::new(1.5);
@@ -7492,6 +7666,8 @@ mod halo_look {
         for (row, (dnd, tug)) in [(true, false), (false, false), (true, true)].into_iter().enumerate() {
             let renderer = Renderer::new(1.5);
             let mut island = tests::gallery_island_pub();
+            island.config.compact.mascot = false;
+            island.mascot_chip = Quintic::at_rest(0.0, CHIP_DUR);
             island.set_dnd(dnd, 9.0);
             if !dnd {
                 let mut note = crate::notify::fabricate("Telegram", "Hi", ""); note.id = 7; island.center.upsert(note, 9.0);

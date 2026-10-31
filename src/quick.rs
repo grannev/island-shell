@@ -72,6 +72,8 @@ pub struct Status {
     pub recording: Option<bool>,
     /// night mode, eased 0..1
     pub night: f64,
+    /// the companion is out, eased 0..1
+    pub mascot: f64,
 }
 
 /// The environment as the menu last read it.
@@ -253,6 +255,8 @@ pub enum Action {
     Record,
     /// night mode on the display module
     Night,
+    /// the companion on the closed line, on or off
+    Mascot,
     Lock,
     Sleep,
     Logout,
@@ -278,15 +282,15 @@ pub enum Hit {
 }
 
 /// The shortcut rail, in reading (and keyboard) order.
-const SHORTCUTS: [Action; 13] = [
-    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night, Action::Launcher,
-    Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+const SHORTCUTS: [Action; 14] = [
+    Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night, Action::Mascot,
+    Action::Launcher, Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
 ];
 /// Keyboard order of the main page (the transport buttons come first
 /// while something plays, see the island's `quick_keys`).
-pub const ACTIONS: [Action; 14] = [
+pub const ACTIONS: [Action; 15] = [
     Action::Outputs, Action::Wifi, Action::Bluetooth, Action::Timer, Action::Notifications, Action::Dnd, Action::Night,
-    Action::Launcher, Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
+    Action::Mascot, Action::Launcher, Action::Screenshot, Action::Record, Action::Layout, Action::Lock, Action::Sleep, Action::Logout,
 ];
 
 pub fn height(view: View, controls: &Controls) -> f64 {
@@ -1033,6 +1037,7 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
         Action::Notifications => (if status.unread > 0 { 1.0 } else { 0.0 }, menu_style::RED),
         Action::Dnd => (dnd, menu_style::PURPLE),
         Action::Night => (night, menu_style::ORANGE),
+        Action::Mascot => (status.mascot.clamp(0.0, 1.0), crate::mascot::COLOUR),
         Action::Record => (if recording { 1.0 } else { 0.0 }, menu_style::RED),
         Action::Logout => (if armed { 1.0 } else { 0.0 }, menu_style::RED),
         Action::Wifi | Action::Bluetooth => (1.0, menu_style::BLUE),
@@ -1062,6 +1067,10 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
                     icon(cr, action, wx, wy, alpha, 0.68);
                 }
                 Action::Night => glyph(cr, "sunset", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
+                Action::Mascot => {
+                    cr.set_source_rgba(1.0, 1.0, 1.0, alpha);
+                    crate::mascot::symbol(cr, wx, wy + 0.5, 0.82);
+                }
                 Action::Record => glyph(cr, "record", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Screenshot => glyph(cr, "screenshot", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
                 Action::Layout => glyph(cr, "keyboard", wx, wy, 1.0, (1.0, 1.0, 1.0, alpha)),
@@ -1084,6 +1093,7 @@ fn draw_shortcut(cr: &Context, renderer: &Renderer, rect: Rect, action: Action, 
             },
             Action::Dnd => "Тишина".to_string(),
             Action::Night => "Ночь".to_string(),
+            Action::Mascot => "Друг".to_string(),
             Action::Launcher => "Поиск".to_string(),
             Action::Record => if recording { "Стоп".to_string() } else { "Запись".to_string() },
             Action::Screenshot => "Скриншот".to_string(),

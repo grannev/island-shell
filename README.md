@@ -569,9 +569,9 @@ at the beginning of a line or as a separate word), read at start;
     night_temp = 4500     # night mode's colour temperature, K
     weather = auto        # the calendar's weather: auto, a city, lat,lon or off
     compact = all         # what the closed island shows: all, none, or a list of
-                          # clock editor timer tasks record music unread dnd mic
+                          # clock editor timer tasks record music unread dnd mic mascot
     timer_sound = on      # the timer ruler's ticks and the alarm
-    screen_corners = 16   # radius of the screen's rounded corners, px (0 = square)
+    screen_corners = 11.2 # radius of the screen's rounded corners, px (0 = square)
     edge_light = on       # light along the screen's edges (notifications, Touch ID)
     ambilight = off       # music lights the bottom edge in the cover's colour
     bar = on              # Waybar's row in the island's corner drops (off: run Waybar again)
@@ -585,6 +585,20 @@ little so the title stays centred). The cover answers like the equaliser, and
 the ring like the timer's reading. `island-shell compact
 clock off` (or `on`, `toggle`) changes one item in the running island and writes
 the new list to the config file, so it survives a restart.
+
+**The companion** (`mascot`, after Vorssaint's): a small coral capsule with
+two soft black eyes at the left end of the closed line. It blinks now and
+then, glances about, follows the pointer over the island, bobs to the
+music's bass, and answers what the island sees — a startled hop for a
+notification or the microphone opening, smiling eyes for a Touch ID match,
+music starting, power or a Bluetooth device, a head shake for a failed
+match, a critical notification or a low battery, two hops when a timer runs
+out, a hard blink for a screenshot, a nod when a timer starts. A reaction to
+something that opened a pill plays once the line is back. After two minutes
+without input (ext-idle-notify) it falls asleep, a "z" drifting up for a
+while; it wakes with a stretch. A click pokes it. The Control Center's
+«Друг» tile (or `island-shell compact mascot toggle`) puts it away or brings
+it back, and the choice is saved.
 
 Monitors: `auto` puts the island on the laptop's own panel (eDP/LVDS/DSI),
 else on the first output; `focused` follows sway's focused output; a
