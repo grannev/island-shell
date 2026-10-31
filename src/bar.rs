@@ -429,7 +429,8 @@ impl Bar {
             || self.washes.values().any(|s| s.is_moving(now))
             || self.glyphs.is_animating(now)
             || (self.drawer && self.history_scroll.is_moving(now))
-            || self.tug.is_some()
+            // (a drop in the hand needs no frames of its own: each move of
+            // the pointer draws one, and a lost release must not spin)
             || self.stretch.iter().any(|s| s.is_moving(now))
     }
 

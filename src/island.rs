@@ -5114,13 +5114,28 @@ impl Island {
 /// the id itself as an icon name.
 fn app_icon_name(apps: &[crate::apps::App], app: &str) -> String {
     let lower = app.to_lowercase();
-    let stem = |id: &str| id.trim_end_matches(".desktop").to_lowercase();
-    apps.iter().find(|a| stem(&a.id) == lower)
-        .or_else(|| apps.iter().find(|a| stem(&a.id).rsplit('.').next() == Some(lower.as_str())))
-        .or_else(|| apps.iter().find(|a| a.icon.as_deref().is_some_and(|i| i.to_lowercase() == lower)))
-        .or_else(|| apps.iter().find(|a| a.name.to_lowercase() == lower))
+    // an install's own suffix, as Telegram's "org.telegram.desktop._932c…",
+    // comes off
+    let base = lower.split("._").next().unwrap_or(&lower).to_string();
+    let stem = |id: &str| {
+        let id = id.trim_end_matches(".desktop").to_lowercase();
+        id.split("._").next().unwrap_or(&id).to_string()
+    };
+    apps.iter().find(|a| stem(&a.id) == lower || stem(&a.id) == base)
+        .or_else(|| apps.iter().find(|a| stem(&a.id).rsplit('.').next() == Some(base.as_str())))
+        .or_else(|| apps.iter().find(|a| a.icon.as_deref().is_some_and(|i| i.to_lowercase() == base)))
+        .or_else(|| apps.iter().find(|a| a.name.to_lowercase() == base))
         .and_then(|a| a.icon.clone())
-        .unwrap_or(lower)
+        .unwrap_or(base)
+}
+
+#[cfg(test)]
+mod app_icon_tests {
+    #[test]
+    fn an_installs_suffix_comes_off_the_app_id() {
+        assert_eq!(super::app_icon_name(&[], "org.telegram.desktop._932c0ad30864a01d88aba96ef934f12e"), "org.telegram.desktop");
+        assert_eq!(super::app_icon_name(&[], "Alacritty"), "alacritty");
+    }
 }
 
 /// The waiting fingerprint breathes through three blues (the reference
