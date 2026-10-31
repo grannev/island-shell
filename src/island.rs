@@ -5150,15 +5150,17 @@ pub enum Font {
     Bar,
     /// the bar's focused workspace, Black 16
     BarBold,
+    /// the percentage inside the bar's battery, Bold 10.5
+    BatteryDigits,
 }
 
 const FONT_MEDIUM: &str = "SF Pro Text Medium";
 
 impl Font {
-    const ALL: [Font; 15] = [
+    const ALL: [Font; 16] = [
         Font::Text, Font::Caption, Font::Small, Font::Tiny, Font::Query,
         Font::Title, Font::Headline, Font::Body, Font::Subhead, Font::Label, Font::Footnote,
-        Font::Clock, Font::ClockSmall, Font::Bar, Font::BarBold,
+        Font::Clock, Font::ClockSmall, Font::Bar, Font::BarBold, Font::BatteryDigits,
     ];
 
     fn face(self) -> (&'static str, f64) {
@@ -5178,6 +5180,7 @@ impl Font {
             Font::ClockSmall => (FONT_REGULAR, 28.0),
             Font::Bar => (FONT_MEDIUM, 16.0),
             Font::BarBold => ("SF Pro Text Black", 16.0),
+            Font::BatteryDigits => ("SF Pro Text Bold", 10.5),
         }
     }
 }

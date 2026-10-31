@@ -44,14 +44,11 @@ const ELLIPSIS: &str = "\u{100360}";
 const DISK: &str = "\u{1009D8}";
 const CPU: &str = "\u{1009D3}";
 const MEMORY: &str = "\u{1009D6}";
-const SPEAKER: [&str; 3] = ["\u{1002A5}", "\u{1002A7}", "\u{1002A9}"];
-const SPEAKER_MUTED: &str = "\u{1002A3}";
-const KEYBOARD: &str = "\u{100E91}";
-const BATTERY: [&str; 5] = ["\u{1006EA}", "\u{1006E9}", "\u{100EB6}", "\u{100EB8}", "\u{1006E8}"];
-const BOLT: &str = "\u{10088B}";
+/// Between a drawn symbol and its text.
+const SYMBOL_GAP: f64 = 5.0;
 
 const MUTED: (f64, f64, f64) = (0x8F as f64 / 255.0, 0xCD as f64 / 255.0, 0xEF as f64 / 255.0);
-const WARNING: (f64, f64, f64) = (1.0, 0xD1 as f64 / 255.0, 0x66 as f64 / 255.0);
+/// Urgent workspaces.
 const CRITICAL: (f64, f64, f64) = (1.0, 0x8C as f64 / 255.0, 0x42 as f64 / 255.0);
 
 /// A workspace as sway reports it.
@@ -175,6 +172,8 @@ pub struct Bar {
     slots: Vec<(Item, Rect)>,
     drops: [Option<Rect>; 2],
     menu: Option<Menu>,
+    /// the speaker's, keyboard's and battery's symbols
+    glyphs: crate::bar_icons::Glyphs,
 }
 
 impl Default for Bar {
@@ -197,6 +196,7 @@ impl Default for Bar {
             slots: Vec::new(),
             drops: [None, None],
             menu: None,
+            glyphs: Default::default(),
         }
     }
 }
@@ -275,6 +275,7 @@ impl Bar {
             || self.focus_x.as_ref().is_some_and(|s| s.is_moving(now))
             || self.focus_w.as_ref().is_some_and(|s| s.is_moving(now))
             || self.washes.values().any(|s| s.is_moving(now))
+            || self.glyphs.is_animating(now)
     }
 
     /// The item under a point of the surface, if the bar is there.
@@ -389,17 +390,19 @@ impl Bar {
             }
         }
         cells.push((Cell { item: Item::Details, width: text_w(ELLIPSIS) + 2.0 * PAD_DETAILS }, Some(ELLIPSIS.to_string())));
-        if let Some((value, muted)) = self.volume {
-            let text = volume_text(value, muted);
-            cells.push((Cell { item: Item::Volume, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+        // the drawn symbols, their text after them
+        if let Some((value, _)) = self.volume {
+            let text = format!("{}%", (value * 100.0).round() as u32);
+            let width = crate::bar_icons::SPEAKER_W + SYMBOL_GAP + text_w(&text) + 2.0 * PAD;
+            cells.push((Cell { item: Item::Volume, width }, Some(text)));
         }
         if let Some(layout) = &self.layout {
-            let text = format!("{KEYBOARD} {layout}");
-            cells.push((Cell { item: Item::Layout, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+            let width = crate::bar_icons::KEYBOARD_W + SYMBOL_GAP + text_w(layout) + 2.0 * PAD;
+            cells.push((Cell { item: Item::Layout, width }, Some(layout.clone())));
         }
-        if let Some(b) = self.battery {
-            let text = battery_text(b);
-            cells.push((Cell { item: Item::Battery, width: text_w(&text) + 2.0 * PAD }, Some(text)));
+        if self.battery.is_some() {
+            let width = self.glyphs.battery_target_w() + 2.0 * PAD;
+            cells.push((Cell { item: Item::Battery, width }, Some(String::new())));
         }
         for icon in &self.tray {
             cells.push((Cell { item: Item::Tray(icon.id.clone()), width: TRAY_ICON + TRAY_SPACING }, None));
@@ -431,6 +434,12 @@ impl Bar {
 
     /// Paint both drops on a surface `w` wide.
     pub fn draw(&mut self, cr: &Context, renderer: &Renderer, w: f64, smoothing: f64, now: Time) -> BarFrame {
+        if let Some((value, muted)) = self.volume {
+            self.glyphs.volume(value, muted, now);
+        }
+        if let Some(b) = self.battery {
+            self.glyphs.battery(b.percent, b.charging, now);
+        }
         let left = self.left_cells(cr, renderer);
         let right = self.right_cells(cr, renderer);
         let left_w = self.animate(&left, now);
@@ -527,10 +536,31 @@ impl Bar {
                     (item, Some(text)) => {
                         let pad = if *item == Item::Details { PAD_DETAILS } else { PAD };
                         let colour = self.colour_of(item);
-                        let key = format!("bar {item:?}");
-                        let lh = renderer.layout(cr, text, Font::Bar).pixel_extents().1;
-                        crate::motion::text(cr, renderer, &key, text, x + pad, (HEIGHT - lh.height() as f64) / 2.0 - lh.y() as f64,
-                            (slot_w - pad).max(4.0) + 40.0, 0.0, Font::Bar, colour, 1.0);
+                        // a drawn symbol first, then the text after it
+                        let cy = HEIGHT / 2.0;
+                        let symbol = match item {
+                            Item::Volume => {
+                                self.glyphs.draw_speaker(cr, x + pad, cy, colour, 1.0, now);
+                                crate::bar_icons::SPEAKER_W + SYMBOL_GAP
+                            }
+                            Item::Layout => {
+                                crate::bar_icons::draw_keyboard(cr, renderer, x + pad, cy, colour, 1.0);
+                                crate::bar_icons::KEYBOARD_W + SYMBOL_GAP
+                            }
+                            Item::Battery => {
+                                if let Some(b) = self.battery {
+                                    self.glyphs.draw_battery(cr, renderer, x + pad, cy, b.percent, 1.0, now);
+                                }
+                                0.0
+                            }
+                            _ => 0.0,
+                        };
+                        if !text.is_empty() {
+                            let key = format!("bar {item:?}");
+                            let lh = renderer.layout(cr, text, Font::Bar).pixel_extents().1;
+                            crate::motion::text(cr, renderer, &key, text, x + pad + symbol, (HEIGHT - lh.height() as f64) / 2.0 - lh.y() as f64,
+                                (slot_w - pad - symbol).max(4.0) + 40.0, 0.0, Font::Bar, colour, 1.0);
+                        }
                     }
                     _ => {}
                 });
@@ -658,11 +688,6 @@ impl Bar {
     fn colour_of(&self, item: &Item) -> (f64, f64, f64) {
         match item {
             Item::Volume if self.volume.is_some_and(|(_, m)| m) => MUTED,
-            Item::Battery => match self.battery {
-                Some(b) if !b.charging && b.percent <= 15 => CRITICAL,
-                Some(b) if !b.charging && b.percent <= 30 => WARNING,
-                _ => (1.0, 1.0, 1.0),
-            },
             _ => (1.0, 1.0, 1.0),
         }
     }
@@ -676,18 +701,6 @@ impl Bar {
             let _ = cr.fill();
         }
     }
-}
-
-/// The volume as Waybar wrote it: the speaker by level, or struck through.
-fn volume_text(value: f64, muted: bool) -> String {
-    let percent = (value * 100.0).round() as u32;
-    let icon = if muted { SPEAKER_MUTED } else if percent <= 33 { SPEAKER[0] } else if percent <= 66 { SPEAKER[1] } else { SPEAKER[2] };
-    format!("{icon} {percent}%")
-}
-
-fn battery_text(b: Battery) -> String {
-    let icon = if b.charging { BOLT } else { BATTERY[((b.percent as usize) * 5 / 100).min(4)] };
-    format!("{icon} {}%", b.percent)
 }
 
 /// The battery's tooltip: how long it lasts, or until it is full.
@@ -857,5 +870,46 @@ mod tests {
         let frame = settle(&mut bar, 12.0);
         assert!(frame.input.is_empty());
         assert!(!bar.contains(5.0, 10.0));
+    }
+}
+
+#[cfg(test)]
+mod symbols_look {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes target/gallery/bar-symbols.png"]
+    fn symbols() {
+        let states: [(f64, bool, u8, bool); 6] = [
+            (0.2, false, 84, false), (0.5, false, 50, false), (0.9, false, 100, false),
+            (0.5, true, 15, false), (0.7, false, 60, true), (0.0, false, 7, false),
+        ];
+        let (w, h, zoom) = (330.0, 34.0, 3.0);
+        let surface = cairo::ImageSurface::create(cairo::Format::Rgb24, (w * zoom) as i32, (h * zoom * states.len() as f64) as i32).unwrap();
+        let cr = Context::new(&surface).unwrap();
+        for (row, (volume, muted, percent, charging)) in states.into_iter().enumerate() {
+            // (each its own renderer: rolling digits remember their text)
+            let renderer = Renderer::new(1.5);
+            let mut bar = Bar::default();
+            bar.volume = Some((volume, muted));
+            bar.layout = Some("English".into());
+            bar.battery = Some(Battery { percent, charging, remaining: None });
+            let scratch = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 60).unwrap();
+            let sc = Context::new(&scratch).unwrap();
+            let mut t = 10.0;
+            for _ in 0..120 { bar.draw(&sc, &renderer, w, 0.6, t); t += 1.0 / 60.0; }
+            cr.save().unwrap();
+            cr.translate(0.0, row as f64 * h * zoom);
+            cr.rectangle(0.0, 0.0, w * zoom, h * zoom - 2.0);
+            cr.clip();
+            cr.scale(zoom, zoom);
+            cr.set_source_rgb(0.18, 0.35, 0.40);
+            cr.paint().unwrap();
+            bar.draw(&cr, &renderer, w, 0.6, t);
+            cr.restore().unwrap();
+        }
+        drop(cr);
+        std::fs::create_dir_all("target/gallery").unwrap();
+        surface.write_to_png(&mut std::fs::File::create("target/gallery/bar-symbols.png").unwrap()).unwrap();
     }
 }
